@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kiro-security-power.invalid/schemas/scan-manifest.schema.json",
+  "title": "Kiro Security Power completed scan manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["documentType", "schemaVersion", "scan"],
+  "properties": {
+    "documentType": { "const": "kiro-security-power.scan-manifest" },
+    "schemaVersion": { "const": "1.0" },
+    "scan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "producer", "status", "startedAt", "completedAt", "sealedAt", "target", "scope", "coverageRef", "findingsRef", "artifacts"],
+      "properties": {
+        "id": { "type": "string" },
+        "producer": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "version"],
+          "properties": { "name": { "const": "kiro-security-power" }, "version": { "type": "string" } }
+        },
+        "status": { "const": "completed" },
+        "startedAt": { "type": "string", "format": "date-time" },
+        "completedAt": { "type": "string", "format": "date-time" },
+        "sealedAt": { "type": "string", "format": "date-time" },
+        "target": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["kind", "targetId", "displayName"],
+          "properties": {
+            "kind": { "enum": ["git_revision", "git_worktree", "git_diff", "directory_snapshot"] },
+            "targetId": { "type": "string" },
+            "displayName": { "type": "string" },
+            "revision": { "type": ["string", "null"] },
+            "baseRevision": { "type": ["string", "null"] },
+            "headRevision": { "type": ["string", "null"] },
+            "snapshotDigest": { "type": ["string", "null"] }
+          }
+        },
+        "scope": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["includePaths", "excludePaths"],
+          "properties": {
+            "includePaths": { "type": "array", "items": { "type": "string" } },
+            "excludePaths": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "threatModel": { "type": "object", "additionalProperties": true, "required": ["summary"] },
+        "hardening": { "type": "object", "additionalProperties": false, "required": ["portfolioPath"], "properties": { "portfolioPath": { "const": "hardening/hardening.md" } } },
+        "coverageRef": { "const": "coverage.json" },
+        "findingsRef": { "const": "findings.json" },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "sha256", "mediaType"],
+            "properties": {
+              "path": { "type": "string" },
+              "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+              "mediaType": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

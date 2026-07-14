@@ -1,0 +1,375 @@
+{
+  "name": "kiro-security-power",
+  "displayName": "Kiro Security Power",
+  "description": "Integrated repository security scanning, validation, attack-path analysis, triage, remediation guidance, and durable workbench state for Kiro IDE.",
+  "version": "0.3.0",
+  "publisher": "kiro-security-power-dev",
+  "license": "UNLICENSED",
+  "private": true,
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "kiro",
+    "security",
+    "appsec",
+    "sarif",
+    "threat-model"
+  ],
+  "main": "./dist/extension/extension.js",
+  "activationEvents": [
+    "onView:kiroSecurity.securityView",
+    "onCommand:kiroSecurity.openPanel",
+    "onCommand:kiroSecurity.openPanelRight",
+    "onCommand:kiroSecurity.startStandardScan",
+    "onCommand:kiroSecurity.startDeepScan",
+    "onCommand:kiroSecurity.scanGitChanges",
+    "onCommand:kiroSecurity.refreshThreatModel",
+    "onCommand:kiroSecurity.resumeLastScan",
+    "onCommand:kiroSecurity.cancelActiveScan",
+    "onCommand:kiroSecurity.openFinding",
+    "onCommand:kiroSecurity.validateFinding",
+    "onCommand:kiroSecurity.exportReport",
+    "onCommand:kiroSecurity.openLogs",
+    "onCommand:kiroSecurity.configure",
+    "onUri",
+    "onCommand:kiroSecurity.showFindingDetails",
+    "onCommand:kiroSecurity.createRemediation",
+    "onCommand:kiroSecurity.createTrackingHandoff",
+    "onCommand:kiroSecurity.installAgentIntegration",
+    "onCommand:kiroSecurity.verifyAgentIntegration",
+    "onCommand:kiroSecurity.removeAgentIntegration",
+    "onCommand:kiroSecurity.openMcpConfig",
+    "onCommand:kiroSecurity.revealPowerBundle",
+    "onCommand:kiroSecurity.retryEngine"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Security scans execute repository analysis code and Git commands. Trust the workspace before enabling Kiro Security Power."
+    },
+    "virtualWorkspaces": {
+      "supported": false,
+      "description": "The engine requires a local filesystem and SQLite workbench."
+    }
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "kiroSecurity.openPanel",
+        "title": "Kiro Security: Open Security Panel",
+        "category": "Kiro Security",
+        "icon": "$(shield)"
+      },
+      {
+        "command": "kiroSecurity.openPanelRight",
+        "title": "Kiro Security: Open Security Panel on Right",
+        "category": "Kiro Security",
+        "icon": "$(layout-sidebar-right)"
+      },
+      {
+        "command": "kiroSecurity.startStandardScan",
+        "title": "Kiro Security: Start Standard Scan",
+        "category": "Kiro Security",
+        "icon": "$(play)"
+      },
+      {
+        "command": "kiroSecurity.startDeepScan",
+        "title": "Kiro Security: Start Deep Scan",
+        "category": "Kiro Security",
+        "icon": "$(search-fuzzy)"
+      },
+      {
+        "command": "kiroSecurity.scanGitChanges",
+        "title": "Kiro Security: Scan Git Changes",
+        "category": "Kiro Security",
+        "icon": "$(git-compare)"
+      },
+      {
+        "command": "kiroSecurity.refreshThreatModel",
+        "title": "Kiro Security: Create or Refresh Threat Model",
+        "category": "Kiro Security"
+      },
+      {
+        "command": "kiroSecurity.resumeLastScan",
+        "title": "Kiro Security: Resume Last Scan",
+        "category": "Kiro Security",
+        "icon": "$(debug-continue)"
+      },
+      {
+        "command": "kiroSecurity.cancelActiveScan",
+        "title": "Kiro Security: Cancel Active Scan",
+        "category": "Kiro Security",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "kiroSecurity.openFinding",
+        "title": "Kiro Security: Open Finding",
+        "category": "Kiro Security"
+      },
+      {
+        "command": "kiroSecurity.validateFinding",
+        "title": "Kiro Security: Validate Finding",
+        "category": "Kiro Security"
+      },
+      {
+        "command": "kiroSecurity.exportReport",
+        "title": "Kiro Security: Export Report",
+        "category": "Kiro Security",
+        "icon": "$(export)"
+      },
+      {
+        "command": "kiroSecurity.openLogs",
+        "title": "Kiro Security: Open Logs",
+        "category": "Kiro Security"
+      },
+      {
+        "command": "kiroSecurity.configure",
+        "title": "Kiro Security: Configure",
+        "category": "Kiro Security",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "kiroSecurity.showFindingDetails",
+        "title": "Show Kiro Security Finding Details",
+        "category": "Kiro Security"
+      },
+      {
+        "command": "kiroSecurity.createRemediation",
+        "title": "Create Kiro Security Remediation Guidance",
+        "category": "Kiro Security"
+      },
+      {
+        "command": "kiroSecurity.createTrackingHandoff",
+        "title": "Create Kiro Security Tracking Handoff",
+        "category": "Kiro Security"
+      },
+      {
+        "command": "kiroSecurity.installAgentIntegration",
+        "title": "Kiro Security: Install or Repair Agent Integration",
+        "category": "Kiro Security",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "kiroSecurity.verifyAgentIntegration",
+        "title": "Kiro Security: Verify Agent Integration",
+        "category": "Kiro Security",
+        "icon": "$(verified)"
+      },
+      {
+        "command": "kiroSecurity.removeAgentIntegration",
+        "title": "Kiro Security: Remove Agent Integration",
+        "category": "Kiro Security",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "kiroSecurity.openMcpConfig",
+        "title": "Kiro Security: Open MCP Configuration",
+        "category": "Kiro Security",
+        "icon": "$(json)"
+      },
+      {
+        "command": "kiroSecurity.revealPowerBundle",
+        "title": "Kiro Security: Show Optional Power Bundle",
+        "category": "Kiro Security",
+        "icon": "$(package)"
+      },
+      {
+        "command": "kiroSecurity.retryEngine",
+        "title": "Kiro Security: Retry Engine",
+        "category": "Kiro Security",
+        "icon": "$(debug-restart)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "kiroSecurity",
+          "title": "Kiro Security",
+          "icon": "media/security.svg"
+        }
+      ]
+    },
+    "views": {
+      "kiroSecurity": [
+        {
+          "type": "webview",
+          "id": "kiroSecurity.securityView",
+          "name": "Security",
+          "icon": "media/security.svg",
+          "contextualTitle": "Kiro Security Power"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "kiroSecurity.securityView",
+        "contents": "Trust and open a local workspace to use Kiro Security Power.\n[Open a folder](command:vscode.openFolder)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "kiroSecurity.startStandardScan",
+          "when": "view == kiroSecurity.securityView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "kiroSecurity.cancelActiveScan",
+          "when": "view == kiroSecurity.securityView && kiroSecurity.scanActive",
+          "group": "navigation@2"
+        },
+        {
+          "command": "kiroSecurity.openPanelRight",
+          "when": "view == kiroSecurity.securityView",
+          "group": "navigation@3"
+        },
+        {
+          "command": "kiroSecurity.installAgentIntegration",
+          "when": "view == kiroSecurity.securityView",
+          "group": "navigation@4"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "kiroSecurity.startStandardScan",
+          "when": "resourceScheme == file && isInWorkspace",
+          "group": "kiroSecurity@10"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "kiroSecurity.startStandardScan",
+          "when": "resourceScheme == file",
+          "group": "kiroSecurity@10"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Kiro Security Power",
+      "properties": {
+        "kiroSecurity.pythonPath": {
+          "type": "string",
+          "default": "python3",
+          "description": "Python executable used for the bundled security engine and Agent MCP runtime. Python 3.9 or newer with sqlite3 is required; the executable is invoked directly with an argument array."
+        },
+        "kiroSecurity.agentIntegration.scope": {
+          "type": "string",
+          "enum": [
+            "workspace",
+            "user"
+          ],
+          "default": "workspace",
+          "enumDescriptions": [
+            "Write MCP and steering integration under the current workspace .kiro directory.",
+            "Write MCP and steering integration under the current user ~/.kiro directory."
+          ],
+          "description": "Default scope used by Install Agent Integration. The Setup confirmation always shows exact files before modification."
+        },
+        "kiroSecurity.agentIntegration.autoApprove": {
+          "type": "string",
+          "enum": [
+            "none",
+            "read_only"
+          ],
+          "default": "read_only",
+          "enumDescriptions": [
+            "Require approval for every security tool.",
+            "Pre-approve only capability, scan status, progress, and finding read operations."
+          ],
+          "description": "Safe MCP auto-approval policy installed by the Setup flow. Scan, triage, remediation, tracking, hardening, and export tools are never auto-approved."
+        },
+        "kiroSecurity.defaultMode": {
+          "type": "string",
+          "enum": [
+            "standard",
+            "deep",
+            "diff"
+          ],
+          "default": "standard",
+          "description": "Default scan mode shown in the Security dashboard."
+        },
+        "kiroSecurity.defaultScope": {
+          "type": "string",
+          "default": ".",
+          "description": "Workspace-relative default scan scope."
+        },
+        "kiroSecurity.autoRefreshSeconds": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 60,
+          "default": 2,
+          "description": "Polling interval used to reconcile scans started by the VSIX, Power, or MCP adapter."
+        },
+        "kiroSecurity.showValidatedDiagnostics": {
+          "type": "boolean",
+          "default": true,
+          "description": "Publish validated findings to the Problems view."
+        },
+        "kiroSecurity.telemetry.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Reserved opt-in telemetry switch. Version 0.3.0 does not transmit telemetry."
+        },
+        "kiroSecurity.maxFiles": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000,
+          "default": 10000,
+          "description": "Maximum files inspected in one scan."
+        },
+        "kiroSecurity.maxFileBytes": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 10485760,
+          "default": 1048576,
+          "description": "Maximum bytes read from one source file."
+        }
+      }
+    },
+    "jsonValidation": [
+      {
+        "fileMatch": "**/.kiro/security-power/artifacts/**/findings.json",
+        "url": "./engine/schemas/findings.schema.json"
+      },
+      {
+        "fileMatch": "**/.kiro/security-power/artifacts/**/coverage.json",
+        "url": "./engine/schemas/coverage.schema.json"
+      },
+      {
+        "fileMatch": "**/.kiro/security-power/artifacts/**/scan-manifest.json",
+        "url": "./engine/schemas/scan-manifest.schema.json"
+      }
+    ]
+  },
+  "scripts": {
+    "clean": "node scripts/clean.mjs",
+    "build": "node scripts/build.mjs",
+    "watch": "node scripts/build.mjs --watch",
+    "lint": "tsc -p tsconfig.json --noEmit && python3 -m compileall -q engine",
+    "test": "npm run build && node scripts/run-test-groups.mjs unit",
+    "test:protocol": "npm run build && node --test dist/tests/protocol-contract.test.js && python3 -m pytest -q engine/tests/test_protocol.py",
+    "test:webview": "npm run build && node --test dist/tests/webview-state.test.js dist/tests/webview-harness.test.js",
+    "test:integration": "npm run build && node scripts/run-test-groups.mjs integration",
+    "package": "npm run clean && npm run build && node scripts/package.mjs",
+    "verify": "npm run lint && npm test && npm run test:integration && npm run package"
+  },
+  "devDependencies": {
+    "@types/jsdom": "21.1.7",
+    "@types/node": "22.15.21",
+    "@types/vscode": "1.85.0",
+    "@vscode/vsce": "3.4.2",
+    "esbuild": "0.25.5",
+    "jsdom": "26.1.0",
+    "typescript": "5.8.3"
+  },
+  "dependencies": {
+    "jsonc-parser": "3.3.1"
+  }
+}

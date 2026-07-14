@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kiro-security-power.invalid/schemas/protocol.schema.json",
+  "title": "Kiro Security Power JSON-RPC envelope",
+  "oneOf": [
+    { "$ref": "#/$defs/request" },
+    { "$ref": "#/$defs/response" },
+    { "$ref": "#/$defs/notification" }
+  ],
+  "$defs": {
+    "version": { "const": "1.0" },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "protocolVersion", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "protocolVersion": { "$ref": "#/$defs/version" },
+        "id": { "type": ["integer", "string"] },
+        "method": { "type": "string", "minLength": 1 },
+        "params": { "type": "object" }
+      }
+    },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "protocolVersion", "id"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "protocolVersion": { "$ref": "#/$defs/version" },
+        "id": { "type": ["integer", "string", "null"] },
+        "result": {},
+        "error": {
+          "type": "object",
+          "required": ["code", "message"],
+          "properties": { "code": { "type": "integer" }, "message": { "type": "string" }, "data": {} }
+        }
+      },
+      "oneOf": [ { "required": ["result"] }, { "required": ["error"] } ]
+    },
+    "notification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["jsonrpc", "protocolVersion", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "protocolVersion": { "$ref": "#/$defs/version" },
+        "method": {
+          "enum": ["engine.ready", "scan.started", "scan.phaseChanged", "scan.progress", "finding.discovered", "finding.updated", "artifact.created", "scan.completed", "scan.cancelled", "scan.failed", "engine.log"]
+        },
+        "params": { "type": "object" }
+      }
+    }
+  }
+}

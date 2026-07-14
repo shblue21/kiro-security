@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kiro-security-power.invalid/schemas/local-verification-result.schema.json",
+  "title": "Kiro Security Power local desktop verification result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "productVersion",
+    "vsixPath",
+    "kiroExecutable",
+    "testedAt",
+    "platform",
+    "checks",
+    "notes"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0"
+    },
+    "productVersion": {
+      "type": "string",
+      "minLength": 1
+    },
+    "vsixPath": {
+      "type": "string",
+      "minLength": 1
+    },
+    "kiroExecutable": {
+      "type": "string",
+      "minLength": 1
+    },
+    "testedAt": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "platform": {
+      "type": "string",
+      "minLength": 1
+    },
+    "checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "installed",
+        "activityBarIcon",
+        "secondarySideBar",
+        "nativePowerPrepared",
+        "agentCapabilities",
+        "agentSetupVerified",
+        "standardScan",
+        "liveProgress",
+        "realFinding",
+        "sourceNavigation",
+        "problemsDiagnostic",
+        "exports",
+        "historyAfterRestart",
+        "resumeInterruptedScan",
+        "mcpToVsix",
+        "vsixToMcp",
+        "disableAndUninstall"
+      ],
+      "properties": {
+        "installed": {
+          "$ref": "#/$defs/check"
+        },
+        "activityBarIcon": {
+          "$ref": "#/$defs/check"
+        },
+        "secondarySideBar": {
+          "$ref": "#/$defs/check"
+        },
+        "standardScan": {
+          "$ref": "#/$defs/check"
+        },
+        "liveProgress": {
+          "$ref": "#/$defs/check"
+        },
+        "realFinding": {
+          "$ref": "#/$defs/check"
+        },
+        "sourceNavigation": {
+          "$ref": "#/$defs/check"
+        },
+        "problemsDiagnostic": {
+          "$ref": "#/$defs/check"
+        },
+        "exports": {
+          "$ref": "#/$defs/check"
+        },
+        "historyAfterRestart": {
+          "$ref": "#/$defs/check"
+        },
+        "resumeInterruptedScan": {
+          "$ref": "#/$defs/check"
+        },
+        "mcpToVsix": {
+          "$ref": "#/$defs/check"
+        },
+        "vsixToMcp": {
+          "$ref": "#/$defs/check"
+        },
+        "disableAndUninstall": {
+          "$ref": "#/$defs/check"
+        },
+        "agentSetupVerified": {
+          "$ref": "#/$defs/check"
+        },
+        "agentCapabilities": {
+          "$ref": "#/$defs/check"
+        },
+        "nativePowerPrepared": {
+          "$ref": "#/$defs/check"
+        }
+      }
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "check": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    }
+  }
+}

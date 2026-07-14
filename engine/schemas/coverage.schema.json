@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://kiro-security-power.invalid/schemas/coverage.schema.json",
+  "title": "Kiro Security Power coverage",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["documentType", "schemaVersion", "scanId", "mode", "completeness", "inventoryStrategy", "includePaths", "excludePaths", "surfaces", "explicitExclusions", "deferred"],
+  "properties": {
+    "documentType": { "const": "kiro-security-power.coverage" },
+    "schemaVersion": { "const": "1.0" },
+    "scanId": { "type": "string" },
+    "mode": { "enum": ["repository", "scoped_path", "diff", "commit", "branch_diff", "working_tree", "deep_repository"] },
+    "completeness": { "enum": ["complete", "partial", "unknown"] },
+    "inventoryStrategy": { "enum": ["repository", "scoped_path", "diff", "directory", "custom"] },
+    "includePaths": { "type": "array", "items": { "type": "string" } },
+    "excludePaths": { "type": "array", "items": { "type": "string" } },
+    "surfaces": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["id", "label", "disposition", "receiptRefs"],
+        "properties": {
+          "id": { "type": "string" },
+          "label": { "type": "string" },
+          "disposition": { "enum": ["reported", "no_issue_found", "rejected", "not_applicable", "needs_follow_up"] },
+          "receiptRefs": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "explicitExclusions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["pattern", "reason"],
+        "properties": { "pattern": { "type": "string" }, "reason": { "type": "string" } }
+      }
+    },
+    "deferred": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["id", "reason"],
+        "properties": { "id": { "type": "string" }, "reason": { "type": "string" } }
+      }
+    },
+    "openQuestions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["question"],
+        "properties": { "question": { "type": "string" }, "followUpPrompt": { "type": "string" } }
+      }
+    }
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "1.0",
+  "productVersion": "0.2.0",
+  "vsixPath": "/absolute/path/to/kiro-security-power-0.2.0.vsix",
+  "kiroExecutable": "/absolute/path/to/kiro",
+  "testedAt": null,
+  "platform": "macOS, Windows, or Linux",
+  "checks": {
+    "installed": null,
+    "activityBarIcon": null,
+    "secondarySideBar": null,
+    "agentSetupVerified": null,
+    "agentCapabilities": null,
+    "nativePowerPrepared": null,
+    "standardScan": null,
+    "liveProgress": null,
+    "realFinding": null,
+    "sourceNavigation": null,
+    "problemsDiagnostic": null,
+    "exports": null,
+    "historyAfterRestart": null,
+    "resumeInterruptedScan": null,
+    "mcpToVsix": null,
+    "vsixToMcp": null,
+    "disableAndUninstall": null
+  },
+  "notes": []
+}
