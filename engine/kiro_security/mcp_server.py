@@ -123,11 +123,37 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "security_deep_submit_worker_result",
-        "description": "Submit a completed independent Deep discovery worker with exhaustive reviewed-path receipts and evidence-grounded candidates.",
+        "description": "Submit a completed independent Deep discovery worker with one auditable disposition receipt per worklist row and evidence-grounded candidates.",
         "inputSchema": {
             "type": "object",
-            "properties": {"workspaceRoot": {"type": "string"}, "scanId": {"type": "string"}, "workerId": {"type": "string"}, "claimToken": {"type": "string"}, "reviewedPaths": {"type": "array", "items": {"type": "string"}}, "threatModel": {"type": "string"}, "summary": {"type": "string"}, "candidates": {"type": "array", "items": {"type": "object"}}},
-            "required": ["scanId", "workerId", "claimToken", "reviewedPaths", "threatModel", "candidates"],
+            "properties": {
+                "workspaceRoot": {"type": "string"},
+                "scanId": {"type": "string"},
+                "workerId": {"type": "string"},
+                "claimToken": {"type": "string"},
+                "rowReceipts": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "rowId": {"type": "string"},
+                            "disposition": {"type": "string", "enum": ["reportable", "suppressed", "not_applicable", "deferred"]},
+                            "reason": {"type": "string"},
+                            "evidenceRefs": {"type": "array", "items": {"type": "string"}},
+                            "candidateIds": {"type": "array", "items": {"type": "string"}},
+                            "entrypoint": {"type": "string"},
+                            "rootControl": {"type": "string"},
+                            "sink": {"type": "string"},
+                        },
+                        "required": ["rowId", "disposition", "reason"],
+                        "additionalProperties": False,
+                    },
+                },
+                "threatModel": {"type": "string"},
+                "summary": {"type": "string"},
+                "candidates": {"type": "array", "items": {"type": "object"}},
+            },
+            "required": ["scanId", "workerId", "claimToken", "rowReceipts", "threatModel", "candidates"],
             "additionalProperties": False,
         },
     },
@@ -369,15 +395,15 @@ class McpServer:
                 "runtime": runtime or {},
             })
         if name == "security_deep_submit_worker_result":
-            reviewed = params.get("reviewedPaths")
+            row_receipts = params.get("rowReceipts")
             candidates = params.get("candidates")
-            if not isinstance(reviewed, list) or not isinstance(candidates, list):
-                raise ValueError("reviewedPaths and candidates must be arrays.")
+            if not isinstance(row_receipts, list) or not isinstance(candidates, list):
+                raise ValueError("rowReceipts and candidates must be arrays.")
             return service.deep_submit_worker({
                 "scanId": _bounded_string(params.get("scanId"), "scanId", 256),
                 "workerId": _bounded_string(params.get("workerId"), "workerId", 256),
                 "claimToken": _bounded_string(params.get("claimToken"), "claimToken", 256),
-                "reviewedPaths": reviewed,
+                "rowReceipts": row_receipts,
                 "threatModel": _bounded_string(params.get("threatModel"), "threatModel", 200000),
                 "summary": _bounded_string(params.get("summary"), "summary", 20000, required=False) or "",
                 "candidates": candidates,

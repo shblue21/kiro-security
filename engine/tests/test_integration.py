@@ -26,6 +26,55 @@ def assert_schema(path: Path, schema_name: str) -> None:
     jsonschema.Draft202012Validator(schema).validate(document)
 
 
+def complete_empty_deep_round(service: SecurityService, scan_id: str, timeout: float = 30.0) -> None:
+    """Drive one honest six-worker zero-candidate round for integration tests."""
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = service.deep_get_status({"scanId": scan_id})
+        if status.get("nextAction") in ("claim_worker", "submit_claimed_workers"):
+            break
+        scan = service.get_scan({"scanId": scan_id})
+        if scan["status"] not in ("queued", "running"):
+            raise AssertionError(f"deep scan stopped before worker handoff: {scan}")
+        time.sleep(0.03)
+    else:
+        raise AssertionError("Deep worklist was not prepared")
+
+    for worker_index in range(1, 7):
+        assignment = service.deep_claim_worker({
+            "scanId": scan_id,
+            "modelId": "integration-model",
+            "delegationId": f"integration-delegation-{worker_index}",
+            "runtime": {"kind": "integration-test"},
+        })
+        row_receipts = [
+            {
+                "rowId": row["rowId"],
+                "disposition": "not_applicable",
+                "reason": "The independent integration worker reviewed this row and submitted no candidate.",
+                "evidenceRefs": [],
+                "candidateIds": [],
+            }
+            for row in assignment["worklist"]
+        ]
+        service.deep_submit_worker({
+            "scanId": scan_id,
+            "workerId": assignment["workerId"],
+            "claimToken": assignment["claimToken"],
+            "rowReceipts": row_receipts,
+            "threatModel": "Independent integration-test threat model.",
+            "summary": "No candidate was submitted by this deterministic integration worker.",
+            "candidates": [],
+        })
+    merge = service.deep_claim_merge({"scanId": scan_id})
+    service.deep_submit_merge({
+        "scanId": scan_id,
+        "claimToken": merge["claimToken"],
+        "canonicalCandidates": [],
+    })
+
+
 def test_standard_scan_artifacts_validation_exports_and_events(workspace: Path, tmp_path: Path) -> None:
     events: list[dict] = []
     service = service_for(workspace, events)
@@ -66,10 +115,14 @@ def test_deep_and_diff_modes_use_real_repository_state(workspace: Path) -> None:
     service = service_for(workspace)
     try:
         deep = service.start_scan({"mode": "deep", "scope": "."})
+        complete_empty_deep_round(service, deep["id"])
         completed = wait_for_scan(service, deep["id"])
-        assert completed["status"] == "completed"
+        assert completed["status"] == "completed", completed["failure_message"]
         assert completed["mode"] == "deep"
-        assert len(service.list_findings({"scanId": deep["id"]})) >= 5
+        assert service.list_findings({"scanId": deep["id"]}) == []
+        assert completed["coverage"]["completeness"] == "partial"
+        assert completed["coverage"]["deepStatus"] == "saturated"
+        assert completed["coverage"]["deferred"], "unsupported in-scope files remain explicit"
 
         changed = workspace / "src" / "safe.py"
         changed.write_text(changed.read_text(encoding="utf-8") + "\nuser = input()\nsubprocess.run(user, shell=True)\n", encoding="utf-8")
@@ -111,6 +164,7 @@ def test_shutdown_handoff_and_resume_after_restart(workspace: Path) -> None:
     try:
         resumed = second.resume_scan({"scanId": scan["id"]})
         assert resumed["status"] == "running"
+        complete_empty_deep_round(second, scan["id"], timeout=45)
         completed = wait_for_scan(second, scan["id"], timeout=45)
         assert completed["status"] == "completed", completed["failure_message"]
         assert completed["resume_count"] >= 1

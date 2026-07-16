@@ -35,6 +35,16 @@ class SecurityService:
         self.session_id = random_id("session")
         self.workbench.register_session(self.session_id, os.getpid(), client_kind, PROTOCOL_VERSION)
         self.recovered_scans = self.workbench.recover_stale_sessions()
+        # Stale running scans are already downgraded to interrupted above, so
+        # this reconciliation never races an actively finalizing session.
+        self.integrity_issues = self.workbench.reconcile_finalization_integrity()
+        for issue in self.integrity_issues:
+            emit("engine.log", {
+                "level": "warning",
+                "code": issue.get("code"),
+                "message": issue.get("message"),
+                "scanId": issue.get("scanId"),
+            })
         self.workspace_record = self.workbench.register_workspace(self.workspace)
         self.runner = ScanRunner(self.workbench, self.session_id, emit)
         self._closing = threading.Event()
@@ -91,6 +101,7 @@ class SecurityService:
             "capabilities": self.capabilities(),
             "workspace": self.workspace_record,
             "recoveredScanIds": self.recovered_scans,
+            "integrityIssues": self.integrity_issues,
         }
 
     def register_workspace(self, params: dict[str, Any]) -> dict[str, Any]:

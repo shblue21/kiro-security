@@ -18,7 +18,7 @@ _CONTROL_BY_CATEGORY = {
 }
 
 
-def create_hardening_proposal(scan_id: str, findings: list[dict[str, Any]], output_path: Path) -> dict[str, Any]:
+def render_hardening_proposal(scan_id: str, findings: list[dict[str, Any]]) -> dict[str, Any]:
     counts = Counter(item["taxonomy"]["category"] for item in findings if item.get("validationStatus") != "rejected")
     title = "Kiro Security Power hardening portfolio"
     lines = [f"# {title}", "", f"Scan: `{scan_id}`", "", "## Executive summary", ""]
@@ -52,5 +52,14 @@ def create_hardening_proposal(scan_id: str, findings: list[dict[str, Any]], outp
             "",
             "Assign one engineering owner per control, record compatibility constraints, and ship migrations behind repository-native tests.",
         ])
-    atomic_write(output_path, "\n".join(lines) + "\n")
-    return {"title": title, "summary": summary, "artifactPath": str(output_path)}
+    return {"title": title, "summary": summary, "content": "\n".join(lines) + "\n"}
+
+
+def create_hardening_proposal(scan_id: str, findings: list[dict[str, Any]], output_path: Path) -> dict[str, Any]:
+    rendered = render_hardening_proposal(scan_id, findings)
+    atomic_write(output_path, rendered["content"])
+    return {
+        "title": rendered["title"],
+        "summary": rendered["summary"],
+        "artifactPath": str(output_path),
+    }

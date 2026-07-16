@@ -8,10 +8,12 @@ from typing import Any, Callable
 
 from .attack_path import build_attack_path
 from .constants import ARTIFACT_KINDS, PHASES
+from .coverage import coverage_row_id
 from .db import Workbench
 from .deep import DeepCoordinator
 from .errors import CancelledScan, EngineError, InterruptedScan
-from .reporting import write_reporting_bundle
+from .finalizer import finalize_scan, prepare_finalization
+from .reporting import write_canonical_documents
 from .scanner import Inventory, build_inventory, scan_inventory
 from .security import redact, utc_now, write_json
 from .threat_model import build_threat_model
@@ -105,16 +107,36 @@ class ScanRunner:
 
     @staticmethod
     def _inventory_data(inventory: Inventory) -> dict[str, Any]:
+        files = []
+        for source in inventory.files:
+            surface = f"source_review:{source.language}"
+            files.append({
+                "rowId": coverage_row_id(source.relative_path, surface),
+                "path": source.relative_path,
+                "language": source.language,
+                "surface": surface,
+                "size": source.size,
+            })
+        deferred = []
+        for item in inventory.deferred:
+            normalized = dict(item)
+            path = str(normalized.get("path") or normalized.get("id") or ".")
+            surface = str(normalized.get("surface") or normalized.get("kind") or "inventory_deferred")
+            normalized["path"] = path
+            normalized["surface"] = surface
+            normalized["rowId"] = str(normalized.get("rowId") or coverage_row_id(path, surface))
+            deferred.append(normalized)
         return {
             "includePaths": inventory.include_paths,
             "excludePaths": inventory.exclude_paths,
-            "deferred": inventory.deferred,
+            "deferred": deferred,
             "revision": inventory.revision,
             "snapshotDigest": inventory.snapshot_digest,
             "gitAvailable": inventory.git_available,
             "diffSummary": inventory.diff_summary,
             "warnings": inventory.warnings,
-            "files": [{"path": source.relative_path, "language": source.language, "size": source.size} for source in inventory.files],
+            "supportedFileCount": len(files),
+            "files": files,
         }
 
     def _progress(self, scan_id: str, completed: int, total: int, current: str, *, deep_pass: int | None = None) -> None:
@@ -134,6 +156,7 @@ class ScanRunner:
         self._emit("scan.progress", {"scanId": scan_id, "progress": progress})
 
     def _run(self, scan_id: str, resuming: bool) -> None:
+        prepared_finalization: dict[str, Any] | None = None
         try:
             scan = self.workbench.get_scan(scan_id)
             self._emit("scan.started", {"scanId": scan_id, "scan": scan, "resumed": resuming})
@@ -157,12 +180,17 @@ class ScanRunner:
                 elif phase == "attack_path":
                     self._phase_attack_path(scan_id)
                 elif phase == "reporting":
-                    self._phase_reporting(scan_id)
+                    prepared_finalization = self._phase_reporting(scan_id)
                 if not phase_complete:
                     return
                 self.workbench.update_progress(scan_id, phase_percent=100, message=f"Completed {phase.replace('_', ' ')}")
                 resuming = False
-            completed = self.workbench.complete_scan(scan_id)
+            if prepared_finalization is None:
+                raise EngineError("finalizer_not_prepared", "Reporting completed without a validated canonical finalization bundle.")
+            records = finalize_scan(self.workbench, prepared_finalization)
+            for record in records:
+                self._emit("artifact.created", {"scanId": scan_id, "artifact": record})
+            completed = self.workbench.get_scan(scan_id)
             self._emit("scan.completed", {"scanId": scan_id, "scan": completed})
         except CancelledScan:
             try:
@@ -178,11 +206,25 @@ class ScanRunner:
             except EngineError:
                 pass
         except EngineError as exc:
-            failed = self.workbench.fail_scan(scan_id, exc.code, exc.message)
+            try:
+                current = self.workbench.get_scan(scan_id)
+                if current["status"] == "completed" and not current.get("sealed_manifest_digest"):
+                    failed = self.workbench.fail_unsealed_completion(scan_id, exc.code, exc.message)
+                else:
+                    failed = self.workbench.fail_scan(scan_id, exc.code, exc.message)
+            except EngineError:
+                failed = self.workbench.get_scan(scan_id)
             self._emit("scan.failed", {"scanId": scan_id, "scan": failed, "error": {"code": exc.code, "message": exc.message, "data": exc.data}})
         except Exception as exc:  # defensive boundary: convert to structured failure
             message = redact(f"{type(exc).__name__}: {exc}")
-            failed = self.workbench.fail_scan(scan_id, "internal_error", message)
+            try:
+                current = self.workbench.get_scan(scan_id)
+                if current["status"] == "completed" and not current.get("sealed_manifest_digest"):
+                    failed = self.workbench.fail_unsealed_completion(scan_id, "internal_error", message)
+                else:
+                    failed = self.workbench.fail_scan(scan_id, "internal_error", message)
+            except EngineError:
+                failed = self.workbench.get_scan(scan_id)
             self._emit("scan.failed", {"scanId": scan_id, "scan": failed, "error": {"code": "internal_error", "message": message}})
             self._log("error", "Internal runner exception:\n" + traceback.format_exc(limit=20), scan_id=scan_id, code="internal_error")
         finally:
@@ -318,7 +360,7 @@ class ScanRunner:
         if total == 0:
             self._progress(scan_id, 0, 0, "no reportable attack paths")
 
-    def _phase_reporting(self, scan_id: str) -> None:
+    def _phase_reporting(self, scan_id: str) -> dict[str, Any]:
         scan = self.workbench.get_scan(scan_id)
         inventory_path = self._inventory_path(scan)
         if not inventory_path.exists():
@@ -330,10 +372,11 @@ class ScanRunner:
         threat_path = Path(scan["artifact_dir"]) / ARTIFACT_KINDS["threatModel"]
         inventory = self._build_inventory(scan, require_same_snapshot=True)
         threat_model = build_threat_model(self.workbench.workspace, inventory, threat_path)
-        records, _, _ = write_reporting_bundle(self.workbench, scan_id, inventory_data, threat_model)
-        for record in records:
-            self._emit("artifact.created", {"scanId": scan_id, "artifact": record})
-        self._progress(scan_id, len(records), len(records), "sealed reporting bundle")
+        bundle = write_canonical_documents(self.workbench, scan_id, inventory_data, threat_model)
+        prepared = prepare_finalization(self.workbench, bundle)
+        canonical_count = len(bundle["paths"])
+        self._progress(scan_id, canonical_count, canonical_count, "validated canonical reporting documents")
+        return prepared
 
     def shutdown(self, timeout: float = 5.0) -> list[str]:
         with self._lock:

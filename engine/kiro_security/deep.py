@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .coverage import COVERAGE_DISPOSITIONS, coverage_row_id, make_coverage_row
 from .db import Workbench
 from .errors import EngineError
 from .security import random_id, stable_id, utc_now, write_json
@@ -14,6 +15,10 @@ WORKERS_PER_ROUND = 6
 MAX_ROUNDS = 10
 _ALLOWED_SEVERITIES = {"critical", "high", "medium", "low", "informational"}
 _ALLOWED_CONFIDENCE = {"high", "medium", "low"}
+LEGACY_RECEIPT_REASON = (
+    "Legacy worker recorded path attendance without a row-level disposition receipt. "
+    "The row requires follow-up under the current coverage contract."
+)
 
 
 class DeepCoordinator:
@@ -45,9 +50,10 @@ class DeepCoordinator:
                 continue
             worklist.append(
                 {
-                    "rowId": stable_id("deep-row", scan["id"], path),
+                    "rowId": str(item.get("rowId") or coverage_row_id(path, str(item.get("surface") or f"source_review:{item.get('language') or 'text'}"))),
                     "path": path,
                     "language": item.get("language"),
+                    "surface": str(item.get("surface") or f"source_review:{item.get('language') or 'text'}"),
                     "size": int(item.get("size") or 0),
                 }
             )
@@ -243,8 +249,14 @@ class DeepCoordinator:
             "worklist": worklist,
             "brief": self._worker_brief(scan, int(state["current_round"]), worker_index),
             "submissionContract": {
-                "reviewedPaths": "Every path in worklist, exactly once, or provide an explicit closure receipt.",
-                "candidates": "Evidence-grounded candidates only; include affectedLocations with label/path/lines and remediation.",
+                "rowReceipts": {
+                    "required": True,
+                    "onePerWorklistRow": True,
+                    "dispositions": list(COVERAGE_DISPOSITIONS),
+                    "requiredFields": ["rowId", "disposition", "reason"],
+                    "reportableRequiresCandidateIds": True,
+                },
+                "candidates": "Evidence-grounded candidates only; include candidateId, affectedLocations with label/path/lines, and remediation.",
                 "forbidden": ["repository edits", "reading prior worker results", "top-level validation", "top-level finalization"],
             },
         }
@@ -266,25 +278,19 @@ class DeepCoordinator:
         self._require_deep_scan(scan_id)
         worker_id = str(params.get("workerId") or "")
         token = str(params.get("claimToken") or "")
-        reviewed_paths = params.get("reviewedPaths")
+        row_receipts = params.get("rowReceipts")
         candidates = params.get("candidates")
         threat_model = str(params.get("threatModel") or "")
         summary = str(params.get("summary") or "")
-        if not isinstance(reviewed_paths, list) or not all(isinstance(item, str) for item in reviewed_paths):
-            raise EngineError("invalid_worker_receipts", "reviewedPaths must be an array of worklist paths.")
+        if not isinstance(row_receipts, list):
+            raise EngineError("invalid_worker_receipts", "rowReceipts must be an array of disposition receipts.")
         if not isinstance(candidates, list):
             raise EngineError("invalid_worker_candidates", "candidates must be an array.")
         state = self._state_row(scan_id)
         assert state is not None
-        expected_paths = [row["path"] for row in json.loads(state["worklist_json"])]
-        if len(reviewed_paths) != len(set(reviewed_paths)) or set(reviewed_paths) != set(expected_paths):
-            missing = sorted(set(expected_paths) - set(reviewed_paths))[:20]
-            extra = sorted(set(reviewed_paths) - set(expected_paths))[:20]
-            raise EngineError(
-                "incomplete_worker_coverage",
-                "A Deep discovery worker must close every authoritative worklist row exactly once.",
-                {"missing": missing, "extra": extra, "expectedCount": len(expected_paths), "receivedCount": len(reviewed_paths)},
-            )
+        worklist = json.loads(state["worklist_json"])
+        worklist_by_id = {str(item["rowId"]): item for item in worklist}
+        worklist_paths = {str(item["path"]) for item in worklist}
         connection = self.workbench._connect()
         try:
             row = connection.execute("SELECT * FROM deep_workers WHERE id=? AND scan_id=?", (worker_id, scan_id)).fetchone()
@@ -292,27 +298,55 @@ class DeepCoordinator:
             connection.close()
         if row is None or row["status"] != "claimed" or row["claim_token"] != token:
             raise EngineError("invalid_worker_claim", "Worker claim is missing, stale, or already completed.")
+
         normalized = []
+        candidate_aliases: dict[str, str] = {}
+        candidate_paths: dict[str, set[str]] = {}
         for index, candidate in enumerate(candidates):
-            normalized_candidate = self._normalize_candidate(candidate, set(expected_paths))
-            normalized_candidate["sourceRef"] = f"r{row['round_number']}-w{row['worker_index']}-c{index + 1}"
+            normalized_candidate = self._normalize_candidate(candidate, worklist_paths)
+            source_ref = f"r{row['round_number']}-w{row['worker_index']}-c{index + 1}"
+            local_id = str(candidate.get("candidateId") or candidate.get("id") or f"candidate-{index + 1}") if isinstance(candidate, dict) else f"candidate-{index + 1}"
+            if not local_id or len(local_id) > 256 or "\x00" in local_id or local_id in candidate_aliases:
+                raise EngineError("invalid_worker_candidate_id", "Each worker candidateId must be a unique bounded string.")
+            normalized_candidate["sourceRef"] = source_ref
+            normalized_candidate["workerCandidateId"] = local_id
             normalized.append(normalized_candidate)
+            candidate_aliases[local_id] = source_ref
+            candidate_aliases[source_ref] = source_ref
+            candidate_paths[source_ref] = {str(location["path"]) for location in normalized_candidate.get("locations", [])}
+
+        receipts = self._normalize_worker_receipts(
+            row_receipts,
+            worklist_by_id=worklist_by_id,
+            candidate_aliases=candidate_aliases,
+            candidate_paths=candidate_paths,
+            worker_id=worker_id,
+        )
         payload = {
             "threatModel": threat_model[:200000],
             "summary": summary[:20000],
-            "reviewedPaths": reviewed_paths,
+            "rowReceipts": receipts,
             "candidates": normalized,
             "worklistDigest": state["worklist_digest"],
         }
         now = utc_now()
         with self.workbench.transaction() as tx:
-            tx.execute(
+            self.workbench.replace_deep_worker_coverage_receipts(
+                scan_id=scan_id,
+                worker_id=worker_id,
+                round_number=int(row["round_number"]),
+                rows=receipts,
+                connection=tx,
+            )
+            cursor = tx.execute(
                 """
                 UPDATE deep_workers SET status='completed', result_json=?, completed_at=?, updated_at=?
                 WHERE id=? AND status='claimed' AND claim_token=?
                 """,
                 (json.dumps(payload, separators=(",", ":"), ensure_ascii=False), now, now, worker_id, token),
             )
+            if cursor.rowcount != 1:
+                raise EngineError("invalid_worker_claim", "Worker claim became stale before receipt commit.")
             completed = int(tx.execute(
                 "SELECT COUNT(*) FROM deep_workers WHERE scan_id=? AND round_number=? AND status='completed'",
                 (scan_id, row["round_number"]),
@@ -324,12 +358,166 @@ class DeepCoordinator:
         write_json(output_dir / "worker-result.json", payload)
         return self.status(scan_id)
 
+    def _normalize_worker_receipts(
+        self,
+        raw_receipts: list[Any],
+        *,
+        worklist_by_id: dict[str, dict[str, Any]],
+        candidate_aliases: dict[str, str],
+        candidate_paths: dict[str, set[str]],
+        worker_id: str,
+    ) -> list[dict[str, Any]]:
+        seen: set[str] = set()
+        receipts: list[dict[str, Any]] = []
+        for raw in raw_receipts:
+            if not isinstance(raw, dict):
+                raise EngineError("invalid_worker_receipt", "Each row receipt must be an object.")
+            row_id = str(raw.get("rowId") or "")
+            if row_id not in worklist_by_id or row_id in seen:
+                raise EngineError(
+                    "invalid_worker_receipt_row",
+                    "Each authoritative worklist row must have exactly one receipt.",
+                    {"rowId": row_id},
+                )
+            seen.add(row_id)
+            worklist_row = worklist_by_id[row_id]
+            disposition = str(raw.get("disposition") or "")
+            if disposition not in COVERAGE_DISPOSITIONS:
+                raise EngineError(
+                    "invalid_coverage_disposition",
+                    f"Unsupported Deep row disposition: {disposition}",
+                    {"rowId": row_id},
+                )
+            reason = str(raw.get("reason") or "").strip()
+            if not reason:
+                raise EngineError("invalid_coverage_reason", "Every Deep row receipt requires a disposition reason.", {"rowId": row_id})
+            evidence_refs = raw.get("evidenceRefs") or []
+            if not isinstance(evidence_refs, list) or not all(isinstance(value, str) for value in evidence_refs):
+                raise EngineError("invalid_coverage_reference", "evidenceRefs must be an array of strings.", {"rowId": row_id})
+            requested_candidate_ids = raw.get("candidateIds")
+            if requested_candidate_ids is None:
+                candidate_refs = sorted(
+                    source_ref for source_ref, paths in candidate_paths.items() if str(worklist_row["path"]) in paths
+                )
+            else:
+                if not isinstance(requested_candidate_ids, list) or not all(isinstance(value, str) for value in requested_candidate_ids):
+                    raise EngineError("invalid_coverage_reference", "candidateIds must be an array of worker candidate identifiers.", {"rowId": row_id})
+                unknown = sorted(set(requested_candidate_ids) - set(candidate_aliases))
+                if unknown:
+                    raise EngineError(
+                        "unknown_worker_candidate_reference",
+                        "A row receipt referenced a candidate that was not submitted by this worker.",
+                        {"rowId": row_id, "unknownCandidateIds": unknown[:20]},
+                    )
+                candidate_refs = sorted({candidate_aliases[value] for value in requested_candidate_ids})
+            for candidate_ref in candidate_refs:
+                if str(worklist_row["path"]) not in candidate_paths.get(candidate_ref, set()):
+                    raise EngineError(
+                        "candidate_receipt_path_mismatch",
+                        "A row receipt may reference only candidates whose affected locations include that row path.",
+                        {"rowId": row_id, "candidateId": candidate_ref},
+                    )
+            if disposition == "reportable" and not candidate_refs:
+                raise EngineError(
+                    "reportable_coverage_without_candidate",
+                    "A reportable Deep row receipt must reference at least one submitted candidate.",
+                    {"rowId": row_id},
+                )
+            receipt = make_coverage_row(
+                row_id=row_id,
+                path=str(worklist_row["path"]),
+                surface=str(worklist_row.get("surface") or f"source_review:{worklist_row.get('language') or 'text'}"),
+                disposition=disposition,
+                reason=reason,
+                evidence_refs=evidence_refs,
+                candidate_ids=candidate_refs,
+                entrypoint=raw.get("entrypoint"),
+                root_control=raw.get("rootControl"),
+                sink=raw.get("sink"),
+                worker_id=worker_id,
+            )
+            receipts.append(receipt)
+        missing = sorted(set(worklist_by_id) - seen)
+        if missing:
+            raise EngineError(
+                "incomplete_worker_coverage",
+                "A Deep discovery worker must submit one disposition receipt for every authoritative worklist row.",
+                {"missingRowIds": missing[:20], "expectedCount": len(worklist_by_id), "receivedCount": len(seen)},
+            )
+        receipts.sort(key=lambda item: item["rowId"])
+        return receipts
+
+    def _backfill_legacy_worker_receipts(self, scan_id: str, round_number: int, worklist: list[dict[str, Any]]) -> list[str]:
+        """Honest compatibility repair for pre-migration-008 Deep workers.
+
+        A worker completed under the 0.3.0 contract recorded only a
+        ``reviewedPaths`` attendance list, which proves nothing about
+        row-level dispositions.  Such workers receive one ``deferred``
+        receipt per authoritative worklist row, so the merged coverage is
+        honestly partial.  The repair is idempotent (stable receipt digests,
+        replace-by-worker) and never touches a worker that already has
+        durable row receipts or a new-format ``rowReceipts`` result.
+        """
+
+        connection = self.workbench._connect()
+        try:
+            workers = connection.execute(
+                "SELECT id, result_json FROM deep_workers WHERE scan_id=? AND round_number=? AND status='completed' ORDER BY worker_index",
+                (scan_id, round_number),
+            ).fetchall()
+            durable_counts = {
+                row["worker_id"]: int(row["receipt_count"])
+                for row in connection.execute(
+                    """
+                    SELECT worker_id, COUNT(*) AS receipt_count
+                    FROM deep_worker_coverage_receipts
+                    WHERE scan_id=? AND round_number=?
+                    GROUP BY worker_id
+                    """,
+                    (scan_id, round_number),
+                ).fetchall()
+            }
+        finally:
+            connection.close()
+        repaired: list[str] = []
+        for worker in workers:
+            if durable_counts.get(worker["id"], 0) > 0:
+                continue
+            try:
+                result = json.loads(worker["result_json"] or "{}")
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(result, dict) or not isinstance(result.get("reviewedPaths"), list):
+                continue
+            if isinstance(result.get("rowReceipts"), list) and result["rowReceipts"]:
+                continue
+            rows = [
+                make_coverage_row(
+                    row_id=str(item["rowId"]),
+                    path=str(item["path"]),
+                    surface=str(item.get("surface") or f"source_review:{item.get('language') or 'text'}"),
+                    disposition="deferred",
+                    reason=LEGACY_RECEIPT_REASON,
+                    worker_id=worker["id"],
+                )
+                for item in worklist
+            ]
+            self.workbench.replace_deep_worker_coverage_receipts(
+                scan_id=scan_id,
+                worker_id=worker["id"],
+                round_number=round_number,
+                rows=rows,
+            )
+            repaired.append(worker["id"])
+        return repaired
+
     def claim_merge(self, scan_id: str) -> dict[str, Any]:
         scan = self._require_deep_scan(scan_id)
         state = self._state_row(scan_id)
         assert state is not None
         if scan["status"] != "running" or state["status"] != "awaiting_merge":
             raise EngineError("deep_merge_not_available", "All six workers must complete before semantic merge can be claimed.")
+        self._backfill_legacy_worker_receipts(scan_id, int(state["current_round"]), json.loads(state["worklist_json"]))
         now = utc_now()
         token = random_id("deep-merge-claim")
         with self.workbench.transaction() as connection:
@@ -382,6 +570,7 @@ class DeepCoordinator:
             raise EngineError("invalid_merge_candidates", "canonicalCandidates must be an array.")
         state = self._state_row(scan_id)
         assert state is not None
+        self._backfill_legacy_worker_receipts(scan_id, int(state["current_round"]), json.loads(state["worklist_json"]))
         connection = self.workbench._connect()
         try:
             merge = connection.execute(
@@ -445,6 +634,12 @@ class DeepCoordinator:
             terminal = "capped"
         else:
             terminal = "awaiting_workers"
+        coverage_rows = self._consolidate_round_coverage(
+            scan_id=scan_id,
+            round_number=round_number,
+            worklist=json.loads(state["worklist_json"]),
+            canonical_candidates=normalized,
+        )
         now = utc_now()
         encoded = json.dumps(normalized, separators=(",", ":"), ensure_ascii=False)
         with self.workbench.transaction() as tx:
@@ -475,6 +670,7 @@ class DeepCoordinator:
                     """,
                     (terminal, encoded, len(previous), novelty, now, scan_id),
                 )
+            self.workbench.upsert_coverage_rows(scan_id, coverage_rows, connection=tx)
         scan = self.workbench.get_scan(scan_id)
         merge_dir = Path(scan["artifact_dir"]) / "deep_discovery" / f"round-{round_number:02d}"
         merge_dir.mkdir(parents=True, exist_ok=True)
@@ -484,6 +680,89 @@ class DeepCoordinator:
         )
         write_json(Path(scan["artifact_dir"]) / "02_discovery" / "canonical-candidates.json", normalized)
         return self.status(scan_id)
+
+    def _consolidate_round_coverage(
+        self,
+        *,
+        scan_id: str,
+        round_number: int,
+        worklist: list[dict[str, Any]],
+        canonical_candidates: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        receipts = self.workbench.list_deep_worker_coverage_receipts(scan_id, round_number)
+        by_row: dict[str, list[dict[str, Any]]] = {}
+        for receipt in receipts:
+            by_row.setdefault(receipt["rowId"], []).append(receipt)
+        candidate_ids_by_path: dict[str, set[str]] = {}
+        for candidate in canonical_candidates:
+            canonical_id = str(candidate.get("canonicalId") or "")
+            if not canonical_id:
+                continue
+            for location in candidate.get("locations") or []:
+                path = str(location.get("path") or "") if isinstance(location, dict) else ""
+                if path:
+                    candidate_ids_by_path.setdefault(path, set()).add(canonical_id)
+        rows: list[dict[str, Any]] = []
+        for worklist_row in worklist:
+            row_id = str(worklist_row["rowId"])
+            row_receipts = by_row.get(row_id, [])
+            if len(row_receipts) != WORKERS_PER_ROUND:
+                raise EngineError(
+                    "incomplete_deep_row_receipts",
+                    "Semantic merge requires six row-level disposition receipts for every worklist row.",
+                    {"rowId": row_id, "receiptCount": len(row_receipts)},
+                )
+            candidate_ids = sorted(candidate_ids_by_path.get(str(worklist_row["path"]), set()))
+            dispositions = {receipt["disposition"] for receipt in row_receipts}
+            if "deferred" in dispositions:
+                disposition = "deferred"
+                deferred_reasons = sorted({receipt["reason"] for receipt in row_receipts if receipt["disposition"] == "deferred"})
+                candidate_note = (
+                    f" {len(candidate_ids)} canonical candidate(s) were linked, but they do not erase the incomplete review receipt."
+                    if candidate_ids
+                    else ""
+                )
+                reason = (
+                    "One or more independent workers could not close this row: "
+                    + "; ".join(deferred_reasons)[:3000]
+                    + candidate_note
+                )
+            elif candidate_ids:
+                disposition = "reportable"
+                reason = (
+                    f"Deep round {round_number} semantic merge linked {len(candidate_ids)} canonical "
+                    "candidate(s) to this worklist row."
+                )
+            elif "suppressed" in dispositions:
+                disposition = "suppressed"
+                reason = "Independent workers reviewed this row; candidate evidence was suppressed and no canonical reportable candidate remained."
+            else:
+                disposition = "not_applicable"
+                reason = "All six independent workers closed this row without a canonical reportable candidate."
+            evidence_refs = sorted({
+                reference
+                for receipt in row_receipts
+                for reference in receipt.get("evidenceRefs") or []
+            })
+            entrypoint = next((receipt.get("entrypoint") for receipt in row_receipts if receipt.get("entrypoint")), None)
+            root_control = next((receipt.get("rootControl") for receipt in row_receipts if receipt.get("rootControl")), None)
+            sink = next((receipt.get("sink") for receipt in row_receipts if receipt.get("sink")), None)
+            rows.append(
+                make_coverage_row(
+                    row_id=row_id,
+                    path=str(worklist_row["path"]),
+                    surface=str(worklist_row.get("surface") or f"source_review:{worklist_row.get('language') or 'text'}"),
+                    disposition=disposition,
+                    reason=reason,
+                    evidence_refs=evidence_refs,
+                    candidate_ids=candidate_ids,
+                    entrypoint=entrypoint,
+                    root_control=root_control,
+                    sink=sink,
+                    worker_id=None,
+                )
+            )
+        return rows
 
     def canonical_candidates(self, scan_id: str) -> list[dict[str, Any]] | None:
         state = self._state_row(scan_id)

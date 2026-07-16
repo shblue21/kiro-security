@@ -63,7 +63,7 @@ Default workspace state:
 └── logs/
 ```
 
-SQLite uses foreign keys, WAL journaling, a busy timeout, parameterized statements, explicit transactions, schema migrations, and a backup before migration. Engine sessions heartbeat into the database. Scans owned by stale sessions become `interrupted`, retain phase/progress/artifacts, and are eligible for `resume_scan`. Terminal or interrupted scans can be removed through `cleanup_scan`; cleanup is confined to the canonical state directory and intentionally preserves explicitly selected exports outside it.
+SQLite uses foreign keys, WAL journaling, a busy timeout, parameterized statements, explicit transactions, schema migrations, and integrity-checked backups before and after migration of an existing database. Engine sessions heartbeat into the database. Scans owned by stale sessions become `interrupted`, retain phase/progress/artifacts, and are eligible for `resume_scan`. Terminal or interrupted scans can be removed through `cleanup_scan`; cleanup is confined to the canonical state directory and intentionally preserves explicitly selected exports outside it.
 
 ## RPC lifecycle
 
@@ -85,9 +85,21 @@ The extension also polls durable state so events emitted by an MCP-owned engine 
 
 ## Scan execution
 
-Standard mode performs one repository or scoped-path pass. Deep mode performs three independent deterministic passes—taint/source-to-sink, dangerous API/configuration, and authorization/boundary review—then merges findings by stable fingerprint before the centralized validation/reporting tail. Diff mode resolves changed files and line ranges from Git using argument arrays and analyzes only the requested working tree, commit, or range.
+Standard mode performs one repository or scoped-path deterministic pass. Deep mode creates an authoritative worklist, persists one disposition receipt per row from each Agent-driven discovery worker, consolidates those receipts at semantic merge, and continues through its centralized deterministic validation/reporting tail without silently falling back to Standard mode. Worker homogeneity and host-capability enforcement remain a separate parity workstream. Diff mode resolves changed paths from Git using argument arrays and analyzes the requested working tree, commit, or range.
 
 Each phase commits progress and artifacts independently. Cancellation is represented in SQLite and checked between files and phase work. Shutdown asks runner threads to hand off, persists `interrupted`, and exits without deleting partial state.
+
+## Coverage ledger and finalization
+
+Coverage is not inferred from finding categories. Every `coverage.surfaces[]` entry is the projection of one durable `coverage_ledger` row and uses exactly one canonical disposition: `reportable`, `suppressed`, `not_applicable`, or `deferred`. There is no separate surface-summary disposition vocabulary. `receiptDigest` is SHA-256 over canonical sorted JSON containing `rowId`, disposition, reason, evidence references, and candidate/finding references. The current finding-reference adapter is isolated in `coverage_finding_reference()` so WS-F can replace finding identity without rewriting the ledger.
+
+For Standard and Diff, `not_applicable` means only that the bounded configured rule-family traversal ran for that supported source row and emitted no candidate; it is not a claim that the file is vulnerability-free. Deep never invents a clean receipt for a missing worklist row. Unsupported, unreadable, oversized, or inventory-limited in-scope items are explicit `deferred` rows. Completeness is therefore:
+
+- `complete`: at least one supported row exists, every in-scope row has a receipt, no row is deferred, and Deep is not capped.
+- `partial`: any row is unclosed or deferred, or Deep terminated at its round cap.
+- `unknown`: no supported source file was reviewed, including Standard/Diff scopes containing only unsupported files.
+
+`coverage.json`, `findings.json`, `discovery.json`, `validation.json`, and `attack-path.json` form the canonical JSON bundle. Coverage and findings are validated against strict schemas; the auxiliary sealed JSON documents receive dependency-free top-level contract validation until WS-I supplies full schemas. A completed `scan-manifest.json` is validated in memory and fixes the canonical artifact digests. `report.md`, `hardening/hardening.md`, and per-finding writeups are derived projections and never appear in `manifest.scan.artifacts`; they are listed separately under `derivedArtifacts`. The workbench publishes completed status, coverage, manifest digest, canonical and derived artifact records, and the official finalization files through one transaction boundary, preventing a reader from seeing a completed scan before its final artifacts are available.
 
 ## Webview data flow
 

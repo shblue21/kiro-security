@@ -169,19 +169,44 @@ export interface FindingDetail extends FindingSummary {
   relatedFindings: FindingSummary[];
 }
 
+export type CoverageDisposition = "reportable" | "suppressed" | "not_applicable" | "deferred";
+
+export interface CoverageSurfaceReceipt {
+  id: string;
+  rowId: string;
+  path: string;
+  label: string;
+  surface: string;
+  entrypoint?: string;
+  rootControl?: string;
+  sink?: string;
+  disposition: CoverageDisposition;
+  reason: string;
+  receiptDigest: string;
+  receiptRefs: [string];
+  evidenceRefs: string[];
+  candidateIds: string[];
+  workerId: string | null;
+}
+
 export interface CoverageDocument {
-  documentType: string;
-  schemaVersion: string;
+  documentType: "kiro-security-power.coverage";
+  schemaVersion: "1.0";
   scanId: string;
   mode: string;
   completeness: "complete" | "partial" | "unknown";
   inventoryStrategy: string;
   includePaths: string[];
   excludePaths: string[];
-  surfaces: Array<Record<string, unknown>>;
-  explicitExclusions: Array<Record<string, unknown>>;
-  deferred: Array<Record<string, unknown>>;
-  openQuestions?: Array<{ question: string }>;
+  supportedFileCount: number;
+  inScopeRowCount: number;
+  closedRowCount: number;
+  deepStatus: "awaiting_workers" | "awaiting_merge" | "saturated" | "capped" | null;
+  surfaces: CoverageSurfaceReceipt[];
+  unclosedRows: Array<{ rowId: string; path: string; surface: string; reason: string }>;
+  explicitExclusions: Array<{ pattern: string; reason: string }>;
+  deferred: Array<{ id: string; rowId: string; path: string; reason: string; receiptDigest: string }>;
+  openQuestions: Array<{ question: string; followUpPrompt?: string }>;
 }
 
 export interface DashboardState {

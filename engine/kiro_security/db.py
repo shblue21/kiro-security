@@ -8,9 +8,10 @@ import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
-from .constants import PHASES
+from .constants import ARTIFACT_KINDS, PHASES
+from .coverage import COVERAGE_DISPOSITIONS
 from .errors import EngineError
 from .security import random_id, sha256_file, stable_id, utc_now
 from .state_machine import require_phase_transition, require_status_transition
@@ -82,8 +83,9 @@ class Workbench:
             )
             current = int(connection.execute("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").fetchone()[0])
             pending = [path for path in migration_files if int(path.name[:3]) > current]
+            migration_stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
             if pending and existed:
-                backup = self.state_dir / f"workbench.pre-migration-v{current}.{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.sqlite"
+                backup = self.state_dir / f"workbench.pre-migration-v{current}.{migration_stamp}.sqlite"
                 destination = sqlite3.connect(backup)
                 try:
                     connection.backup(destination)
@@ -114,6 +116,14 @@ class Workbench:
             integrity = connection.execute("PRAGMA quick_check").fetchone()[0]
             if integrity != "ok":
                 raise EngineError("database_corrupt", f"SQLite quick_check failed: {integrity}")
+            if pending and existed:
+                final_version = int(connection.execute("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").fetchone()[0])
+                post_backup = self.state_dir / f"workbench.post-migration-v{final_version}.{migration_stamp}.sqlite"
+                destination = sqlite3.connect(post_backup)
+                try:
+                    connection.backup(destination)
+                finally:
+                    destination.close()
         finally:
             connection.close()
 
@@ -200,6 +210,141 @@ class Workbench:
                 )
                 recovered.append(row["id"])
         return recovered
+
+    def _quarantine_publication(self, artifact_dir: Path, stamp: str) -> list[str]:
+        """Move an unsanctioned manifest and its projections out of the official paths."""
+
+        quarantine_dir = artifact_dir / "quarantine" / stamp
+        moved: list[str] = []
+        for relative in (ARTIFACT_KINDS["manifest"], ARTIFACT_KINDS["markdownReport"], ARTIFACT_KINDS["hardening"]):
+            source = artifact_dir / relative
+            # os.replace moves a symlink itself without following it, so an
+            # unsafe symlinked publication is also removed from the official path.
+            if not source.is_file() and not source.is_symlink():
+                continue
+            destination = quarantine_dir / relative
+            try:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(source, destination)
+                moved.append(str(destination))
+            except OSError:
+                pass
+        return moved
+
+    @staticmethod
+    def _cleanup_stale_temp_files(artifact_dir: Path) -> None:
+        for relative in ARTIFACT_KINDS.values():
+            target = artifact_dir / relative
+            if not target.parent.is_dir():
+                continue
+            for stale in target.parent.glob(f".{target.name}.*"):
+                if stale.is_file() and not stale.is_symlink():
+                    try:
+                        stale.unlink()
+                    except OSError:
+                        pass
+
+    def reconcile_finalization_integrity(self) -> list[dict[str, Any]]:
+        """Detect and repair filesystem/SQLite contradictions after a hard crash.
+
+        Official file publication happens inside the completion transaction
+        but before COMMIT, so a crash in that window can leave a completed
+        manifest on disk while the durable scan state rolled back.  This
+        startup pass restores the invariant that an official manifest exists
+        only for a completed scan whose sealed digest matches the file:
+
+        - non-active scans with an official manifest but no committed seal
+          have the manifest and its projections quarantined, and stale
+          atomic-write temp files removed;
+        - completed scans whose manifest is missing or does not match the
+          durable sealed digest are surfaced as explicit integrity failures;
+        - a completed scan that somehow lacks a sealed digest is revoked via
+          the unsealed-completion failure path.
+        """
+
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                "SELECT id, status, sealed_manifest_digest, artifact_dir FROM scans"
+            ).fetchall()
+        finally:
+            connection.close()
+        issues: list[dict[str, Any]] = []
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        for row in rows:
+            artifact_dir = Path(row["artifact_dir"])
+            if not artifact_dir.is_dir():
+                continue
+            manifest_path = artifact_dir / ARTIFACT_KINDS["manifest"]
+            manifest_present = manifest_path.is_file() and not manifest_path.is_symlink()
+            if row["status"] == "completed":
+                digest = row["sealed_manifest_digest"]
+                if not digest:
+                    try:
+                        self.fail_unsealed_completion(
+                            row["id"],
+                            "finalization_integrity_failure",
+                            "The scan was completed without a committed sealed manifest digest.",
+                        )
+                    except EngineError:
+                        pass
+                    quarantined = self._quarantine_publication(artifact_dir, stamp) if manifest_present else []
+                    issues.append({
+                        "scanId": row["id"],
+                        "code": "completed_scan_unsealed",
+                        "message": "A completed scan had no sealed manifest digest; the completion was revoked.",
+                        "quarantinedPaths": quarantined,
+                    })
+                elif not manifest_path.exists() and not manifest_path.is_symlink():
+                    # The completion witness is gone; leftover projections must
+                    # not keep impersonating a valid sealed publication.
+                    quarantined = self._quarantine_publication(artifact_dir, stamp)
+                    issues.append({
+                        "scanId": row["id"],
+                        "code": "sealed_manifest_missing",
+                        "message": "The durable seal digest exists but the official manifest file is missing.",
+                        "expected": digest,
+                        "actual": None,
+                        "quarantinedPaths": quarantined,
+                    })
+                else:
+                    # A symlinked manifest is never trusted; otherwise compare
+                    # the official bytes against the durable seal digest.
+                    actual = None
+                    if manifest_present:
+                        try:
+                            actual = sha256_file(manifest_path)
+                        except OSError:
+                            actual = None
+                    if actual != digest:
+                        quarantined = self._quarantine_publication(artifact_dir, stamp)
+                        issues.append({
+                            "scanId": row["id"],
+                            "code": "sealed_manifest_digest_mismatch",
+                            "message": (
+                                "The official manifest does not match the durable sealed digest; "
+                                "the publication was quarantined and the sealed bundle must not be trusted."
+                            ),
+                            "expected": digest,
+                            "actual": actual,
+                            "quarantinedPaths": quarantined,
+                        })
+            elif row["status"] in ("interrupted", "failed", "cancelled"):
+                if manifest_present:
+                    quarantined = self._quarantine_publication(artifact_dir, stamp)
+                    issues.append({
+                        "scanId": row["id"],
+                        "code": "orphan_manifest_quarantined",
+                        "message": "An official manifest existed for a scan without a committed completion; it was quarantined.",
+                        "quarantinedPaths": quarantined,
+                    })
+                self._cleanup_stale_temp_files(artifact_dir)
+        for issue in issues:
+            try:
+                self.add_event("scan.integrityIssue", issue, issue.get("scanId"))
+            except Exception:
+                pass
+        return issues
 
     def register_workspace(self, root: Path, *, default_scope: str = ".", default_mode: str = "standard") -> dict[str, Any]:
         workspace_id = stable_id("ws", str(root))
@@ -392,6 +537,196 @@ class Workbench:
                 (json.dumps(coverage, separators=(",", ":"), allow_nan=False), utc_now(), scan_id),
             )
 
+    @staticmethod
+    def _coverage_row_values(scan_id: str, row: dict[str, Any], timestamp: str) -> tuple[Any, ...]:
+        disposition = row.get("disposition")
+        if disposition not in COVERAGE_DISPOSITIONS:
+            raise EngineError("invalid_coverage_disposition", f"Unsupported coverage disposition: {disposition}")
+        reason = row.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise EngineError("invalid_coverage_reason", "Coverage receipt reason is required.")
+        receipt_id = stable_id("coverage-receipt", scan_id, row["rowId"], row["receiptDigest"])
+        return (
+            receipt_id, scan_id, row["rowId"], row["path"], row["surface"],
+            row.get("entrypoint"), row.get("rootControl"), row.get("sink"),
+            disposition, reason.strip(),
+            json.dumps(row.get("evidenceRefs") or [], separators=(",", ":"), allow_nan=False),
+            json.dumps(row.get("candidateIds") or [], separators=(",", ":"), allow_nan=False),
+            row.get("workerId"), row["receiptDigest"], timestamp, timestamp,
+        )
+
+    @staticmethod
+    def _insert_coverage_row(connection: sqlite3.Connection, values: tuple[Any, ...]) -> None:
+        connection.execute(
+            """
+            INSERT INTO coverage_ledger(
+                id, scan_id, row_id, path, surface, entrypoint, root_control, sink, disposition, reason,
+                evidence_refs_json, candidate_ids_json, worker_id, receipt_digest, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(scan_id, row_id) DO UPDATE SET
+                id=excluded.id, path=excluded.path, surface=excluded.surface, entrypoint=excluded.entrypoint,
+                root_control=excluded.root_control, sink=excluded.sink, disposition=excluded.disposition,
+                reason=excluded.reason, evidence_refs_json=excluded.evidence_refs_json,
+                candidate_ids_json=excluded.candidate_ids_json, worker_id=excluded.worker_id,
+                receipt_digest=excluded.receipt_digest, updated_at=excluded.updated_at
+            """,
+            values,
+        )
+
+    def upsert_coverage_rows(
+        self,
+        scan_id: str,
+        rows: list[dict[str, Any]],
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
+        timestamp = utc_now()
+        values = [self._coverage_row_values(scan_id, row, timestamp) for row in rows]
+
+        def apply(target: sqlite3.Connection) -> None:
+            exists = target.execute("SELECT id FROM scans WHERE id=?", (scan_id,)).fetchone()
+            if exists is None:
+                raise EngineError("scan_not_found", f"Scan not found: {scan_id}")
+            for value in values:
+                self._insert_coverage_row(target, value)
+
+        if connection is not None:
+            apply(connection)
+            return
+        with self.transaction() as tx:
+            apply(tx)
+
+    def upsert_coverage_row(self, scan_id: str, row: dict[str, Any]) -> dict[str, Any]:
+        self.upsert_coverage_rows(scan_id, [row])
+        return next(item for item in self.list_coverage_rows(scan_id) if item["rowId"] == row["rowId"])
+
+    def replace_coverage_rows(self, scan_id: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        timestamp = utc_now()
+        seen: set[str] = set()
+        values: list[tuple[Any, ...]] = []
+        for row in rows:
+            row_id = str(row.get("rowId") or "")
+            if not row_id or row_id in seen:
+                raise EngineError("duplicate_coverage_row", f"Coverage rowId must be unique: {row_id or '<missing>'}")
+            seen.add(row_id)
+            values.append(self._coverage_row_values(scan_id, row, timestamp))
+        with self.transaction() as connection:
+            exists = connection.execute("SELECT id FROM scans WHERE id=?", (scan_id,)).fetchone()
+            if exists is None:
+                raise EngineError("scan_not_found", f"Scan not found: {scan_id}")
+            connection.execute("DELETE FROM coverage_ledger WHERE scan_id=?", (scan_id,))
+            for value in values:
+                self._insert_coverage_row(connection, value)
+        return self.list_coverage_rows(scan_id)
+
+    def list_coverage_rows(self, scan_id: str) -> list[dict[str, Any]]:
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                "SELECT * FROM coverage_ledger WHERE scan_id=? ORDER BY path, row_id",
+                (scan_id,),
+            ).fetchall()
+            return [
+                {
+                    "id": row["id"],
+                    "scanId": row["scan_id"],
+                    "rowId": row["row_id"],
+                    "path": row["path"],
+                    "surface": row["surface"],
+                    "entrypoint": row["entrypoint"],
+                    "rootControl": row["root_control"],
+                    "sink": row["sink"],
+                    "disposition": row["disposition"],
+                    "reason": row["reason"],
+                    "evidenceRefs": json.loads(row["evidence_refs_json"]),
+                    "candidateIds": json.loads(row["candidate_ids_json"]),
+                    "workerId": row["worker_id"],
+                    "receiptDigest": row["receipt_digest"],
+                    "createdAt": row["created_at"],
+                    "updatedAt": row["updated_at"],
+                }
+                for row in rows
+            ]
+        finally:
+            connection.close()
+
+    def replace_deep_worker_coverage_receipts(
+        self,
+        *,
+        scan_id: str,
+        worker_id: str,
+        round_number: int,
+        rows: list[dict[str, Any]],
+        connection: sqlite3.Connection | None = None,
+    ) -> None:
+        def apply(target: sqlite3.Connection) -> None:
+            now = utc_now()
+            target.execute("DELETE FROM deep_worker_coverage_receipts WHERE worker_id=?", (worker_id,))
+            for row in rows:
+                target.execute(
+                    """
+                    INSERT INTO deep_worker_coverage_receipts(
+                        id, scan_id, worker_id, round_number, row_id, path, surface, entrypoint, root_control, sink,
+                        disposition, reason, evidence_refs_json, candidate_ids_json, receipt_digest, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        stable_id("deep-coverage-receipt", worker_id, row["rowId"], row["receiptDigest"]),
+                        scan_id, worker_id, round_number, row["rowId"], row["path"], row["surface"],
+                        row.get("entrypoint"), row.get("rootControl"), row.get("sink"), row["disposition"],
+                        row["reason"], json.dumps(row.get("evidenceRefs") or [], separators=(",", ":"), allow_nan=False),
+                        json.dumps(row.get("candidateIds") or [], separators=(",", ":"), allow_nan=False),
+                        row["receiptDigest"], now, now,
+                    ),
+                )
+        if connection is not None:
+            apply(connection)
+            return
+        with self.transaction() as tx:
+            apply(tx)
+
+    def list_deep_worker_coverage_receipts(self, scan_id: str, round_number: int) -> list[dict[str, Any]]:
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                """
+                SELECT r.*, w.worker_index
+                FROM deep_worker_coverage_receipts r
+                JOIN deep_workers w ON w.id=r.worker_id
+                WHERE r.scan_id=? AND r.round_number=?
+                ORDER BY r.row_id, w.worker_index
+                """,
+                (scan_id, round_number),
+            ).fetchall()
+            return [
+                {
+                    "id": row["id"], "scanId": row["scan_id"], "workerId": row["worker_id"],
+                    "workerIndex": int(row["worker_index"]), "round": int(row["round_number"]),
+                    "rowId": row["row_id"], "path": row["path"], "surface": row["surface"],
+                    "entrypoint": row["entrypoint"], "rootControl": row["root_control"], "sink": row["sink"],
+                    "disposition": row["disposition"], "reason": row["reason"],
+                    "evidenceRefs": json.loads(row["evidence_refs_json"]),
+                    "candidateIds": json.loads(row["candidate_ids_json"]),
+                    "receiptDigest": row["receipt_digest"],
+                }
+                for row in rows
+            ]
+        finally:
+            connection.close()
+
+    def get_deep_scan_state(self, scan_id: str) -> dict[str, Any] | None:
+        connection = self._connect()
+        try:
+            row = connection.execute("SELECT * FROM deep_scan_state WHERE scan_id=?", (scan_id,)).fetchone()
+            if row is None:
+                return None
+            result = dict(row)
+            result["worklist"] = json.loads(result.pop("worklist_json"))
+            result["canonicalCandidates"] = json.loads(result.pop("canonical_candidates_json"))
+            return result
+        finally:
+            connection.close()
+
     def set_phase(self, scan_id: str, phase: str, *, resuming: bool = False) -> dict[str, Any]:
         if phase not in PHASES:
             raise EngineError("invalid_phase", f"Unknown phase: {phase}")
@@ -516,6 +851,42 @@ class Workbench:
     def complete_scan(self, scan_id: str) -> dict[str, Any]:
         return self._finish_scan(scan_id, "completed")
 
+    def fail_unsealed_completion(self, scan_id: str, code: str, message: str) -> dict[str, Any]:
+        """Revoke a just-completed scan when final sealing fails.
+
+        This narrow transition is allowed only before a manifest digest has been
+        committed. It prevents a scan from remaining completed without a valid
+        canonical bundle.
+        """
+
+        timestamp = utc_now()
+        with self.transaction() as connection:
+            row = connection.execute(
+                "SELECT status, sealed_manifest_digest, workspace_id FROM scans WHERE id=?",
+                (scan_id,),
+            ).fetchone()
+            if row is None:
+                raise EngineError("scan_not_found", f"Scan not found: {scan_id}")
+            if row["status"] != "completed" or row["sealed_manifest_digest"]:
+                raise EngineError(
+                    "completion_already_sealed",
+                    "Only an unsealed completed scan may be revoked after finalization failure.",
+                )
+            connection.execute(
+                """
+                UPDATE scans SET status='failed', failure_code=?, failure_message=?, completed_at=?,
+                    updated_at=? WHERE id=?
+                """,
+                (code, message[:4000], timestamp, timestamp, scan_id),
+            )
+            connection.execute(
+                """
+                UPDATE scan_progress SET message='Finalization failed', updated_at=? WHERE scan_id=?
+                """,
+                (timestamp, scan_id),
+            )
+        return self.get_scan(scan_id)
+
     def cancel_scan(self, scan_id: str) -> dict[str, Any]:
         return self._finish_scan(scan_id, "cancelled")
 
@@ -589,6 +960,144 @@ class Workbench:
     def save_manifest_digest(self, scan_id: str, digest: str) -> None:
         with self.transaction() as connection:
             connection.execute("UPDATE scans SET sealed_manifest_digest=?, updated_at=? WHERE id=?", (digest, utc_now(), scan_id))
+
+    def complete_and_seal_scan_bundle(
+        self,
+        scan_id: str,
+        *,
+        completed_at: str,
+        coverage: dict[str, Any],
+        manifest_digest: str,
+        artifact_records: list[dict[str, Any]],
+        publish_files: Callable[[], None] | None = None,
+        hardening_record: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Atomically publish completion together with the validated sealed bundle.
+
+        No reader can observe ``status=completed`` without the canonical
+        coverage document, manifest digest, and artifact registry being present.
+        Human-readable projections may be registered in this transaction for
+        consistent UI visibility, but the manifest itself identifies the
+        canonical sealed-artifact set and excludes those derived files.  The
+        optional file publisher runs after the pending terminal update and
+        before COMMIT, so no reader observes completed state without the files.
+        """
+
+        with self.transaction() as connection:
+            scan = connection.execute(
+                "SELECT status, phase, workspace_id, sealed_manifest_digest FROM scans WHERE id=?",
+                (scan_id,),
+            ).fetchone()
+            if scan is None:
+                raise EngineError("scan_not_found", f"Scan not found: {scan_id}")
+            if scan["status"] != "running" or scan["phase"] != "reporting":
+                raise EngineError(
+                    "finalizer_wrong_state",
+                    "Only a running scan in the reporting phase can be atomically completed and sealed.",
+                )
+            if scan["sealed_manifest_digest"]:
+                raise EngineError("scan_already_sealed", "The scan already has a sealed manifest digest.")
+            require_status_transition(scan["status"], "completed")
+            for record in artifact_records:
+                connection.execute(
+                    """
+                    INSERT INTO scan_artifacts(scan_id, kind, path, sha256, media_type, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(scan_id, kind) DO UPDATE SET path=excluded.path, sha256=excluded.sha256,
+                        media_type=excluded.media_type, created_at=excluded.created_at
+                    """,
+                    (
+                        scan_id, record["kind"], record["path"], record["sha256"],
+                        record["mediaType"], record.get("createdAt") or completed_at,
+                    ),
+                )
+            connection.execute(
+                """
+                UPDATE scans SET status='completed', failure_code=NULL, failure_message=NULL,
+                    completed_at=?, owner_session_id=NULL, heartbeat_at=NULL, handoff_state='none',
+                    coverage_json=?, sealed_manifest_digest=?, updated_at=?
+                WHERE id=? AND status='running' AND phase='reporting'
+                """,
+                (
+                    completed_at,
+                    json.dumps(coverage, separators=(",", ":"), allow_nan=False),
+                    manifest_digest,
+                    completed_at,
+                    scan_id,
+                ),
+            )
+            connection.execute(
+                "UPDATE scan_progress SET phase_percent=100, overall_percent=100, message='Completed', updated_at=? WHERE scan_id=?",
+                (completed_at, scan_id),
+            )
+            connection.execute(
+                "UPDATE workspaces SET active_scan_id=NULL, updated_at=? WHERE id=? AND active_scan_id=?",
+                (completed_at, scan["workspace_id"], scan_id),
+            )
+            if hardening_record is not None:
+                connection.execute(
+                    """
+                    INSERT INTO hardening_proposals(id, scan_id, title, summary, artifact_path, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET title=excluded.title, summary=excluded.summary,
+                        artifact_path=excluded.artifact_path, updated_at=excluded.updated_at
+                    """,
+                    (
+                        stable_id("hard", scan_id), scan_id, hardening_record["title"],
+                        hardening_record["summary"], hardening_record["artifactPath"],
+                        completed_at, completed_at,
+                    ),
+                )
+            if publish_files is not None:
+                publish_files()
+        return self.get_scan(scan_id)
+
+    def seal_scan_bundle(
+        self,
+        scan_id: str,
+        *,
+        coverage: dict[str, Any],
+        manifest_digest: str,
+        artifact_records: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Atomically register the validated bundle and its manifest digest."""
+
+        timestamp = utc_now()
+        with self.transaction() as connection:
+            scan = connection.execute(
+                "SELECT status, completed_at, sealed_manifest_digest FROM scans WHERE id=?",
+                (scan_id,),
+            ).fetchone()
+            if scan is None:
+                raise EngineError("scan_not_found", f"Scan not found: {scan_id}")
+            if scan["status"] != "completed" or not scan["completed_at"]:
+                raise EngineError("scan_not_completed", "The canonical bundle can be sealed only after scan completion.")
+            existing_digest = scan["sealed_manifest_digest"]
+            if existing_digest and existing_digest != manifest_digest:
+                raise EngineError("scan_already_sealed", "The scan already has a different sealed manifest digest.")
+            for record in artifact_records:
+                connection.execute(
+                    """
+                    INSERT INTO scan_artifacts(scan_id, kind, path, sha256, media_type, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(scan_id, kind) DO UPDATE SET path=excluded.path, sha256=excluded.sha256,
+                        media_type=excluded.media_type, created_at=excluded.created_at
+                    """,
+                    (
+                        scan_id, record["kind"], record["path"], record["sha256"],
+                        record["mediaType"], record.get("createdAt") or timestamp,
+                    ),
+                )
+            connection.execute(
+                """
+                UPDATE scans SET coverage_json=?, sealed_manifest_digest=?, updated_at=? WHERE id=?
+                """,
+                (
+                    json.dumps(coverage, separators=(",", ":"), allow_nan=False),
+                    manifest_digest, timestamp, scan_id,
+                ),
+            )
+        return artifact_records
 
     def upsert_finding(self, scan_id: str, candidate: dict[str, Any]) -> dict[str, Any]:
         fingerprint = candidate["fingerprint"]

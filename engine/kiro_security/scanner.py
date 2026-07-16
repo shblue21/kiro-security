@@ -85,38 +85,60 @@ def _parse_nul_paths(output: str) -> list[str]:
     return [entry for entry in output.split("\x00") if entry]
 
 
+@dataclass
+class DiffPaths:
+    existing: set[str]
+    deleted: set[str]
+
+
+def _diff_name_only(workspace: Path, args: list[str]) -> set[str]:
+    # --no-renames keeps a rename as an explicit add + delete pair so the
+    # rename source is never silently dropped from the coverage frontier.
+    result = run_process("git", args, cwd=workspace)
+    return set(_parse_nul_paths(result.stdout))
+
+
 def _diff_paths(
     workspace: Path,
     scope: str,
     kind: str,
     base: str | None,
     head: str | None,
-) -> tuple[set[str], str]:
+) -> tuple[DiffPaths, str]:
     scope_args = ["--", scope]
     if kind == "working_tree":
-        tracked = run_process("git", ["diff", "--name-only", "-z", "--diff-filter=ACMRTUXB", "HEAD", *scope_args], cwd=workspace)
-        untracked = run_process("git", ["ls-files", "--others", "--exclude-standard", "-z", *scope_args], cwd=workspace)
-        paths = set(_parse_nul_paths(tracked.stdout)) | set(_parse_nul_paths(untracked.stdout))
-        return paths, "working tree compared with HEAD"
+        existing = _diff_name_only(
+            workspace,
+            ["diff", "--name-only", "-z", "--no-renames", "--diff-filter=ACMRTUXB", "HEAD", *scope_args],
+        )
+        existing |= _diff_name_only(workspace, ["ls-files", "--others", "--exclude-standard", "-z", *scope_args])
+        deleted = _diff_name_only(
+            workspace,
+            ["diff", "--name-only", "-z", "--no-renames", "--diff-filter=D", "HEAD", *scope_args],
+        )
+        return DiffPaths(existing=existing - deleted, deleted=deleted), "working tree compared with HEAD"
     if kind == "commit":
         if not head:
             raise EngineError("invalid_diff_target", "Commit diff requires diffHeadRevision.")
         head = require_git_ref(head, "diffHeadRevision")
-        result = run_process(
-            "git", ["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "--diff-filter=ACMRTUXB", head, *scope_args],
-            cwd=workspace,
-        )
-        return set(_parse_nul_paths(result.stdout)), f"commit {head}"
+        common = ["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "--no-renames"]
+        existing = _diff_name_only(workspace, [*common, "--diff-filter=ACMRTUXB", head, *scope_args])
+        deleted = _diff_name_only(workspace, [*common, "--diff-filter=D", head, *scope_args])
+        return DiffPaths(existing=existing - deleted, deleted=deleted), f"commit {head}"
     if kind == "range":
         if not base or not head:
             raise EngineError("invalid_diff_target", "Range diff requires diffBaseRevision and diffHeadRevision.")
         base = require_git_ref(base, "diffBaseRevision")
         head = require_git_ref(head, "diffHeadRevision")
-        result = run_process(
-            "git", ["diff", "--name-only", "-z", "--diff-filter=ACMRTUXB", f"{base}...{head}", *scope_args], cwd=workspace,
-        )
-        return set(_parse_nul_paths(result.stdout)), f"range {base}...{head}"
+        common = ["diff", "--name-only", "-z", "--no-renames"]
+        existing = _diff_name_only(workspace, [*common, "--diff-filter=ACMRTUXB", f"{base}...{head}", *scope_args])
+        deleted = _diff_name_only(workspace, [*common, "--diff-filter=D", f"{base}...{head}", *scope_args])
+        return DiffPaths(existing=existing - deleted, deleted=deleted), f"range {base}...{head}"
     raise EngineError("invalid_diff_target", f"Unsupported diff target kind: {kind}")
+
+
+def _default_ignored(relative: str) -> bool:
+    return any(part in DEFAULT_IGNORES for part in PurePosixPath(relative).parts)
 
 
 def build_inventory(
@@ -132,7 +154,7 @@ def build_inventory(
 ) -> Inventory:
     scope_path = resolve_within(workspace, scope, must_exist=True)
     git_available, revision = _git_revision(workspace)
-    changed_paths: set[str] | None = None
+    changed_paths: DiffPaths | None = None
     diff_summary: str | None = None
     if mode == "diff":
         if not git_available:
@@ -154,6 +176,8 @@ def build_inventory(
     files: list[SourceFile] = []
     excluded: list[str] = []
     deferred: list[dict[str, Any]] = []
+    inventoried: set[str] = set()
+    truncated = False
     digest = hashlib.sha256()
     for path in candidates:
         try:
@@ -161,33 +185,99 @@ def build_inventory(
         except ValueError:
             excluded.append(str(path))
             continue
-        parts = PurePosixPath(relative).parts
-        if any(part in DEFAULT_IGNORES for part in parts):
+        if _default_ignored(relative):
             continue
-        if path.suffix.lower() not in SOURCE_EXTENSIONS:
+        if changed_paths is not None and relative not in changed_paths.existing:
             continue
+        inventoried.add(relative)
         try:
             resolved = path.resolve(strict=True)
         except OSError:
-            deferred.append({"id": relative, "reason": "unreadable path"})
+            deferred.append({
+                "id": relative,
+                "path": relative,
+                "kind": "unreadable_path",
+                "surface": "unreadable_file",
+                "reason": "The in-scope path could not be resolved and was not reviewed.",
+            })
             continue
         if resolved != workspace and workspace not in resolved.parents:
             excluded.append(relative)
             continue
-        if changed_paths is not None and relative not in changed_paths:
+        if path.suffix.lower() not in SOURCE_EXTENSIONS:
+            try:
+                stat = resolved.stat()
+                digest.update(relative.encode("utf-8", "surrogatepass"))
+                digest.update(b"\0unsupported\0")
+                digest.update(f"{stat.st_size}:{stat.st_mtime_ns}".encode("ascii"))
+            except OSError:
+                pass
+            deferred.append({
+                "id": relative,
+                "path": relative,
+                "kind": "unsupported_file",
+                "surface": "unsupported_file",
+                "reason": f"Unsupported in-scope file type {path.suffix or '<no extension>'}; the file was not reviewed.",
+            })
             continue
         loaded = _read_source(resolved, max_file_bytes)
         if loaded is None:
-            deferred.append({"id": relative, "reason": f"binary, unreadable, or larger than {max_file_bytes} bytes"})
+            deferred.append({
+                "id": relative,
+                "path": relative,
+                "kind": "unreadable_or_oversized",
+                "surface": "unreadable_or_oversized_source",
+                "reason": f"The in-scope source was binary, unreadable, or larger than {max_file_bytes} bytes and was not reviewed.",
+            })
             continue
         text, size = loaded
         digest.update(relative.encode("utf-8", "surrogatepass"))
         digest.update(b"\0")
         digest.update(hashlib.sha256(text.encode("utf-8", "surrogatepass")).digest())
-        files.append(SourceFile(resolved, relative, text, language_for(path), size, changed_paths is None or relative in changed_paths))
+        files.append(SourceFile(resolved, relative, text, language_for(path), size, changed_paths is None or relative in changed_paths.existing))
         if len(files) >= max_files:
-            deferred.append({"id": "file-limit", "reason": f"maximum file count {max_files} reached"})
+            truncated = True
+            deferred.append({
+                "id": "file-limit",
+                "path": scope,
+                "kind": "file_limit",
+                "surface": "inventory_limit",
+                "reason": f"The maximum supported-file count {max_files} was reached; remaining in-scope files were not reviewed.",
+            })
             break
+    if changed_paths is not None:
+        # Deleted changed paths never appear in the filesystem walk, but their
+        # base-revision contents were part of the change and were not reviewed.
+        # They must stay on the coverage frontier as explicit deferred rows.
+        for relative in sorted(changed_paths.deleted):
+            if _default_ignored(relative):
+                continue
+            digest.update(relative.encode("utf-8", "surrogatepass"))
+            digest.update(b"\0deleted\0")
+            deferred.append({
+                "id": relative,
+                "path": relative,
+                "kind": "deleted_file",
+                "surface": "deleted_file",
+                "reason": "The changed path was deleted and its base-revision contents were not reviewed.",
+            })
+        if not truncated:
+            # Reconciliation: any Git-reported changed path that produced no
+            # inventory outcome (deleted between diff and walk, unreadable
+            # parents, etc.) must not vanish silently from the frontier.
+            missing = {
+                relative for relative in changed_paths.existing if not _default_ignored(relative)
+            } - inventoried
+            for relative in sorted(missing):
+                digest.update(relative.encode("utf-8", "surrogatepass"))
+                digest.update(b"\0missing\0")
+                deferred.append({
+                    "id": relative,
+                    "path": relative,
+                    "kind": "missing_changed_path",
+                    "surface": "missing_changed_path",
+                    "reason": "The Git-reported changed path was not present in the filesystem inventory and was not reviewed.",
+                })
     files.sort(key=lambda item: item.relative_path)
     return Inventory(
         files=files,

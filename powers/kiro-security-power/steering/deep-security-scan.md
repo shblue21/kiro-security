@@ -9,7 +9,7 @@ Deep mode is an Agent-orchestrated repeated discovery workflow. It is not the St
    - a fresh unique `delegationId`;
    - runtime metadata that records the Agent/host/reasoning configuration.
 4. Treat the returned `brief`, security guidance, and authoritative exhaustive worklist as the complete assignment. Do not expose prior workers or merge output to the worker. Do not edit repository files.
-5. Each worker must independently generate a threat model, inspect every worklist row, and return exhaustive `reviewedPaths` plus evidence-grounded candidates. Candidate locations must use `{label, path, lines}` and include concrete source/root-control/sink evidence and remediation.
+5. Each worker must independently generate a threat model, inspect every worklist row, and return exactly one row-level disposition receipt for every worklist row plus evidence-grounded candidates. Each receipt must use `reportable`, `suppressed`, `not_applicable`, or `deferred`, include a concrete reason, and link reportable rows to submitted candidate IDs. Candidate locations must use `{label, path, lines}` and include concrete source/root-control/sink evidence and remediation.
 6. Submit each completed result with `security_deep_submit_worker_result`. Do not fabricate receipts. Use `security_deep_retry_worker` only for an incomplete worker; completed worker artifacts are immutable.
 7. After all six workers complete, call `security_deep_claim_merge`. Perform semantic merging neutrally:
    - consume every current `sourceRef` exactly once;

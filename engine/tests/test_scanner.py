@@ -63,6 +63,28 @@ def test_diff_inventory_only_reads_changed_source(workspace: Path) -> None:
     assert any(item["ruleId"] == "command-injection.shell-execution" for item in findings)
 
 
+def test_diff_deleted_path_stays_on_coverage_frontier(workspace: Path) -> None:
+    kept = workspace / "src" / "safe.py"
+    kept.write_text(kept.read_text(encoding="utf-8") + "\n# touched by diff test\n", encoding="utf-8")
+    deleted = workspace / "src" / "app.py"
+    deleted.unlink()
+    result = inventory(workspace, mode="diff", diff_target_kind="working_tree")
+    assert [item.relative_path for item in result.files] == ["src/safe.py"]
+    deleted_rows = [item for item in result.deferred if item["kind"] == "deleted_file"]
+    assert [item["path"] for item in deleted_rows] == ["src/app.py"]
+    assert deleted_rows[0]["surface"] == "deleted_file"
+    assert "deleted" in deleted_rows[0]["reason"]
+
+
+def test_diff_commit_deletion_is_reported(workspace: Path) -> None:
+    (workspace / "src" / "app.py").unlink()
+    run_git(workspace, "add", "-A")
+    run_git(workspace, "commit", "-m", "delete app.py")
+    head = run_git(workspace, "rev-parse", "HEAD")
+    result = inventory(workspace, mode="diff", diff_target_kind="commit", diff_head_revision=head)
+    assert any(item["kind"] == "deleted_file" and item["path"] == "src/app.py" for item in result.deferred)
+
+
 def test_symlink_outside_workspace_is_excluded(workspace: Path, tmp_path: Path) -> None:
     outside = tmp_path / "outside.py"
     outside.write_text("password = 'abcdefghijklmnopqrstuvwxyz123456'\n", encoding="utf-8")

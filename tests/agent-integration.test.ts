@@ -99,6 +99,7 @@ test("one-click installer merges, verifies, prepares Power, and removes only man
       "security_list_scans",
       "security_get_scan",
       "security_get_progress",
+      "security_deep_get_status",
       "security_list_findings",
       "security_get_finding",
     ]);

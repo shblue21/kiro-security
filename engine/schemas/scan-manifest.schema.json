@@ -11,14 +11,32 @@
     "scan": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "producer", "status", "startedAt", "completedAt", "sealedAt", "target", "scope", "coverageRef", "findingsRef", "artifacts"],
+      "required": [
+        "id",
+        "producer",
+        "status",
+        "startedAt",
+        "completedAt",
+        "sealedAt",
+        "target",
+        "scope",
+        "threatModel",
+        "hardening",
+        "coverageRef",
+        "findingsRef",
+        "artifacts",
+        "derivedArtifacts"
+      ],
       "properties": {
-        "id": { "type": "string" },
+        "id": { "type": "string", "minLength": 1, "maxLength": 256 },
         "producer": {
           "type": "object",
           "additionalProperties": false,
           "required": ["name", "version"],
-          "properties": { "name": { "const": "kiro-security-power" }, "version": { "type": "string" } }
+          "properties": {
+            "name": { "const": "kiro-security-power" },
+            "version": { "type": "string", "minLength": 1 }
+          }
         },
         "status": { "const": "completed" },
         "startedAt": { "type": "string", "format": "date-time" },
@@ -26,12 +44,12 @@
         "sealedAt": { "type": "string", "format": "date-time" },
         "target": {
           "type": "object",
-          "additionalProperties": true,
-          "required": ["kind", "targetId", "displayName"],
+          "additionalProperties": false,
+          "required": ["kind", "targetId", "displayName", "revision", "baseRevision", "headRevision", "snapshotDigest"],
           "properties": {
             "kind": { "enum": ["git_revision", "git_worktree", "git_diff", "directory_snapshot"] },
-            "targetId": { "type": "string" },
-            "displayName": { "type": "string" },
+            "targetId": { "type": "string", "minLength": 1 },
+            "displayName": { "type": "string", "minLength": 1 },
             "revision": { "type": ["string", "null"] },
             "baseRevision": { "type": ["string", "null"] },
             "headRevision": { "type": ["string", "null"] },
@@ -40,27 +58,69 @@
         },
         "scope": {
           "type": "object",
-          "additionalProperties": true,
-          "required": ["includePaths", "excludePaths"],
+          "additionalProperties": false,
+          "required": ["includePaths", "excludePaths", "summary", "artifactsReviewed", "runtimeStatus", "validationMode", "limitations"],
           "properties": {
             "includePaths": { "type": "array", "items": { "type": "string" } },
-            "excludePaths": { "type": "array", "items": { "type": "string" } }
+            "excludePaths": { "type": "array", "items": { "type": "string" } },
+            "summary": { "type": "string", "minLength": 1 },
+            "artifactsReviewed": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+            },
+            "runtimeStatus": { "enum": ["static-only", "agent-assisted-static"] },
+            "validationMode": {
+              "enum": [
+                "deterministic-static-analysis",
+                "deterministic-diff-static-analysis",
+                "agent-assisted-discovery+deterministic-static-validation"
+              ]
+            },
+            "limitations": { "type": "array", "items": { "type": "string" } }
           }
         },
-        "threatModel": { "type": "object", "additionalProperties": true, "required": ["summary"] },
-        "hardening": { "type": "object", "additionalProperties": false, "required": ["portfolioPath"], "properties": { "portfolioPath": { "const": "hardening/hardening.md" } } },
+        "threatModel": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["summary"]
+        },
+        "hardening": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["portfolioPath"],
+          "properties": {
+            "portfolioPath": { "const": "hardening/hardening.md" }
+          }
+        },
         "coverageRef": { "const": "coverage.json" },
         "findingsRef": { "const": "findings.json" },
         "artifacts": {
           "type": "array",
+          "minItems": 2,
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["path", "sha256", "mediaType"],
+            "required": ["path", "sha256", "mediaType", "role"],
             "properties": {
-              "path": { "type": "string" },
+              "path": { "type": "string", "minLength": 1 },
               "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-              "mediaType": { "type": "string" }
+              "mediaType": { "type": "string", "minLength": 1 },
+              "role": { "enum": ["canonical", "supporting"] }
+            }
+          }
+        },
+        "derivedArtifacts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "mediaType", "generatedFrom"],
+            "properties": {
+              "path": { "type": "string", "minLength": 1 },
+              "mediaType": { "type": "string", "minLength": 1 },
+              "generatedFrom": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+              "findingId": { "type": "string", "minLength": 1 }
             }
           }
         }

@@ -43,7 +43,7 @@ def candidate(path: str = "src/app.py") -> dict:
 def test_migrations_integrity_snapshot_and_active_lock(workspace: Path, tmp_path: Path) -> None:
     workbench = Workbench(workspace)
     info = workbench.database_info()
-    assert info["schemaVersion"] == 6
+    assert info["schemaVersion"] == 8
     assert info["journalMode"].lower() == "wal"
     assert info["integrity"] == "ok"
     scan = create_scan(workbench)
@@ -93,14 +93,24 @@ def test_findings_validation_triage_remediation_and_parameterized_search(workspa
     assert remediated["remediationRecords"][0]["state"] == "generated"
 
 
-def test_migration_backup_is_created_before_pending_migration(workspace: Path) -> None:
+def test_migration_backups_are_created_before_and_after_pending_migration(workspace: Path) -> None:
     workbench = Workbench(workspace)
     with workbench.transaction() as connection:
-        connection.execute("DROP TABLE tracking_records")
-        connection.execute("DELETE FROM schema_migrations WHERE version=6")
-    Workbench(workspace)
-    backups = list(workbench.state_dir.glob("workbench.pre-migration-v5.*.sqlite"))
-    assert backups
+        connection.execute("DROP TABLE deep_worker_coverage_receipts")
+        connection.execute("DROP TABLE coverage_ledger")
+        connection.execute("DELETE FROM schema_migrations WHERE version=8")
+    migrated = Workbench(workspace)
+    pre_backups = list(workbench.state_dir.glob("workbench.pre-migration-v7.*.sqlite"))
+    post_backups = list(workbench.state_dir.glob("workbench.post-migration-v8.*.sqlite"))
+    assert pre_backups
+    assert post_backups
+    assert migrated.database_info()["schemaVersion"] == 8
+    connection = sqlite3.connect(post_backups[-1])
+    try:
+        assert connection.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 8
+    finally:
+        connection.close()
 
 
 def test_corrupt_database_reports_structured_error(workspace: Path) -> None:

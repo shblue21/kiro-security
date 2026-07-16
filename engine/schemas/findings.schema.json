@@ -68,8 +68,8 @@
           "additionalProperties": false,
           "required": ["algorithm", "primary"],
           "properties": {
-            "algorithm": { "const": "kiro-security/v1" },
-            "primary": { "type": "string", "pattern": "^kiro-security/v1:sha256:[a-f0-9]{64}$" }
+            "algorithm": { "enum": ["kiro-security/v1", "kiro-security/deep-v1"] },
+            "primary": { "type": "string", "pattern": "^kiro-security/(?:deep-)?v1:sha256:[a-f0-9]{64}$" }
           }
         },
         "title": { "type": "string", "minLength": 1, "maxLength": 512 },
