@@ -17,8 +17,47 @@ _CONTROL_BY_CATEGORY = {
     "transport-security": ("Central TLS client policy", "Provide one client factory with verification on, approved roots, timeouts, and no per-call disable switch."),
 }
 
+_MODEL_PORTFOLIOS: dict[str, dict[str, Any]] = {}
+
+
+def register_model_hardening(scan_id: str, portfolio: dict[str, Any]) -> None:
+    _MODEL_PORTFOLIOS[scan_id] = portfolio
+
+
+def render_model_hardening(portfolio: dict[str, Any]) -> dict[str, Any]:
+    lines = [f"# {portfolio['title']}", "", portfolio["summary"], "", "## Architecture and security boundaries", ""]
+    lines.extend(f"- {item}" for item in portfolio["architectureBoundaries"])
+    lines.extend(["", "## Viable options", ""])
+    for option in portfolio["options"]:
+        lines.extend([
+            f"### {option['title']} (`{option['id']}`)", "", option["description"], "", "Advantages:",
+            *[f"- {item}" for item in option["advantages"]], "", "Disadvantages:",
+            *[f"- {item}" for item in option["disadvantages"]], "", f"Tradeoffs: {option['tradeoffs']}", "",
+            "Evidence:", *[f"- {item}" for item in option["evidenceRefs"]], "",
+        ])
+    lines.extend([
+        "## Recommendation", "", f"Selected option: `{portfolio['recommendedOptionId']}`", "",
+        portfolio["recommendationRationale"], "", "## Migration", "",
+        *[f"{index}. {item}" for index, item in enumerate(portfolio["migrationSteps"], start=1)],
+        "", "## Rollout", "", *[f"- {item}" for item in portfolio["rolloutPlan"]],
+        "", "## Rollback", "", *[f"- {item}" for item in portfolio["rollbackPlan"]],
+        "", "## Success metrics", "", *[f"- {item}" for item in portfolio["successMetrics"]],
+        "", "## Work packages", "",
+    ])
+    for package in portfolio["workPackages"]:
+        lines.extend([
+            f"### {package['title']} (`{package['id']}`)", "",
+            "Dependencies: " + (", ".join(package["dependencies"]) or "none"), "",
+            *[f"- {item}" for item in package["deliverables"]], "",
+        ])
+    lines.extend(["## Before and after", "", "```text", portfolio["diagram"], "```", "", "## Evidence references", ""])
+    lines.extend(f"- {item}" for item in portfolio["evidenceReferences"])
+    return {"title": portfolio["title"], "summary": portfolio["summary"], "content": "\n".join(lines) + "\n"}
+
 
 def render_hardening_proposal(scan_id: str, findings: list[dict[str, Any]]) -> dict[str, Any]:
+    if scan_id in _MODEL_PORTFOLIOS:
+        return render_model_hardening(_MODEL_PORTFOLIOS[scan_id])
     counts = Counter(item["taxonomy"]["category"] for item in findings if item.get("validationStatus") != "rejected")
     title = "Kiro Security Power hardening portfolio"
     lines = [f"# {title}", "", f"Scan: `{scan_id}`", "", "## Executive summary", ""]

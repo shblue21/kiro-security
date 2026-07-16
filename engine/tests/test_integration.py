@@ -8,6 +8,7 @@ from pathlib import Path
 import jsonschema
 import pytest
 
+from kiro_security.errors import EngineError
 from kiro_security.service import SecurityService
 
 from .conftest import PROJECT_ROOT, run_git, wait_for_scan
@@ -48,6 +49,45 @@ DEEP_COMPLETION_ATTESTATION = {
 
 def deep_scan_params(**overrides: object) -> dict:
     return {"mode": "deep", "scope": ".", "modelId": "integration-model", "runtime": DEEP_WORKER_RUNTIME, **overrides}
+
+
+def zero_finding_tail_result(assignment: dict, scan_id: str) -> dict:
+    if assignment["kind"] == "threat_model":
+        evidence_path = assignment["payload"]["evidencePaths"][0]
+        return {
+            "scanId": scan_id,
+            "summary": f"The zero-finding integration fixture contains the reviewed source {evidence_path}.",
+            "protectedAssets": ["Repository source integrity"],
+            "actors": ["Repository user"],
+            "trustBoundaries": ["Workspace input entering application code"],
+            "entrypoints": [evidence_path],
+            "privilegedOperations": ["Repository-defined runtime behavior"],
+            "securityControls": ["Canonical supported-source inventory"],
+            "highImpactAttackSurfaces": ["Repository-defined application entrypoints"],
+            "candidateThreatAssumptions": [],
+            "evidenceReferences": [{"path": evidence_path, "reason": "The path is in the immutable Deep worklist."}],
+            "unknowns": ["No reportable canonical candidate was produced."],
+        }
+    assert assignment["kind"] == "hardening", assignment["kind"]
+    return {
+        "scanId": scan_id,
+        "title": "Zero-finding integration hardening portfolio",
+        "summary": "Preserve the reviewed security boundaries and continue repository-native regression coverage.",
+        "architectureBoundaries": ["Workspace inputs cross into repository-defined application code."],
+        "options": [
+            {"id": "tests", "title": "Boundary regression tests", "description": "Add negative tests at reviewed boundaries.", "advantages": ["Executable evidence"], "disadvantages": ["Maintenance cost"], "tradeoffs": "Higher test maintenance for stronger regression detection.", "evidenceRefs": [scan_id]},
+            {"id": "review", "title": "Focused security review", "description": "Repeat focused review when boundaries change.", "advantages": ["Low implementation impact"], "disadvantages": ["Manual effort"], "tradeoffs": "Lower code cost with recurring review effort.", "evidenceRefs": [scan_id]},
+        ],
+        "recommendedOptionId": "tests",
+        "recommendationRationale": "Repository-native negative tests provide repeatable evidence.",
+        "migrationSteps": ["Identify reviewed boundaries", "Add negative regression tests"],
+        "rolloutPlan": ["Land tests with boundary owners"],
+        "rollbackPlan": ["Revert only unstable tests while retaining documented boundaries"],
+        "successMetrics": ["Boundary regression tests pass"],
+        "workPackages": [{"id": "tests", "title": "Boundary tests", "dependencies": [], "deliverables": ["Negative regression tests"]}],
+        "diagram": "Before: input -> repository boundary\nAfter: input -> tested repository boundary",
+        "evidenceReferences": [scan_id],
+    }
 
 
 def complete_empty_deep_round(service: SecurityService, scan_id: str, timeout: float = 30.0) -> None:
@@ -102,6 +142,36 @@ def complete_empty_deep_round(service: SecurityService, scan_id: str, timeout: f
         "claimToken": merge["claimToken"],
         "canonicalCandidates": [],
     })
+    tail_index = 0
+    while time.monotonic() < deadline:
+        scan = service.get_scan({"scanId": scan_id})
+        if scan["status"] == "completed":
+            return
+        assert scan["status"] == "running", scan
+        status = service.deep_get_status({"scanId": scan_id})
+        if status.get("nextAction") != "claim_tail_assignment":
+            time.sleep(0.03)
+            continue
+        tail_index += 1
+        delegation_id = f"integration-tail-{tail_index}"
+        assignment = service.deep_get_tail_assignment({
+            "scanId": scan_id,
+            "modelId": "integration-model",
+            "delegationId": delegation_id,
+            "runtime": DEEP_WORKER_RUNTIME,
+        })
+        assert assignment["kind"] in ("threat_model", "hardening"), assignment["kind"]
+        service.deep_submit_tail_result({
+            "scanId": scan_id,
+            "assignmentId": assignment["assignmentId"],
+            "claimToken": assignment["claimToken"],
+            "modelId": "integration-model",
+            "delegationId": delegation_id,
+            "runtime": DEEP_WORKER_RUNTIME,
+            "completionAttestation": DEEP_COMPLETION_ATTESTATION,
+            "result": zero_finding_tail_result(assignment, scan_id),
+        })
+    raise AssertionError("Deep zero-finding tail did not complete")
 
 
 def test_standard_scan_artifacts_validation_exports_and_events(workspace: Path, tmp_path: Path) -> None:
@@ -138,6 +208,115 @@ def test_standard_scan_artifacts_validation_exports_and_events(workspace: Path, 
         assert {"scan.started", "scan.phaseChanged", "scan.progress", "finding.discovered", "finding.updated", "artifact.created", "scan.completed"} <= event_names
     finally:
         service.shutdown({})
+
+
+def prepare_tail_test_scan(service: SecurityService) -> dict:
+    scan = service.start_scan(deep_scan_params())
+    deadline = time.monotonic() + 10
+    while service.workbench.get_deep_scan_state(scan["id"]) is None:
+        assert time.monotonic() < deadline
+        time.sleep(0.02)
+    while scan["id"] in service.runner.active_scan_ids():
+        assert time.monotonic() < deadline
+        time.sleep(0.02)
+    with service.workbench.transaction() as connection:
+        connection.execute("UPDATE deep_scan_state SET status='saturated' WHERE scan_id=?", (scan["id"],))
+    return service.workbench.get_scan(scan["id"])
+
+
+def tail_test_finding(service: SecurityService, scan_id: str) -> dict:
+    path = service.workbench.get_deep_scan_state(scan_id)["worklist"][0]["path"]
+    return service.workbench.upsert_finding(scan_id, {
+        "fingerprint": f"kiro-security/deep-v1:sha256:{scan_id}", "ruleId": "integration.tail-proof",
+        "identity": {"anchor": "integration-tail", "instance": f"{path}:1"},
+        "title": "Integration tail proof", "summary": "Focused Deep tail regression finding.",
+        "severity": {"level": "high", "score": None, "rationale": "Focused fixture severity."},
+        "confidence": {"level": "high", "rationale": "Focused fixture confidence."},
+        "taxonomy": {"category": "security", "cwe": []},
+        "locations": [{"path": path, "startLine": 1, "endLine": 1, "role": "source"}],
+        "remediation": "Preserve the focused regression contract.",
+        "codeEvidence": [{"path": path, "startLine": 1, "endLine": 1, "role": "source", "code": "fixture", "explanation": "Focused fixture evidence."}],
+        "details": {},
+    })
+
+
+def test_threat_completion_is_not_tail_complete(workspace: Path) -> None:
+    service = service_for(workspace)
+    try:
+        scan = prepare_tail_test_scan(service)
+        assert service.runner.tail.prepare_validation(scan["id"]) is False
+        with service.workbench.transaction() as connection:
+            connection.execute("UPDATE deep_tail_assignments SET status='completed', result_json='{}', receipt_digest='sha256:test' WHERE scan_id=? AND kind='threat_model'", (scan["id"],))
+        status = service.runner.tail.status(scan["id"])
+        assert status["counts"]["hardening"]["completed"] == 0
+        assert status["nextAction"] == "await_tail_materialization"
+    finally:
+        service.shutdown({})
+
+
+def test_writeup_rejects_symlinked_findings_ancestor(workspace: Path, tmp_path: Path) -> None:
+    service = service_for(workspace)
+    try:
+        scan = prepare_tail_test_scan(service)
+        finding = tail_test_finding(service, scan["id"])
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (Path(scan["artifact_dir"]) / "findings").symlink_to(outside, target_is_directory=True)
+        sections = {key: key for key in (
+            "title", "severity", "executiveSummary", "affectedComponent", "threatContext", "rootCause",
+            "evidence", "validationProof", "counterevidence", "attackPath", "impact", "remediation",
+            "verificationGuidance", "proofGaps",
+        )}
+        with pytest.raises(EngineError) as error:
+            service.runner.tail._materialize_writeup(scan, {"subject_id": finding["occurrenceId"]}, {"findingId": finding["findingId"], "sections": sections, "poc": []})
+        assert error.value.code == "unsafe_artifact_path"
+        assert not any(outside.iterdir())
+    finally:
+        service.shutdown({})
+
+
+def test_deep_get_finding_overlays_completed_tail_proof(workspace: Path) -> None:
+    service = service_for(workspace)
+    try:
+        scan = prepare_tail_test_scan(service)
+        finding = tail_test_finding(service, scan["id"])
+        validation = {"findingId": finding["findingId"], "status": "validated", "method": "focused test", "rationale": "Confirmed.", "evidence": [], "counterevidence": ["none"], "crossFileTrace": ["trace"], "frameworkControls": ["none"], "proofGaps": [], "tests": [{"name": "focused", "result": "PASS"}], "dynamicValidationUnavailableReason": None}
+        attack = {"findingId": finding["findingId"], "actor": "remote user", "crossFilePath": [{"path": finding["locations"][0]["path"], "step": "flow"}], "severity": {"level": "high", "rationale": "proof"}, "confidence": {"level": "high", "rationale": "proof"}}
+        now = "2026-01-01T00:00:00.000Z"
+        with service.workbench.transaction() as connection:
+            for kind, result in (("validation", validation), ("attack_path", attack)):
+                connection.execute("INSERT INTO deep_tail_assignments(id,scan_id,kind,subject_id,status,attempt,payload_json,result_json,receipt_digest,created_at,updated_at,completed_at) VALUES (?,?,?,?, 'completed',1,'{}',?,'sha256:test',?,?,?)", (f"tail-{kind}", scan["id"], kind, finding["occurrenceId"], json.dumps(result), now, now, now))
+        detail = service.get_finding({"occurrenceId": finding["occurrenceId"]})
+        assert detail["validation"]["tests"][0]["result"] == "PASS"
+        assert detail["attackPath"]["actor"] == "remote user"
+    finally:
+        service.shutdown({})
+
+
+def test_resume_recovers_orphaned_claimed_tail_attempt(workspace: Path) -> None:
+    service = service_for(workspace)
+    resumed: SecurityService | None = None
+    try:
+        scan = prepare_tail_test_scan(service)
+        assert service.runner.tail.prepare_validation(scan["id"]) is False
+        claimed = service.deep_get_tail_assignment({"scanId": scan["id"], "modelId": "integration-model", "delegationId": "orphaned-tail-1", "runtime": DEEP_WORKER_RUNTIME})
+        service.shutdown({})
+        resumed = service_for(workspace)
+        resumed.resume_scan({"scanId": scan["id"]})
+        connection = resumed.workbench._connect()
+        try:
+            attempts = connection.execute("SELECT status,attempt,previous_assignment_id FROM deep_tail_assignments WHERE scan_id=? AND kind='threat_model' ORDER BY attempt", (scan["id"],)).fetchall()
+        finally:
+            connection.close()
+        assert [(row["status"], row["attempt"]) for row in attempts] == [("failed", 1), ("pending", 2)]
+        assert attempts[1]["previous_assignment_id"] == claimed["assignmentId"]
+        replacement = resumed.deep_get_tail_assignment({"scanId": scan["id"], "modelId": "integration-model", "delegationId": "orphaned-tail-2", "runtime": DEEP_WORKER_RUNTIME})
+        assert replacement["attempt"] == 2
+    finally:
+        if resumed is not None:
+            resumed.shutdown({})
+        else:
+            service.shutdown({})
 
 
 def test_deep_and_diff_modes_use_real_repository_state(workspace: Path) -> None:

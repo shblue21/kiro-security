@@ -108,6 +108,21 @@ def validate_method(method: str, raw_params: Any) -> dict[str, Any]:
         required_string(params, "claimToken", max_length=256)
         if not isinstance(params.get("canonicalCandidates"), list):
             raise EngineError("invalid_params", "canonicalCandidates must be an array.")
+    elif method == "deep_get_tail_assignment":
+        required_string(params, "scanId", max_length=256)
+        required_string(params, "modelId", max_length=256)
+        required_string(params, "delegationId", max_length=256)
+        require_object(params.get("runtime"), "runtime")
+    elif method == "deep_submit_tail_result":
+        for name in ("scanId", "assignmentId", "claimToken", "modelId", "delegationId"):
+            required_string(params, name, max_length=256)
+        require_object(params.get("runtime"), "runtime")
+        require_object(params.get("completionAttestation"), "completionAttestation")
+        require_object(params.get("result"), "result")
+    elif method == "deep_retry_writeup":
+        required_string(params, "scanId", max_length=256)
+        required_string(params, "assignmentId", max_length=256)
+        optional_string(params, "reason", max_length=4000)
     elif method == "list_scans":
         optional_int(params, "limit", minimum=1, maximum=200)
     elif method == "list_findings":

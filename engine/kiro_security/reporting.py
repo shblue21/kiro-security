@@ -286,12 +286,17 @@ def build_coverage_document(
     }
 
 
-def build_findings_document(scan_id: str, findings: list[dict[str, Any]], writeup_paths: dict[str, str] | None = None) -> dict[str, Any]:
+def build_findings_document(
+    scan_id: str,
+    findings: list[dict[str, Any]],
+    writeup_paths: dict[str, str] | None = None,
+    tail_results: dict[str, dict[str, dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
     writeup_paths = writeup_paths or {}
     result: list[dict[str, Any]] = []
     for item in findings:
-        validation = item.get("validation")
-        attack = item.get("attackPath")
+        validation = (tail_results or {}).get("validation", {}).get(item["occurrenceId"], item.get("validation"))
+        attack = (tail_results or {}).get("attack_path", {}).get(item["occurrenceId"], item.get("attackPath"))
         locations = item.get("locations", [])
         source = next((location for location in locations if location.get("role") == "source"), None)
         sink = next((location for location in locations if location.get("role") == "sink"), None)
@@ -304,6 +309,9 @@ def build_findings_document(scan_id: str, findings: list[dict[str, Any]], writeu
         deep_provenance = details.get("deepProvenance")
         if isinstance(deep_provenance, dict):
             provenance["deep"] = deep_provenance
+        deep_tail_provenance = details.get("deepTailProvenance")
+        if isinstance(deep_tail_provenance, dict):
+            provenance["deepTail"] = deep_tail_provenance
         finding = {
             "findingId": item["findingId"],
             "occurrenceId": item["occurrenceId"],
@@ -386,15 +394,18 @@ def write_canonical_documents(
     scan_id: str,
     inventory_data: dict[str, Any],
     threat_model: dict[str, Any],
+    *,
+    writeup_paths: dict[str, str] | None = None,
+    tail_results: dict[str, dict[str, dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     scan = workbench.get_scan(scan_id)
     artifact_dir = Path(scan["artifact_dir"])
     artifact_dir.mkdir(parents=True, exist_ok=True)
     findings = [workbench.get_finding(item["occurrenceId"]) for item in workbench.list_findings(scan_id)]
-    writeup_paths = _write_writeups(artifact_dir, findings)
+    writeup_paths = _write_writeups(artifact_dir, findings) if writeup_paths is None else writeup_paths
     synchronize_coverage_ledger(workbench, scan, inventory_data, findings)
     coverage = build_coverage_document(workbench, scan, inventory_data)
-    findings_document = build_findings_document(scan_id, findings, writeup_paths)
+    findings_document = build_findings_document(scan_id, findings, writeup_paths, tail_results)
     discovery_document = {
         "documentType": "kiro-security-power.discovery",
         "schemaVersion": "1.0",
@@ -414,14 +425,20 @@ def write_canonical_documents(
         "documentType": "kiro-security-power.validation",
         "schemaVersion": "1.0",
         "scanId": scan_id,
-        "records": [item["validation"] for item in findings if item.get("validation")],
+        "records": [
+            (tail_results or {}).get("validation", {}).get(item["occurrenceId"], item["validation"])
+            for item in findings if item.get("validation")
+        ],
     }
     attack_document = {
         "documentType": "kiro-security-power.attack-paths",
         "schemaVersion": "1.0",
         "scanId": scan_id,
         "paths": [
-            {"findingId": item["findingId"], "occurrenceId": item["occurrenceId"], **item["attackPath"]}
+            {
+                "findingId": item["findingId"], "occurrenceId": item["occurrenceId"],
+                **(tail_results or {}).get("attack_path", {}).get(item["occurrenceId"], item["attackPath"]),
+            }
             for item in findings
             if item.get("attackPath")
         ],

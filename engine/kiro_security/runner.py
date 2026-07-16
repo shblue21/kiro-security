@@ -16,6 +16,7 @@ from .finalizer import finalize_scan, prepare_finalization
 from .reporting import write_canonical_documents
 from .scanner import Inventory, build_inventory, scan_inventory
 from .security import redact, utc_now, write_json
+from .tail import DeepTailCoordinator
 from .threat_model import build_threat_model
 from .validator import validate_finding
 
@@ -38,8 +39,10 @@ class ScanRunner:
         self.max_files = max_files
         self.max_file_bytes = max_file_bytes
         self.deep = DeepCoordinator(workbench)
+        self.tail = DeepTailCoordinator(workbench, self.deep)
         self._shutdown = threading.Event()
         self._threads: dict[str, threading.Thread] = {}
+        self._resume_requested: set[str] = set()
         self._lock = threading.RLock()
 
     def start(self, scan_id: str, *, resuming: bool = False) -> None:
@@ -55,6 +58,14 @@ class ScanRunner:
             )
             self._threads[scan_id] = thread
             thread.start()
+
+    def resume_when_idle(self, scan_id: str) -> None:
+        with self._lock:
+            existing = self._threads.get(scan_id)
+            if existing and existing.is_alive():
+                self._resume_requested.add(scan_id)
+                return
+        self.start(scan_id, resuming=True)
 
     def _emit(self, event: str, payload: dict[str, Any]) -> None:
         scan_id = payload.get("scanId")
@@ -189,11 +200,12 @@ class ScanRunner:
                 elif phase == "discovery":
                     phase_complete = self._phase_discovery(scan_id)
                 elif phase == "validation":
-                    self._phase_validation(scan_id)
+                    phase_complete = self._phase_validation(scan_id)
                 elif phase == "attack_path":
-                    self._phase_attack_path(scan_id)
+                    phase_complete = self._phase_attack_path(scan_id)
                 elif phase == "reporting":
                     prepared_finalization = self._phase_reporting(scan_id)
+                    phase_complete = prepared_finalization is not None
                 if not phase_complete:
                     return
                 self.workbench.update_progress(scan_id, phase_percent=100, message=f"Completed {phase.replace('_', ' ')}")
@@ -241,8 +253,18 @@ class ScanRunner:
             self._emit("scan.failed", {"scanId": scan_id, "scan": failed, "error": {"code": "internal_error", "message": message}})
             self._log("error", "Internal runner exception:\n" + traceback.format_exc(limit=20), scan_id=scan_id, code="internal_error")
         finally:
+            resume = False
             with self._lock:
                 self._threads.pop(scan_id, None)
+                if scan_id in self._resume_requested:
+                    self._resume_requested.remove(scan_id)
+                    resume = not self._shutdown.is_set()
+            if resume:
+                try:
+                    if self.workbench.get_scan(scan_id)["status"] == "running":
+                        self.start(scan_id, resuming=True)
+                except EngineError as exc:
+                    self._log("warning", str(exc), scan_id=scan_id, code=exc.code)
 
     def _phase_preflight(self, scan_id: str, *, require_same_snapshot: bool) -> None:
         scan = self.workbench.get_scan(scan_id)
@@ -275,9 +297,15 @@ class ScanRunner:
     def _phase_threat_model(self, scan_id: str) -> None:
         scan = self.workbench.get_scan(scan_id)
         inventory = self._build_inventory(scan, require_same_snapshot=True)
-        output = Path(scan["artifact_dir"]) / ARTIFACT_KINDS["threatModel"]
+        output = (
+            Path(scan["artifact_dir"]) / "context" / "pre-discovery-threat-model.md"
+            if scan["mode"] == "deep"
+            else Path(scan["artifact_dir"]) / ARTIFACT_KINDS["threatModel"]
+        )
         build_threat_model(self.workbench.workspace, inventory, output)
-        artifact = self.workbench.add_artifact(scan_id, "threatModel", output, "text/markdown")
+        artifact = self.workbench.add_artifact(
+            scan_id, "deepDiscoveryContext" if scan["mode"] == "deep" else "threatModel", output, "text/markdown"
+        )
         self._emit("artifact.created", {"scanId": scan_id, "artifact": artifact})
         self._progress(scan_id, len(inventory.files), len(inventory.files), "threat model")
 
@@ -349,7 +377,16 @@ class ScanRunner:
         )
         return True
 
-    def _phase_validation(self, scan_id: str) -> None:
+    def _phase_validation(self, scan_id: str) -> bool:
+        scan = self.workbench.get_scan(scan_id)
+        if scan["mode"] == "deep":
+            complete = self.tail.prepare_validation(scan_id)
+            tail = self.tail.status(scan_id)
+            self.workbench.update_progress(
+                scan_id, phase_percent=95 if complete else 10,
+                message="Deep model validation complete" if complete else f"Awaiting Deep tail {tail['activeKind']} assignment",
+            )
+            return complete
         summaries = self.workbench.list_findings(scan_id)
         total = len(summaries)
         for index, summary in enumerate(summaries, start=1):
@@ -361,8 +398,18 @@ class ScanRunner:
             self._progress(scan_id, index, total, finding["title"])
         counts = self.workbench.scan_counts(scan_id)
         self.workbench.update_progress(scan_id, phase_percent=100, reportable_findings_count=counts["validated"] + counts["needs_review"], message="Validation complete")
+        return True
 
-    def _phase_attack_path(self, scan_id: str) -> None:
+    def _phase_attack_path(self, scan_id: str) -> bool:
+        scan = self.workbench.get_scan(scan_id)
+        if scan["mode"] == "deep":
+            complete = self.tail.prepare_attack_paths_and_writeups(scan_id)
+            tail = self.tail.status(scan_id)
+            self.workbench.update_progress(
+                scan_id, phase_percent=95 if complete else 10,
+                message="Deep attack paths and writeups complete" if complete else f"Awaiting Deep tail {tail['activeKind']} assignment",
+            )
+            return complete
         summaries = self.workbench.list_findings(scan_id)
         eligible = [item for item in summaries if item.get("validationStatus") in ("validated", "needs_review")]
         total = len(eligible)
@@ -375,8 +422,9 @@ class ScanRunner:
             self._progress(scan_id, index, total, finding["title"])
         if total == 0:
             self._progress(scan_id, 0, 0, "no reportable attack paths")
+        return True
 
-    def _phase_reporting(self, scan_id: str) -> dict[str, Any]:
+    def _phase_reporting(self, scan_id: str) -> dict[str, Any] | None:
         scan = self.workbench.get_scan(scan_id)
         inventory_path = self._inventory_path(scan)
         if not inventory_path.exists():
@@ -385,10 +433,24 @@ class ScanRunner:
             write_json(inventory_path, inventory_data)
         else:
             inventory_data = json.loads(inventory_path.read_text(encoding="utf-8"))
-        threat_path = Path(scan["artifact_dir"]) / ARTIFACT_KINDS["threatModel"]
         inventory = self._build_inventory(scan, require_same_snapshot=True)
-        threat_model = build_threat_model(self.workbench.workspace, inventory, threat_path)
-        bundle = write_canonical_documents(self.workbench, scan_id, inventory_data, threat_model)
+        if scan["mode"] == "deep":
+            if not self.tail.prepare_hardening(scan_id):
+                tail = self.tail.status(scan_id)
+                self.workbench.update_progress(scan_id, phase_percent=10, message=f"Awaiting Deep tail {tail['activeKind']} assignment")
+                return None
+            threat_model = self.tail.threat_model(scan_id)
+            writeup_paths = self.tail.writeup_paths(scan_id)
+            tail_results = self.tail.completed_results(scan_id)
+        else:
+            threat_path = Path(scan["artifact_dir"]) / ARTIFACT_KINDS["threatModel"]
+            threat_model = build_threat_model(self.workbench.workspace, inventory, threat_path)
+            writeup_paths = None
+            tail_results = None
+        bundle = write_canonical_documents(
+            self.workbench, scan_id, inventory_data, threat_model,
+            writeup_paths=writeup_paths, tail_results=tail_results,
+        )
         prepared = prepare_finalization(self.workbench, bundle)
         canonical_count = len(bundle["paths"])
         self._progress(scan_id, canonical_count, canonical_count, "validated canonical reporting documents")

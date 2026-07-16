@@ -83,6 +83,7 @@ class SecurityService:
                 "deepAgentOrchestration": True,
                 "deepIndependentWorkers": 6,
                 "deepMaxRounds": 10,
+                "deepModelTailAssignments": True,
             },
             "workspaceRoot": str(self.workspace),
             "stateDirectory": str(self.workbench.state_dir),
@@ -150,7 +151,12 @@ class SecurityService:
         return scan
 
     def resume_scan(self, params: dict[str, Any]) -> dict[str, Any]:
-        scan = self.workbench.resume_scan(params["scanId"], self.session_id)
+        scan_id = params["scanId"]
+        scan = self.workbench.resume_scan(
+            scan_id,
+            self.session_id,
+            recover_tail_artifacts=lambda assignments: self.runner.tail.clean_resume_writeups(scan_id, assignments),
+        )
         self.runner.start(scan["id"], resuming=True)
         return scan
 
@@ -169,7 +175,13 @@ class SecurityService:
         return requested
 
     def deep_get_status(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self.runner.deep.status(params["scanId"])
+        status = self.runner.deep.status(params["scanId"])
+        if status.get("status") in ("saturated", "capped"):
+            tail = self.runner.tail.status(params["scanId"])
+            status["tail"] = tail
+            if tail["nextAction"] != "await_discovery_completion":
+                status["nextAction"] = tail["nextAction"]
+        return status
 
     def deep_claim_worker(self, params: dict[str, Any]) -> dict[str, Any]:
         return self.runner.deep.claim_worker(
@@ -192,9 +204,23 @@ class SecurityService:
         if status.get("status") in ("saturated", "capped"):
             scan_id = params["scanId"]
             scan = self.workbench.get_scan(scan_id)
-            if scan["status"] == "running" and scan_id not in self.runner.active_scan_ids():
-                self.runner.start(scan_id, resuming=True)
+            if scan["status"] == "running":
+                self.runner.resume_when_idle(scan_id)
         return status
+
+    def deep_get_tail_assignment(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self.runner.tail.claim(params)
+
+    def deep_submit_tail_result(self, params: dict[str, Any]) -> dict[str, Any]:
+        result = self.runner.tail.submit(params)
+        scan_id = params["scanId"]
+        scan = self.workbench.get_scan(scan_id)
+        if scan["status"] == "running":
+            self.runner.resume_when_idle(scan_id)
+        return result
+
+    def deep_retry_writeup(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self.runner.tail.retry_writeup(params)
 
     def get_scan(self, params: dict[str, Any]) -> dict[str, Any]:
         return self.workbench.get_scan(params["scanId"])
@@ -358,6 +384,9 @@ class SecurityService:
             "deep_retry_worker": self.deep_retry_worker,
             "deep_claim_merge": self.deep_claim_merge,
             "deep_submit_merge": self.deep_submit_merge,
+            "deep_get_tail_assignment": self.deep_get_tail_assignment,
+            "deep_submit_tail_result": self.deep_submit_tail_result,
+            "deep_retry_writeup": self.deep_retry_writeup,
             "list_findings": self.list_findings,
             "get_finding": self.get_finding,
             "validate_finding": self.validate_finding,

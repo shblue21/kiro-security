@@ -422,7 +422,12 @@ class Workbench:
             connection.execute("UPDATE workspaces SET active_scan_id=?, updated_at=? WHERE id=?", (scan_id, timestamp, workspace_id))
         return self.get_scan(scan_id)
 
-    def resume_scan(self, scan_id: str, session_id: str) -> dict[str, Any]:
+    def resume_scan(
+        self,
+        scan_id: str,
+        session_id: str,
+        recover_tail_artifacts: Callable[[list[dict[str, Any]]], None] | None = None,
+    ) -> dict[str, Any]:
         with self.transaction() as connection:
             row = connection.execute("SELECT * FROM scans WHERE id=?", (scan_id,)).fetchone()
             if row is None:
@@ -437,6 +442,40 @@ class Workbench:
                 raise EngineError("scan_already_active", "Another scan is active for this workspace.", {"scanId": active["id"]})
             require_status_transition(row["status"], "running")
             timestamp = utc_now()
+            orphaned_tail = []
+            if row["mode"] == "deep":
+                orphaned_tail = connection.execute(
+                    """
+                    SELECT current.* FROM deep_tail_assignments current
+                    WHERE current.scan_id=? AND current.status='claimed' AND NOT EXISTS (
+                        SELECT 1 FROM deep_tail_assignments newer
+                        WHERE newer.scan_id=current.scan_id AND newer.kind=current.kind
+                          AND newer.subject_id=current.subject_id AND newer.attempt>current.attempt
+                    )
+                    ORDER BY current.kind, current.subject_id
+                    """,
+                    (scan_id,),
+                ).fetchall()
+                if orphaned_tail and recover_tail_artifacts is not None:
+                    recover_tail_artifacts([dict(item) for item in orphaned_tail])
+                for assignment in orphaned_tail:
+                    connection.execute(
+                        "UPDATE deep_tail_assignments SET status='failed', failure_message=?, updated_at=? WHERE id=? AND status='claimed'",
+                        ("Claim ownership was lost when the interrupted scan resumed.", timestamp, assignment["id"]),
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO deep_tail_assignments(
+                            id, scan_id, kind, subject_id, status, attempt, previous_assignment_id,
+                            previous_receipt_digest, payload_json, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            random_id("tail"), scan_id, assignment["kind"], assignment["subject_id"],
+                            int(assignment["attempt"]) + 1, assignment["id"], assignment["receipt_digest"],
+                            assignment["payload_json"], timestamp, timestamp,
+                        ),
+                    )
             connection.execute(
                 """
                 UPDATE scans SET status='running', owner_session_id=?, heartbeat_at=?, cancellation_requested=0,
@@ -1257,6 +1296,25 @@ class Workbench:
                 "SELECT * FROM validation_records WHERE occurrence_id=? ORDER BY created_at DESC LIMIT 1", (row["id"],)
             ).fetchone()
             attack = connection.execute("SELECT * FROM attack_paths WHERE occurrence_id=?", (row["id"],)).fetchone()
+            scan_mode = connection.execute("SELECT mode FROM scans WHERE id=?", (row["scan_id"],)).fetchone()["mode"]
+            tail_validation = tail_attack = None
+            if scan_mode == "deep":
+                tail_validation = connection.execute(
+                    """
+                    SELECT result_json FROM deep_tail_assignments
+                    WHERE scan_id=? AND kind='validation' AND subject_id=? AND status='completed'
+                    ORDER BY attempt DESC LIMIT 1
+                    """,
+                    (row["scan_id"], row["id"]),
+                ).fetchone()
+                tail_attack = connection.execute(
+                    """
+                    SELECT result_json FROM deep_tail_assignments
+                    WHERE scan_id=? AND kind='attack_path' AND subject_id=? AND status='completed'
+                    ORDER BY attempt DESC LIMIT 1
+                    """,
+                    (row["scan_id"], row["id"]),
+                ).fetchone()
             triage = connection.execute("SELECT * FROM triage_decisions WHERE occurrence_id=?", (row["id"],)).fetchone()
             remediation = connection.execute(
                 "SELECT * FROM remediation_records WHERE occurrence_id=? ORDER BY version DESC", (row["id"],)
@@ -1293,11 +1351,26 @@ class Workbench:
                 "rationale": validation["rationale"], "evidence": json.loads(validation["evidence_json"]),
                 "createdAt": validation["created_at"],
             }
+            if tail_validation is not None:
+                authoritative = json.loads(tail_validation["result_json"])
+                summary["validation"] = {
+                    **({} if validation is None else {"id": validation["id"], "createdAt": validation["created_at"]}),
+                    **authoritative,
+                }
             summary["attackPath"] = None if attack is None else {
                 "id": attack["id"], "narrative": attack["narrative"], "path": json.loads(attack["path_json"]),
                 "exploitability": attack["exploitability"], "impact": attack["impact"],
                 "severityRationale": attack["severity_rationale"],
             }
+            if tail_attack is not None:
+                authoritative = json.loads(tail_attack["result_json"])
+                summary["attackPath"] = {
+                    **({} if attack is None else {
+                        "id": attack["id"], "createdAt": attack["created_at"], "updatedAt": attack["updated_at"],
+                        "path": json.loads(attack["path_json"]), "severityRationale": attack["severity_rationale"],
+                    }),
+                    **authoritative,
+                }
             summary["triage"] = None if triage is None else {
                 "decision": triage["decision"], "note": triage["note"], "updatedAt": triage["updated_at"]
             }

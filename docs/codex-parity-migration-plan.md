@@ -33,9 +33,9 @@
 | ID | 워크스트림 | 우선순위 | 핵심 산출물 |
 |----|-----------|:-------:|------------|
 | WS-A | Coverage & Finalization correctness | **P0** | row-level coverage ledger, strict finalizer, seal |
-| WS-B | Deep orchestration 신뢰성 | **P0/P1** | claim barrier, identity 강제, host capability preflight, worker artifact suite |
-| WS-C | Model-based 분석 tail | **P1** | validation/attack-path/writeup/hardening을 실제 모델 assignment로 |
-| WS-D | Threat model 실질화 | **P1** | repository-specific, worker model 합성 |
+| WS-B | Deep orchestration 신뢰성 (**완료**) | **P0/P1** | claim barrier, identity 강제, host capability preflight, worker artifact suite |
+| WS-C | Model-based 분석 tail (**완료**) | **P1** | validation/attack-path/writeup/hardening을 실제 모델 assignment로 |
+| WS-D | Repository security context & policy compilation | **P1** | repository-specific context, policy provenance, snapshot-bound digest |
 | WS-E | Standard/Diff 재정의 | **P1** | Fast Scan 분리 + 모델 workflow 신설 |
 | WS-F | Finding identity 안정화 | **P1** | semantic fingerprint |
 | WS-G | Scope & 보안 표면 확장 | **P1** | 비소스 보안 표면(IaC, config, deps) |
@@ -85,12 +85,12 @@
 
 ### WS-B (P0 부분). Deep 동시성 barrier
 
-- [ ] **B1. All-six claim barrier**
+- [x] **B1. All-six claim barrier**
   - 대상: `deep.py:submit_worker`
   - 첫 worker result 제출 전에 6개 worker가 모두 claim 상태여야 함
   - 수용 기준: 5개만 claim된 상태에서 submit 시 `deep_round_not_fully_claimed` 오류
-- [ ] **B2. Merge 전 6-worker idle proof**
-  - 6개 worker가 모두 `completed` 이고 재클레임 불가 상태임을 merge claim 시 재확인 (현재 부분 존재 → 강화)
+- [x] **B2. Merge 전 6-worker idle proof**
+  - 6개 worker가 모두 `completed` 이고 재클레임 불가 상태임을 merge claim 시 재확인하도록 기존 로직 강화
 
 ---
 
@@ -98,74 +98,105 @@
 
 ### WS-B (P1 부분). Worker 독립성/동질성 강제
 
-- [ ] **B3. Host capability preflight**
+- [x] **B3. Host capability preflight**
   - 대상: `engine/kiro_security/mcp_server.py`, Power steering, `runner.py:_phase_preflight`
   - Deep 시작 전 실제 확인: `delegated agent available, fresh-context mode, 6 usable slots, model identity, reasoning identity, agent depth, goal support`
-  - capability 미충족 시 Deep을 `blocked`로 (조용히 대기 금지)
-- [ ] **B4. Round profile 고정 + 동질성 검증**
+  - capability 미충족 시 명시적 오류로 Deep 시작 차단 (조용히 대기 금지)
+- [x] **B4. Round profile 고정 + 동질성 검증**
   - 첫 worker claim 시 round profile 확정: `modelId, agentType, reasoningEffort, hostVersion, delegationMode`
   - 이후 worker가 프로파일과 불일치하면 claim 거부 (model drift rejection)
-  - 대상: `deep.py:claim_worker` (현재 bounded string 검사만 있음)
-- [ ] **B5. Fresh-context / idle proof 요구**
+  - 대상: `deep.py:claim_worker`
+- [x] **B5. Fresh-context / idle proof 요구**
   - worker 제출 시 coordinator history 미상속 증명 및 완료 후 idle 상태 근거 요구
-- [ ] **B6. Worklist 밀도 강화**
+- [x] **B6. Worklist 밀도 강화**
   - 대상: `deep.py:ensure`, `_write_shared_worklists`
-  - 현재 `rowId, path, language, size` 4필드 → 참조 수준으로 확장:
+  - 기존 `rowId, path, language, size` 중심 row를 참조 수준으로 확장:
     `runtime relevance, product area, deployment significance, entrypoint, privileged boundary, root control, seed/advisory anchor, high-impact family, work shard, ranking reason, deferred/excluded reason`
-- [ ] **B7. Worker artifact suite 구현**
+- [x] **B7. Worker artifact suite 구현**
   - 각 worker output에 실제 artifact 부여:
     `threat_model.md, finding_discovery_report.md, seed_research.md, work_ledger.jsonl, raw_candidates.jsonl, dedupe_report.md, deduped_candidates.jsonl, repository_coverage_ledger.md, candidate-ledger/<candidate>.jsonl`
-- [ ] **B8. Candidate evidence 요건 강화**
+- [x] **B8. Candidate evidence 요건 강화**
   - 대상: `deep.py:_normalize_candidate`
   - 필수화: `attacker-controlled source, root control, sink/broken control, source-to-sink path, authorization boundary, entrypoint, concrete impact, counterevidence, candidate-local validation/attack-path proof`
   - **engine auto-snippet fallback 제거** (`if not evidence:` 블록) — 모델이 근거를 안 내면 거부
-- [ ] **B9. Semantic merge 검증 강화**
-  - 현재 sourceRef 소비/ID 보존/novelty 계산은 유지하되, contract 플래그(`mergeContract`)를 실제 검증 로직으로:
+- [x] **B9. Semantic merge 검증 강화**
+  - 기존 sourceRef 소비/ID 보존/novelty 계산은 유지하되, contract 플래그(`mergeContract`)를 실제 검증 로직으로:
     - 하나의 remediation이 upstream candidate 전부를 닫는지
     - sibling instance 독립 reachability
     - 동일 취약점 ID 재사용/재등록으로 novelty 은닉·부풀림 방지
-- [ ] **B10. Deep provenance 보존**
-  - canonical candidate ID, absorbed sourceRef, worker/round/model 정보를 최종 finding까지 전파 (현재 소실됨)
+- [x] **B10. Deep provenance 보존**
+  - canonical candidate ID, absorbed sourceRef, worker/round/model 정보를 최종 finding까지 전파
+
+**WS-B 완료 검증:** all-six barrier, profile/completion attestation, strict·legacy resume,
+sourceRef exact consumption, canonical identity/novelty, sanitized final provenance, dense worklist,
+worker artifact rollback·retry를 독립 smoke로 확인했다. 신뢰 가능한 host attestation source가 없는
+VSIX Deep 시작은 engine 호출 전에 Kiro Agent 사용 안내로 차단하며 Standard/Diff는 기존 경로를 유지한다.
+Python compile, Python 3.9 grammar, `git diff --check`는 통과했다. 환경에 도구가 없어 pytest,
+jsonschema 및 TypeScript build/diagnostics는 실행하지 못했으며 의존성을 임의 설치하지 않았다.
 
 ---
 
 ### WS-C. Model-based 분석 tail
 
-현재 validation/attack-path/writeup/hardening/reporting은 모두 Python engine의 deterministic 로직이다. 이를 실제 모델 assignment로 전환.
+Deep의 validation/attack-path/writeup/hardening을 durable model assignment로 전환했다.
+Standard/Diff는 WS-E 전까지 기존 deterministic 경로를 유지한다.
 
-- [ ] **C1. Tail assignment MCP 도구 신설** (DESIGN.md에 있으나 코드에 없음)
+- [x] **C1. Tail assignment MCP 도구 신설**
   - `security_deep_get_tail_assignment`, `security_deep_submit_tail_result`, `security_deep_retry_writeup` 등
   - 각각 durable claim/result/receipt
-  - 대상: `mcp_server.py`, `deep.py`, migration
-- [ ] **C2. Canonical threat-model synthesis**
+  - 대상: `mcp_server.py`, `tail.py`, migration
+- [x] **C2. Canonical threat-model synthesis**
   - worker별 threat model을 합성해 canonical validation threat model 생성 (discovery **이후**)
-- [ ] **C3. Candidate validation을 모델/동적 proof로**
-  - 대상: `engine/kiro_security/validator.py` (현재 sink 주변 ~24줄 regex 재검사)
+- [x] **C3. Candidate validation을 모델/동적 proof로**
+  - Deep은 기존 `validator.py` regex 경로를 authoritative validation으로 사용하지 않음
   - repository-native test, focused PoC, cross-file trace, framework middleware 인식, counterevidence, proof gap
   - 동적 불가 시에만 정적 fallback
-- [ ] **C4. Attack-path & severity policy**
-  - 대상: `engine/kiro_security/attack_path.py` (현재 고정 transform 템플릿)
+- [x] **C4. Attack-path & severity policy**
+  - Deep은 기존 `attack_path.py` 고정 transform 대신 model tail 결과 사용
   - 실제 actor/entry/control/sink/impact 사실 연결 + severity 재산정(policy matrix)
   - `exploitability = "high" if validated else "medium"` 같은 단순 규칙 제거
-- [ ] **C5. Dedicated writeup subagent**
-  - 대상: `reporting.py:_write_writeups` (현재 Markdown 템플릿)
+- [x] **C5. Dedicated writeup subagent**
+  - Deep reporting은 기존 Markdown template 대신 완료된 fresh-context writeup 결과 참조
   - finding별 fresh-context assignment, source 재분석, PoC artifact, report format validator, claim/retry
   - 경로를 참조 contract(`findings/<slug>/<slug>.md`, `findings/<slug>/poc/`)로
-- [ ] **C6. 실제 hardening portfolio**
-  - 대상: `engine/kiro_security/hardening.py` (현재 category count 템플릿)
+- [x] **C6. 실제 hardening portfolio**
+  - Deep은 기존 category count template 대신 model portfolio 사용
   - architecture 분석, 여러 viable option, tradeoff matrix, migration/rollout, metrics, diagrams, structured `hardening.json`, work packages
+
+**WS-C 완료 검증:** premature completion 차단, stage ordering, runtime/profile/completion
+attestation, full validation/attack proof 조회, ancestor symlink artifact 차단, orphaned claim
+resume, zero-finding 및 one-finding Deep tail, dedicated writeup/PoC, hardening projection과 strict
+finalization을 독립 smoke로 확인했다. Standard scan과 Diff wire도 기존 경로를 유지했다. Python
+compile, Python 3.9 grammar, `git diff --check`는 통과했다. 환경에 도구가 없어 pytest,
+jsonschema 및 TypeScript build/diagnostics는 실행하지 못했으며 의존성을 임의 설치하지 않았다.
 
 ---
 
-### WS-D. Threat model 실질화
+### WS-D. Repository security context & policy compilation
 
-- [ ] **D1. Repository-specific 모델 분석**
-  - 대상: `engine/kiro_security/threat_model.py` (현재 위험 문자열 탐지 + 고정 템플릿)
-  - assets, trust boundary, attacker-controlled input, privileged ops, auth/tenant model, deployment/runtime
-- [ ] **D2. 보안 정책 문서 반영**
-  - `SECURITY.md`를 authoritative policy로, `AGENTS.md` security guidance를 compile
-- [ ] **D3. Revision-specific cache 검증 + worker model 합성**
-  - `runner.py`의 shared pre-discovery threat model 위치 문제 해결 (참조는 worker별 독립 생성 후 합성)
+WS-C C2가 discovery 이후 canonical threat-model synthesis를 담당한다. WS-D는 이를 재구현하지
+않고 discovery 이전에 repository-specific 보안 문맥과 정책을 근거·digest와 함께 compile하여
+각 독립 worker와 WS-C canonical synthesis 입력에 제공한다.
+
+- [ ] **D1. Repository-specific security context compile**
+  - 대상: `engine/kiro_security/threat_model.py` 및 기존 inventory/worklist 입력 경계
+  - assets, trust boundaries, attacker-controlled inputs, privileged operations, auth/tenant model,
+    deployment/runtime을 실제 repository path 근거와 unknown/proof gap으로 구조화
+  - 위험 문자열 탐지나 고정 template을 repository-specific 사실 또는 검증 결과로 표시하지 않음
+- [ ] **D2. Security policy/guidance provenance**
+  - `SECURITY.md`를 repository security policy로, `AGENTS.md`의 security-relevant guidance를
+    출처 path·content digest·적용 scope와 함께 compile
+  - 상충하거나 적용 범위가 불명확한 guidance는 임의로 해석하지 않고 explicit conflict/unknown으로 보존
+  - 문서 안의 command나 code를 실행하지 않으며 정책 근거와 분석 지침으로만 취급
+- [ ] **D3. Snapshot-bound context delivery & invalidation**
+  - compiled context digest를 revision/snapshot, scope, inventory/worklist digest, policy/guidance file digest에 결합
+  - revision, scope, inventory 또는 guidance가 바뀌면 기존 context/cache를 재사용하지 않음
+  - 동일 immutable context를 각 discovery worker에 제공하되 worker별 분석 독립성은 유지
+  - worker threat-model artifact와 compiled context reference를 WS-C C2 입력으로 전달
+
+**WS-D 비목표:** 두 번째 canonical threat-model assignment/merge, validation, attack-path,
+writeup, hardening 또는 WS-C tail state machine을 새로 만들지 않는다. discovery 이후 canonical
+synthesis와 authoritative tail provenance는 완료된 WS-C 계약을 그대로 재사용한다.
 
 ---
 
@@ -238,7 +269,7 @@
 ## 6. 전 구간 — 테스트 & Release assurance (WS-J)
 
 - [ ] **J1. Deep 전용 테스트 스위트 신설** (현재 전무)
-  - 정확히 6 worker / all-six claim barrier / fresh-context proof / worker idle / 전체 row receipt / merge semantic correctness / ID manipulation 방지 / capped coverage / multi-round convergence / interrupted worker recovery / worker threat-model synthesis / dedicated tail workflow
+  - 정확히 6 worker / all-six claim barrier / fresh-context proof / worker idle / 전체 row receipt / merge semantic correctness / ID manipulation 방지 / capped coverage / multi-round convergence / interrupted worker recovery / worker threat-model artifact와 context provenance / dedicated tail workflow
 - [ ] **J2. Coverage correctness 테스트** (0-file, capped, deferred, all-clean)
 - [ ] **J3. Finalizer seal / projection 테스트**
 - [ ] **J4. Finding identity 안정성 테스트** (rename/line-shift)
@@ -272,7 +303,7 @@
 → 결과: 6-worker 독립성/동질성 실제 강제, 안정적 identity, 감사 가능한 artifact.
 
 **M3 — 모델 기반 분석 (P1):** WS-C(전체), WS-D, WS-G + WS-J(J6)
-→ 결과: validation/attack-path/writeup/hardening/threat-model이 실제 모델 workflow. Kiro desktop end-to-end 검증.
+→ 결과: snapshot-bound repository policy/context가 독립 discovery worker와 canonical threat-model synthesis에 공급되고, validation/attack-path/writeup/hardening이 실제 모델 workflow로 동작. Kiro desktop end-to-end 검증.
 
 **M4 — Scan mode 재정의 (P1):** WS-E
 → 결과: Fast Scan 분리 + Standard/Diff 모델 workflow.

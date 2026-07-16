@@ -228,6 +228,21 @@ TOOLS: list[dict[str, Any]] = [
         "inputSchema": {"type": "object", "properties": {"workspaceRoot": {"type": "string"}, "scanId": {"type": "string"}, "claimToken": {"type": "string"}, "canonicalCandidates": {"type": "array", "items": {"type": "object"}}}, "required": ["scanId", "claimToken", "canonicalCandidates"], "additionalProperties": False},
     },
     {
+        "name": "security_deep_get_tail_assignment",
+        "description": "Claim the next eligible fresh-context Deep tail assignment after canonical discovery.",
+        "inputSchema": {"type": "object", "properties": {"workspaceRoot": {"type": "string"}, "scanId": {"type": "string"}, "modelId": {"type": "string"}, "delegationId": {"type": "string"}, "runtime": {"type": "object"}}, "required": ["scanId", "modelId", "delegationId", "runtime"], "additionalProperties": False},
+    },
+    {
+        "name": "security_deep_submit_tail_result",
+        "description": "Submit one kind-checked Deep tail result with the same claim profile and a truthful completion attestation.",
+        "inputSchema": {"type": "object", "properties": {"workspaceRoot": {"type": "string"}, "scanId": {"type": "string"}, "assignmentId": {"type": "string"}, "claimToken": {"type": "string"}, "modelId": {"type": "string"}, "delegationId": {"type": "string"}, "runtime": {"type": "object"}, "completionAttestation": {"type": "object"}, "result": {"type": "object"}}, "required": ["scanId", "assignmentId", "claimToken", "modelId", "delegationId", "runtime", "completionAttestation", "result"], "additionalProperties": False},
+    },
+    {
+        "name": "security_deep_retry_writeup",
+        "description": "Retry only the latest incomplete or failed Deep writeup attempt; completed writeups are immutable.",
+        "inputSchema": {"type": "object", "properties": {"workspaceRoot": {"type": "string"}, "scanId": {"type": "string"}, "assignmentId": {"type": "string"}, "reason": {"type": "string"}}, "required": ["scanId", "assignmentId"], "additionalProperties": False},
+    },
+    {
         "name": "security_list_findings",
         "description": "List normalized findings for a scan.",
         "inputSchema": {
@@ -497,6 +512,36 @@ class McpServer:
                 "scanId": _bounded_string(params.get("scanId"), "scanId", 256),
                 "claimToken": _bounded_string(params.get("claimToken"), "claimToken", 256),
                 "canonicalCandidates": candidates,
+            })
+        if name == "security_deep_get_tail_assignment":
+            runtime = params.get("runtime")
+            if not isinstance(runtime, dict):
+                raise ValueError("runtime must be a host-attested object.")
+            return service.deep_get_tail_assignment({
+                "scanId": _bounded_string(params.get("scanId"), "scanId", 256),
+                "modelId": _bounded_string(params.get("modelId"), "modelId", 256),
+                "delegationId": _bounded_string(params.get("delegationId"), "delegationId", 256),
+                "runtime": runtime,
+            })
+        if name == "security_deep_submit_tail_result":
+            runtime = params.get("runtime")
+            completion = params.get("completionAttestation")
+            result = params.get("result")
+            if not isinstance(runtime, dict) or not isinstance(completion, dict) or not isinstance(result, dict):
+                raise ValueError("runtime, completionAttestation, and result must be objects.")
+            return service.deep_submit_tail_result({
+                "scanId": _bounded_string(params.get("scanId"), "scanId", 256),
+                "assignmentId": _bounded_string(params.get("assignmentId"), "assignmentId", 256),
+                "claimToken": _bounded_string(params.get("claimToken"), "claimToken", 256),
+                "modelId": _bounded_string(params.get("modelId"), "modelId", 256),
+                "delegationId": _bounded_string(params.get("delegationId"), "delegationId", 256),
+                "runtime": runtime, "completionAttestation": completion, "result": result,
+            })
+        if name == "security_deep_retry_writeup":
+            return service.deep_retry_writeup({
+                "scanId": _bounded_string(params.get("scanId"), "scanId", 256),
+                "assignmentId": _bounded_string(params.get("assignmentId"), "assignmentId", 256),
+                "reason": _bounded_string(params.get("reason"), "reason", 4000, required=False) or "Incomplete writeup retry requested.",
             })
         if name == "security_list_findings":
             search = params.get("search")
