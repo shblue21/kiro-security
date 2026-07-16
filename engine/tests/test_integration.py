@@ -26,6 +26,30 @@ def assert_schema(path: Path, schema_name: str) -> None:
     jsonschema.Draft202012Validator(schema).validate(document)
 
 
+DEEP_WORKER_RUNTIME = {
+    "contractVersion": "deep-worker/v2",
+    "agentType": "delegated-worker",
+    "reasoningEffort": "high",
+    "hostVersion": "integration-test-host/1.0",
+    "delegationMode": "fresh",
+    "capabilities": {
+        "delegatedAgentAvailable": True,
+        "freshContextMode": True,
+        "usableWorkerSlots": 6,
+        "goalSupport": True,
+    },
+}
+DEEP_COMPLETION_ATTESTATION = {
+    "freshContext": True,
+    "coordinatorHistoryInherited": False,
+    "workerState": "completed_idle",
+}
+
+
+def deep_scan_params(**overrides: object) -> dict:
+    return {"mode": "deep", "scope": ".", "modelId": "integration-model", "runtime": DEEP_WORKER_RUNTIME, **overrides}
+
+
 def complete_empty_deep_round(service: SecurityService, scan_id: str, timeout: float = 30.0) -> None:
     """Drive one honest six-worker zero-candidate round for integration tests."""
 
@@ -41,13 +65,17 @@ def complete_empty_deep_round(service: SecurityService, scan_id: str, timeout: f
     else:
         raise AssertionError("Deep worklist was not prepared")
 
-    for worker_index in range(1, 7):
-        assignment = service.deep_claim_worker({
+    # All six workers must be claimed before the first result is submitted.
+    assignments = [
+        service.deep_claim_worker({
             "scanId": scan_id,
             "modelId": "integration-model",
             "delegationId": f"integration-delegation-{worker_index}",
-            "runtime": {"kind": "integration-test"},
+            "runtime": DEEP_WORKER_RUNTIME,
         })
+        for worker_index in range(1, 7)
+    ]
+    for assignment in assignments:
         row_receipts = [
             {
                 "rowId": row["rowId"],
@@ -66,6 +94,7 @@ def complete_empty_deep_round(service: SecurityService, scan_id: str, timeout: f
             "threatModel": "Independent integration-test threat model.",
             "summary": "No candidate was submitted by this deterministic integration worker.",
             "candidates": [],
+            "completionAttestation": DEEP_COMPLETION_ATTESTATION,
         })
     merge = service.deep_claim_merge({"scanId": scan_id})
     service.deep_submit_merge({
@@ -114,7 +143,7 @@ def test_standard_scan_artifacts_validation_exports_and_events(workspace: Path, 
 def test_deep_and_diff_modes_use_real_repository_state(workspace: Path) -> None:
     service = service_for(workspace)
     try:
-        deep = service.start_scan({"mode": "deep", "scope": "."})
+        deep = service.start_scan(deep_scan_params())
         complete_empty_deep_round(service, deep["id"])
         completed = wait_for_scan(service, deep["id"])
         assert completed["status"] == "completed", completed["failure_message"]
@@ -142,7 +171,7 @@ def test_cancellation_is_cooperative_and_terminal(workspace: Path) -> None:
         (workspace / "src" / f"generated_{index}.py").write_text(f"value_{index} = input()\n", encoding="utf-8")
     service = service_for(workspace)
     try:
-        scan = service.start_scan({"mode": "deep", "scope": ".", "maxFiles": 2000})
+        scan = service.start_scan(deep_scan_params(maxFiles=2000))
         service.cancel_scan({"scanId": scan["id"]})
         terminal = wait_for_scan(service, scan["id"])
         assert terminal["status"] == "cancelled"
@@ -153,7 +182,7 @@ def test_cancellation_is_cooperative_and_terminal(workspace: Path) -> None:
 
 def test_shutdown_handoff_and_resume_after_restart(workspace: Path) -> None:
     first = service_for(workspace)
-    scan = first.start_scan({"mode": "deep", "scope": "."})
+    scan = first.start_scan(deep_scan_params())
     first.runner._shutdown.set()  # deterministic interruption at the next cooperative boundary
     interrupted = wait_for_scan(first, scan["id"])
     assert interrupted["status"] == "interrupted"

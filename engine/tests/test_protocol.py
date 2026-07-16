@@ -15,7 +15,24 @@ def test_initialize_and_start_scan_validation() -> None:
         {"protocolVersion": PROTOCOL_VERSION, "clientInfo": {"name": "test", "version": "1"}},
     )
     assert params["protocolVersion"] == PROTOCOL_VERSION
-    assert validate_method("start_scan", {"mode": "deep", "scope": "src", "maxFiles": 100})["mode"] == "deep"
+    runtime = {
+        "contractVersion": "deep-worker/v2",
+        "agentType": "delegated-worker",
+        "reasoningEffort": "high",
+        "hostVersion": "test-host/1",
+        "delegationMode": "fresh",
+        "capabilities": {
+            "delegatedAgentAvailable": True,
+            "freshContextMode": True,
+            "usableWorkerSlots": 6,
+            "goalSupport": True,
+        },
+    }
+    assert validate_method(
+        "start_scan", {"mode": "deep", "scope": "src", "maxFiles": 100, "modelId": "test-model", "runtime": runtime}
+    )["mode"] == "deep"
+    with pytest.raises(EngineError):
+        validate_method("start_scan", {"mode": "deep", "scope": "src"})
     with pytest.raises(EngineError, match="mode"):
         validate_method("start_scan", {"mode": "arbitrary"})
     with pytest.raises(EngineError, match="maxFiles"):

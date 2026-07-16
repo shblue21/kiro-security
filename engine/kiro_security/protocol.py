@@ -75,8 +75,39 @@ def validate_method(method: str, raw_params: Any) -> dict[str, Any]:
         optional_string(params, "diffHeadRevision", max_length=256)
         optional_int(params, "maxFiles", minimum=1, maximum=100_000)
         optional_int(params, "maxFileBytes", minimum=1024, maximum=10_485_760)
+        if mode == "deep":
+            required_string(params, "modelId", max_length=256)
+            require_object(params.get("runtime"), "runtime")
     elif method in {"resume_scan", "cancel_scan", "get_scan", "get_progress", "create_hardening_proposal", "cleanup_scan"}:
         required_string(params, "scanId", max_length=256)
+    elif method in {"deep_get_status", "deep_claim_merge"}:
+        required_string(params, "scanId", max_length=256)
+    elif method == "deep_claim_worker":
+        required_string(params, "scanId", max_length=256)
+        required_string(params, "modelId", max_length=256)
+        required_string(params, "delegationId", max_length=256)
+        require_object(params.get("runtime"), "runtime")
+    elif method == "deep_submit_worker":
+        required_string(params, "scanId", max_length=256)
+        required_string(params, "workerId", max_length=256)
+        required_string(params, "claimToken", max_length=256)
+        if not isinstance(params.get("rowReceipts"), list) or not isinstance(params.get("candidates"), list):
+            raise EngineError("invalid_params", "rowReceipts and candidates must be arrays.")
+        required_string(params, "threatModel", max_length=200000)
+        optional_string(params, "summary", max_length=20000)
+        optional_string(params, "seedResearch", max_length=200000)
+        optional_string(params, "dedupeReport", max_length=200000)
+        require_object(params.get("completionAttestation"), "completionAttestation")
+    elif method == "deep_retry_worker":
+        required_string(params, "scanId", max_length=256)
+        if optional_int(params, "workerIndex", minimum=1, maximum=6) is None:
+            raise EngineError("invalid_params", "workerIndex is required.")
+        optional_string(params, "reason", max_length=4000)
+    elif method == "deep_submit_merge":
+        required_string(params, "scanId", max_length=256)
+        required_string(params, "claimToken", max_length=256)
+        if not isinstance(params.get("canonicalCandidates"), list):
+            raise EngineError("invalid_params", "canonicalCandidates must be an array.")
     elif method == "list_scans":
         optional_int(params, "limit", minimum=1, maximum=200)
     elif method == "list_findings":

@@ -82,7 +82,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "security_start_scan",
-        "description": "Start a Standard, Deep, or Git-diff repository security scan in the shared Kiro Security Power workbench.",
+        "description": "Start a Standard, Deep, or Git-diff repository security scan. Deep requires the same truthful modelId/runtime host attestation used by worker claims.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -92,6 +92,8 @@ TOOLS: list[dict[str, Any]] = [
                 "diffTargetKind": {"type": "string", "enum": ["working_tree", "commit", "range"]},
                 "diffBaseRevision": {"type": "string"},
                 "diffHeadRevision": {"type": "string"},
+                "modelId": {"type": "string", "description": "Required for Deep host capability preflight."},
+                "runtime": {"type": "object", "description": "Required for Deep; uses the deep-worker/v2 claim runtime contract."},
             },
             "required": ["mode"],
             "additionalProperties": False,
@@ -113,17 +115,56 @@ TOOLS: list[dict[str, Any]] = [
     {"name": "security_deep_get_status", "description": "Get durable Deep round, worker, novelty, and next-action state.", "inputSchema": _id_schema("scanId")},
     {
         "name": "security_deep_claim_worker",
-        "description": "Claim one of exactly six independent model discovery workers for the active Deep round.",
+        "description": (
+            "Claim one of exactly six independent model discovery workers for the active Deep round. "
+            "Requires a host-attested runtime (contractVersion deep-worker/v2, delegationMode fresh, capability flags, "
+            "usableWorkerSlots >= 6). All six workers in a round must share one modelId/agentType/reasoningEffort/"
+            "hostVersion profile, and all six must be claimed before the first result is submitted."
+        ),
         "inputSchema": {
             "type": "object",
-            "properties": {"workspaceRoot": {"type": "string"}, "scanId": {"type": "string"}, "modelId": {"type": "string"}, "delegationId": {"type": "string"}, "runtime": {"type": "object"}},
-            "required": ["scanId", "modelId", "delegationId"],
+            "properties": {
+                "workspaceRoot": {"type": "string"},
+                "scanId": {"type": "string"},
+                "modelId": {"type": "string"},
+                "delegationId": {"type": "string"},
+                "runtime": {
+                    "type": "object",
+                    "description": "Host-attested worker runtime profile.",
+                    "properties": {
+                        "contractVersion": {"type": "string", "const": "deep-worker/v2"},
+                        "agentType": {"type": "string"},
+                        "reasoningEffort": {"type": "string"},
+                        "hostVersion": {"type": "string"},
+                        "delegationMode": {"type": "string", "const": "fresh"},
+                        "capabilities": {
+                            "type": "object",
+                            "properties": {
+                                "delegatedAgentAvailable": {"type": "boolean"},
+                                "freshContextMode": {"type": "boolean"},
+                                "usableWorkerSlots": {"type": "integer", "minimum": 6},
+                                "goalSupport": {"type": "boolean"},
+                            },
+                            "required": ["delegatedAgentAvailable", "freshContextMode", "usableWorkerSlots", "goalSupport"],
+                            "additionalProperties": True,
+                        },
+                    },
+                    "required": ["contractVersion", "agentType", "reasoningEffort", "hostVersion", "delegationMode", "capabilities"],
+                    "additionalProperties": True,
+                },
+            },
+            "required": ["scanId", "modelId", "delegationId", "runtime"],
             "additionalProperties": False,
         },
     },
     {
         "name": "security_deep_submit_worker_result",
-        "description": "Submit a completed independent Deep discovery worker with one auditable disposition receipt per worklist row and evidence-grounded candidates.",
+        "description": (
+            "Submit a completed independent Deep discovery worker with one auditable disposition receipt per worklist "
+            "row, evidence-grounded candidates (non-empty codeEvidence with explicit origin/control and sink/impact "
+            "roles, impact, root cause, severity/confidence rationales), and a host completionAttestation. All six "
+            "workers of the round must already be claimed before the first submit."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -131,6 +172,17 @@ TOOLS: list[dict[str, Any]] = [
                 "scanId": {"type": "string"},
                 "workerId": {"type": "string"},
                 "claimToken": {"type": "string"},
+                "completionAttestation": {
+                    "type": "object",
+                    "description": "Host-attested worker completion state.",
+                    "properties": {
+                        "freshContext": {"type": "boolean", "const": True},
+                        "coordinatorHistoryInherited": {"type": "boolean", "const": False},
+                        "workerState": {"type": "string", "const": "completed_idle"},
+                    },
+                    "required": ["freshContext", "coordinatorHistoryInherited", "workerState"],
+                    "additionalProperties": True,
+                },
                 "rowReceipts": {
                     "type": "array",
                     "items": {
@@ -151,9 +203,11 @@ TOOLS: list[dict[str, Any]] = [
                 },
                 "threatModel": {"type": "string"},
                 "summary": {"type": "string"},
+                "seedResearch": {"type": "string"},
+                "dedupeReport": {"type": "string"},
                 "candidates": {"type": "array", "items": {"type": "object"}},
             },
-            "required": ["scanId", "workerId", "claimToken", "rowReceipts", "threatModel", "candidates"],
+            "required": ["scanId", "workerId", "claimToken", "rowReceipts", "threatModel", "candidates", "completionAttestation"],
             "additionalProperties": False,
         },
     },
@@ -165,7 +219,12 @@ TOOLS: list[dict[str, Any]] = [
     {"name": "security_deep_claim_merge", "description": "Claim semantic merge after all six workers are complete.", "inputSchema": _id_schema("scanId")},
     {
         "name": "security_deep_submit_merge",
-        "description": "Submit canonical merge, consume every current sourceRef exactly once, preserve prior candidates, and continue rounds until zero novelty or round 10.",
+        "description": (
+            "Submit canonical merge, consume every current sourceRef exactly once, preserve prior candidates, and "
+            "continue rounds until zero novelty or round 10. Every canonical candidate requires mergeRationale, "
+            "identityRationale, and remediationSubsumption; retained canonical IDs must keep their fingerprint and "
+            "semantic identity, and prior identities cannot be re-registered under new IDs."
+        ),
         "inputSchema": {"type": "object", "properties": {"workspaceRoot": {"type": "string"}, "scanId": {"type": "string"}, "claimToken": {"type": "string"}, "canonicalCandidates": {"type": "array", "items": {"type": "object"}}}, "required": ["scanId", "claimToken", "canonicalCandidates"], "additionalProperties": False},
     },
     {
@@ -360,6 +419,14 @@ class McpServer:
                 raise ValueError("mode must be standard, deep, or diff.")
             scope = _bounded_string(params.get("scope") or ".", "scope")
             request = {"mode": mode, "scope": scope}
+            if mode == "deep":
+                runtime = params.get("runtime")
+                if not isinstance(runtime, dict):
+                    raise ValueError("Deep start requires a host-attested runtime object.")
+                request.update({
+                    "modelId": _bounded_string(params.get("modelId"), "modelId", 256),
+                    "runtime": runtime,
+                })
             if mode == "diff":
                 kind = params.get("diffTargetKind") or "working_tree"
                 if kind not in ("working_tree", "commit", "range"):
@@ -386,19 +453,22 @@ class McpServer:
             return service.deep_get_status({"scanId": _bounded_string(params.get("scanId"), "scanId", 256)})
         if name == "security_deep_claim_worker":
             runtime = params.get("runtime")
-            if runtime is not None and not isinstance(runtime, dict):
-                raise ValueError("runtime must be an object.")
+            if not isinstance(runtime, dict):
+                raise ValueError("runtime must be a host-attested object (contractVersion deep-worker/v2).")
             return service.deep_claim_worker({
                 "scanId": _bounded_string(params.get("scanId"), "scanId", 256),
                 "modelId": _bounded_string(params.get("modelId"), "modelId", 256),
                 "delegationId": _bounded_string(params.get("delegationId"), "delegationId", 256),
-                "runtime": runtime or {},
+                "runtime": runtime,
             })
         if name == "security_deep_submit_worker_result":
             row_receipts = params.get("rowReceipts")
             candidates = params.get("candidates")
             if not isinstance(row_receipts, list) or not isinstance(candidates, list):
                 raise ValueError("rowReceipts and candidates must be arrays.")
+            completion_attestation = params.get("completionAttestation")
+            if not isinstance(completion_attestation, dict):
+                raise ValueError("completionAttestation must be a host-attested object.")
             return service.deep_submit_worker({
                 "scanId": _bounded_string(params.get("scanId"), "scanId", 256),
                 "workerId": _bounded_string(params.get("workerId"), "workerId", 256),
@@ -406,7 +476,10 @@ class McpServer:
                 "rowReceipts": row_receipts,
                 "threatModel": _bounded_string(params.get("threatModel"), "threatModel", 200000),
                 "summary": _bounded_string(params.get("summary"), "summary", 20000, required=False) or "",
+                "seedResearch": _bounded_string(params.get("seedResearch"), "seedResearch", 200000, required=False) or "",
+                "dedupeReport": _bounded_string(params.get("dedupeReport"), "dedupeReport", 200000, required=False) or "",
                 "candidates": candidates,
+                "completionAttestation": completion_attestation,
             })
         if name == "security_deep_retry_worker":
             return service.deep_retry_worker({

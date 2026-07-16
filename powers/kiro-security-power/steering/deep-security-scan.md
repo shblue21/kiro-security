@@ -2,20 +2,21 @@
 
 Deep mode is an Agent-orchestrated repeated discovery workflow. It is not the Standard deterministic scanner with extra passes.
 
-1. Start with `security_start_scan` using `mode: "deep"` and preserve the exact requested scope.
-2. Poll `security_deep_get_status`. When `nextAction` is `claim_worker`, run exactly six independent discovery workers for the current round.
+1. Start with `security_start_scan` using `mode: "deep"`, the exact requested scope, the selected `modelId`, and the same truthful `deep-worker/v2` host-attested `runtime` profile that every worker claim will use. If the host cannot attest the required delegation capabilities, report the preflight error instead of starting Deep.
+2. Poll `security_deep_get_status`. When `nextAction` is `claim_worker`, claim all six independent discovery workers for the current round before any worker submits its first result.
 3. For each worker, call `security_deep_claim_worker` with:
    - the same selected model identity for all six workers in a round;
    - a fresh unique `delegationId`;
-   - runtime metadata that records the Agent/host/reasoning configuration.
+   - a truthful host-attested `runtime` with `contractVersion: "deep-worker/v2"`, `agentType`, `reasoningEffort`, `hostVersion`, `delegationMode: "fresh"`, and `capabilities` (`delegatedAgentAvailable`, `freshContextMode`, `usableWorkerSlots >= 6`, `goalSupport`). These are host attestations, not engine-verified facts — never attest a capability the host does not actually have. Every worker in a round must share one identical `modelId`/`agentType`/`reasoningEffort`/`hostVersion`/`delegationMode` profile; the engine rejects mismatches.
 4. Treat the returned `brief`, security guidance, and authoritative exhaustive worklist as the complete assignment. Do not expose prior workers or merge output to the worker. Do not edit repository files.
-5. Each worker must independently generate a threat model, inspect every worklist row, and return exactly one row-level disposition receipt for every worklist row plus evidence-grounded candidates. Each receipt must use `reportable`, `suppressed`, `not_applicable`, or `deferred`, include a concrete reason, and link reportable rows to submitted candidate IDs. Candidate locations must use `{label, path, lines}` and include concrete source/root-control/sink evidence and remediation.
-6. Submit each completed result with `security_deep_submit_worker_result`. Do not fabricate receipts. Use `security_deep_retry_worker` only for an incomplete worker; completed worker artifacts are immutable.
+5. Each worker must independently generate a threat model, inspect every worklist row, and return exactly one row-level disposition receipt for every worklist row plus evidence-grounded candidates. Each receipt must use `reportable`, `suppressed`, `not_applicable`, or `deferred`, include a concrete reason, and link reportable rows to submitted candidate IDs. Candidate locations must use `{label, path, lines}`. Every candidate must submit non-empty `codeEvidence` with explicit roles covering at least one origin/control role (`source`, `entrypoint`, `root_control`, `authorization_boundary`, `broken_control`) and one sink/impact role (`sink`, `privileged_operation`, `impact`), each entry with the actual reviewed code excerpt and an explanation, plus `impact`, a root cause or source-to-sink explanation, explicit severity and confidence rationales, and remediation. The engine never fabricates evidence snippets on a worker's behalf.
+6. Submit each completed result with `security_deep_submit_worker_result`, including a truthful host `completionAttestation` (`freshContext: true`, `coordinatorHistoryInherited: false`, `workerState: "completed_idle"`). Include bounded `seedResearch` or `dedupeReport` text only when the worker actually produced it; normalized accepted candidates are projected deterministically as deduped candidates. Do not fabricate receipts, research, dedupe judgments, or attestations. Use `security_deep_retry_worker` only for an incomplete worker; completed worker artifacts are immutable.
 7. After all six workers complete, call `security_deep_claim_merge`. Perform semantic merging neutrally:
    - consume every current `sourceRef` exactly once;
-   - preserve every prior canonical candidate;
+   - preserve every prior canonical candidate with its exact fingerprint and `(ruleId, anchor, instance)` identity — no drift, and never re-register a prior identity under a new canonical ID;
    - merge only when one remediation closes every upstream candidate;
-   - keep independently reachable sibling instances separate.
+   - keep independently reachable sibling instances separate;
+   - give every canonical candidate a concrete `mergeRationale`, `identityRationale`, and `remediationSubsumption`.
 8. Submit with `security_deep_submit_merge`. If novelty is non-zero, repeat with six fresh workers in the new round. Stop only when a complete round adds zero new canonical candidates, or when round 10 is explicitly capped.
 9. After `nextAction` becomes `wait_for_central_validation`, poll `security_get_scan` while the shared engine performs centralized validation, attack-path analysis, and reporting.
 10. Read final evidence through `security_list_findings` and `security_get_finding`. Clearly report any capped or deferred coverage.

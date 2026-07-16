@@ -124,6 +124,11 @@ class SecurityService:
         mode = params["mode"]
         scope = params.get("scope") or "."
         resolve_within(self.workspace, scope, must_exist=True)
+        deep_host = (
+            self.runner.deep.preflight_host(params.get("modelId"), params.get("runtime"))
+            if mode == "deep"
+            else None
+        )
         max_files = int(params.get("maxFiles") or 10_000)
         max_file_bytes = int(params.get("maxFileBytes") or 1_048_576)
         self.runner.max_files = max_files
@@ -139,6 +144,8 @@ class SecurityService:
             diff_head_revision=params.get("diffHeadRevision") if mode == "diff" else None,
         )
         Path(scan["artifact_dir"]).mkdir(parents=True, exist_ok=True)
+        if deep_host is not None:
+            self.workbench.set_capabilities(scan["id"], {"deepHost": deep_host})
         self.runner.start(scan["id"])
         return scan
 

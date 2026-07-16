@@ -225,8 +225,8 @@ const toolDefinitions = [
   },
   {
     name: "security_start_scan",
-    description: "Start a Standard, Deep, or Git-diff repository security scan in the shared Kiro Security Power workbench.",
-    inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, mode: { type: "string", enum: ["standard", "deep", "diff"] }, scope: { type: "string", default: "." }, diffTargetKind: { type: "string", enum: ["working_tree", "commit", "range"] }, diffBaseRevision: { type: "string" }, diffHeadRevision: { type: "string" } }, required: ["workspaceRoot", "mode"], additionalProperties: false },
+    description: "Start a Standard, Deep, or Git-diff repository security scan. Deep requires the same truthful modelId/runtime host attestation used by worker claims.",
+    inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, mode: { type: "string", enum: ["standard", "deep", "diff"] }, scope: { type: "string", default: "." }, diffTargetKind: { type: "string", enum: ["working_tree", "commit", "range"] }, diffBaseRevision: { type: "string" }, diffHeadRevision: { type: "string" }, modelId: { type: "string" }, runtime: { type: "object" } }, required: ["workspaceRoot", "mode"], additionalProperties: false },
   },
   { name: "security_list_scans", description: "List recent scans, including scans started by the VSIX or another MCP session.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 200 } }, required: ["workspaceRoot"], additionalProperties: false } },
   { name: "security_resume_scan", description: "Resume an interrupted or failed scan using durable handoff state.", inputSchema: idSchema("scanId") },
@@ -234,11 +234,80 @@ const toolDefinitions = [
   { name: "security_get_scan", description: "Get scan lifecycle, progress, coverage, and artifact records.", inputSchema: idSchema("scanId") },
   { name: "security_get_progress", description: "Get the latest progress record for a scan.", inputSchema: idSchema("scanId") },
   { name: "security_deep_get_status", description: "Get durable Deep Scan round, worker, novelty, and next-action state. Deep does not use the Standard deterministic fallback.", inputSchema: idSchema("scanId") },
-  { name: "security_deep_claim_worker", description: "Claim one of exactly six independent model discovery workers for the active Deep round. Use a fresh delegationId and the currently selected model identity.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, scanId: { type: "string" }, modelId: { type: "string", maxLength: 256 }, delegationId: { type: "string", maxLength: 256 }, runtime: { type: "object" } }, required: ["workspaceRoot", "scanId", "modelId", "delegationId"], additionalProperties: false } },
-  { name: "security_deep_submit_worker_result", description: "Submit one completed independent discovery worker with one auditable disposition receipt per worklist row, a worker threat model, and evidence-grounded candidates.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, scanId: { type: "string" }, workerId: { type: "string" }, claimToken: { type: "string" }, rowReceipts: { type: "array", items: { type: "object", properties: { rowId: { type: "string" }, disposition: { type: "string", enum: ["reportable", "suppressed", "not_applicable", "deferred"] }, reason: { type: "string" }, evidenceRefs: { type: "array", items: { type: "string" } }, candidateIds: { type: "array", items: { type: "string" } }, entrypoint: { type: "string" }, rootControl: { type: "string" }, sink: { type: "string" } }, required: ["rowId", "disposition", "reason"], additionalProperties: false } }, threatModel: { type: "string" }, summary: { type: "string" }, candidates: { type: "array", items: { type: "object" } } }, required: ["workspaceRoot", "scanId", "workerId", "claimToken", "rowReceipts", "threatModel", "candidates"], additionalProperties: false } },
+  {
+    name: "security_deep_claim_worker",
+    description: "Claim one of exactly six independent model discovery workers for the active Deep round. Use a fresh delegationId and the currently selected model identity. Requires a host-attested runtime (contractVersion deep-worker/v2, delegationMode fresh, capability flags, usableWorkerSlots >= 6); all six workers in a round must share one modelId/agentType/reasoningEffort/hostVersion profile, and all six must be claimed before the first result is submitted.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workspaceRoot: { type: "string" },
+        scanId: { type: "string" },
+        modelId: { type: "string", maxLength: 256 },
+        delegationId: { type: "string", maxLength: 256 },
+        runtime: {
+          type: "object",
+          description: "Host-attested worker runtime profile.",
+          properties: {
+            contractVersion: { type: "string", const: "deep-worker/v2" },
+            agentType: { type: "string" },
+            reasoningEffort: { type: "string" },
+            hostVersion: { type: "string" },
+            delegationMode: { type: "string", const: "fresh" },
+            capabilities: {
+              type: "object",
+              properties: {
+                delegatedAgentAvailable: { type: "boolean" },
+                freshContextMode: { type: "boolean" },
+                usableWorkerSlots: { type: "integer", minimum: 6 },
+                goalSupport: { type: "boolean" },
+              },
+              required: ["delegatedAgentAvailable", "freshContextMode", "usableWorkerSlots", "goalSupport"],
+              additionalProperties: true,
+            },
+          },
+          required: ["contractVersion", "agentType", "reasoningEffort", "hostVersion", "delegationMode", "capabilities"],
+          additionalProperties: true,
+        },
+      },
+      required: ["workspaceRoot", "scanId", "modelId", "delegationId", "runtime"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "security_deep_submit_worker_result",
+    description: "Submit one completed independent discovery worker with one auditable disposition receipt per worklist row, a worker threat model, evidence-grounded candidates (non-empty codeEvidence with explicit origin/control and sink/impact roles, impact, root cause, severity/confidence rationales), and a host completionAttestation. All six workers of the round must already be claimed before the first submit.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workspaceRoot: { type: "string" },
+        scanId: { type: "string" },
+        workerId: { type: "string" },
+        claimToken: { type: "string" },
+        completionAttestation: {
+          type: "object",
+          description: "Host-attested worker completion state.",
+          properties: {
+            freshContext: { type: "boolean", const: true },
+            coordinatorHistoryInherited: { type: "boolean", const: false },
+            workerState: { type: "string", const: "completed_idle" },
+          },
+          required: ["freshContext", "coordinatorHistoryInherited", "workerState"],
+          additionalProperties: true,
+        },
+        rowReceipts: { type: "array", items: { type: "object", properties: { rowId: { type: "string" }, disposition: { type: "string", enum: ["reportable", "suppressed", "not_applicable", "deferred"] }, reason: { type: "string" }, evidenceRefs: { type: "array", items: { type: "string" } }, candidateIds: { type: "array", items: { type: "string" } }, entrypoint: { type: "string" }, rootControl: { type: "string" }, sink: { type: "string" } }, required: ["rowId", "disposition", "reason"], additionalProperties: false } },
+        threatModel: { type: "string" },
+        summary: { type: "string" },
+        seedResearch: { type: "string" },
+        dedupeReport: { type: "string" },
+        candidates: { type: "array", items: { type: "object" } },
+      },
+      required: ["workspaceRoot", "scanId", "workerId", "claimToken", "rowReceipts", "threatModel", "candidates", "completionAttestation"],
+      additionalProperties: false,
+    },
+  },
   { name: "security_deep_retry_worker", description: "Replace only an incomplete Deep worker. Completed worker artifacts are immutable.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, scanId: { type: "string" }, workerIndex: { type: "integer", minimum: 1, maximum: 6 }, reason: { type: "string", maxLength: 4000 } }, required: ["workspaceRoot", "scanId", "workerIndex"], additionalProperties: false } },
   { name: "security_deep_claim_merge", description: "Claim semantic merge only after all six workers in the round are complete. Returns all preserved worker candidates and prior canonical candidates.", inputSchema: idSchema("scanId") },
-  { name: "security_deep_submit_merge", description: "Submit the canonical semantic merge. Every current sourceRef must be consumed exactly once and all prior canonical candidates preserved. A new round is created until a full round adds zero new candidates or round 10 is reached.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, scanId: { type: "string" }, claimToken: { type: "string" }, canonicalCandidates: { type: "array", items: { type: "object" } } }, required: ["workspaceRoot", "scanId", "claimToken", "canonicalCandidates"], additionalProperties: false } },
+  { name: "security_deep_submit_merge", description: "Submit the canonical semantic merge. Every current sourceRef must be consumed exactly once and all prior canonical candidates preserved. Every canonical candidate requires mergeRationale, identityRationale, and remediationSubsumption; retained canonical IDs must keep their fingerprint and semantic identity, and prior identities cannot be re-registered under new IDs. A new round is created until a full round adds zero new candidates or round 10 is reached.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, scanId: { type: "string" }, claimToken: { type: "string" }, canonicalCandidates: { type: "array", items: { type: "object" } } }, required: ["workspaceRoot", "scanId", "claimToken", "canonicalCandidates"], additionalProperties: false } },
   { name: "security_list_findings", description: "List normalized findings for a scan.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, scanId: { type: "string" }, search: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 2000 } }, required: ["workspaceRoot", "scanId"], additionalProperties: false } },
   { name: "security_get_finding", description: "Get one finding with evidence, validation, attack path, triage, and remediation records.", inputSchema: idSchema("occurrenceId") },
   { name: "security_validate_finding", description: "Validate a finding and produce an attack-path record where applicable.", inputSchema: idSchema("occurrenceId") },
@@ -267,6 +336,8 @@ async function callTool(name: string, rawArguments: unknown): Promise<unknown> {
       return engine.request("start_scan", {
         mode,
         scope,
+        modelId: mode === "deep" ? requiredString(params, "modelId", 256) : undefined,
+        runtime: mode === "deep" ? params.runtime : undefined,
         diffTargetKind: mode === "diff" ? (params.diffTargetKind ?? "working_tree") : undefined,
         diffBaseRevision: mode === "diff" ? safeGitRef(params.diffBaseRevision, "diffBaseRevision") : undefined,
         diffHeadRevision: mode === "diff" ? safeGitRef(params.diffHeadRevision, "diffHeadRevision") : undefined,
@@ -279,7 +350,7 @@ async function callTool(name: string, rawArguments: unknown): Promise<unknown> {
     case "security_get_progress": return engine.request("get_progress", { scanId: requiredString(params, "scanId", 256) });
     case "security_deep_get_status": return engine.request("deep_get_status", { scanId: requiredString(params, "scanId", 256) });
     case "security_deep_claim_worker": return engine.request("deep_claim_worker", { scanId: requiredString(params, "scanId", 256), modelId: requiredString(params, "modelId", 256), delegationId: requiredString(params, "delegationId", 256), runtime: params.runtime });
-    case "security_deep_submit_worker_result": return engine.request("deep_submit_worker", { scanId: requiredString(params, "scanId", 256), workerId: requiredString(params, "workerId", 256), claimToken: requiredString(params, "claimToken", 256), rowReceipts: params.rowReceipts, threatModel: params.threatModel, summary: params.summary, candidates: params.candidates }, 120_000);
+    case "security_deep_submit_worker_result": return engine.request("deep_submit_worker", { scanId: requiredString(params, "scanId", 256), workerId: requiredString(params, "workerId", 256), claimToken: requiredString(params, "claimToken", 256), rowReceipts: params.rowReceipts, threatModel: params.threatModel, summary: params.summary, seedResearch: params.seedResearch, dedupeReport: params.dedupeReport, candidates: params.candidates, completionAttestation: params.completionAttestation }, 120_000);
     case "security_deep_retry_worker": return engine.request("deep_retry_worker", { scanId: requiredString(params, "scanId", 256), workerIndex: params.workerIndex, reason: params.reason });
     case "security_deep_claim_merge": return engine.request("deep_claim_merge", { scanId: requiredString(params, "scanId", 256) }, 120_000);
     case "security_deep_submit_merge": return engine.request("deep_submit_merge", { scanId: requiredString(params, "scanId", 256), claimToken: requiredString(params, "claimToken", 256), canonicalCandidates: params.canonicalCandidates }, 120_000);

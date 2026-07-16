@@ -110,12 +110,25 @@ class ScanRunner:
         files = []
         for source in inventory.files:
             surface = f"source_review:{source.language}"
+            product_area = source.relative_path.split("/", 1)[0] if "/" in source.relative_path else "."
             files.append({
                 "rowId": coverage_row_id(source.relative_path, surface),
                 "path": source.relative_path,
                 "language": source.language,
                 "surface": surface,
                 "size": source.size,
+                "runtimeRelevance": "Supported source selected for runtime security review.",
+                "productArea": product_area,
+                "deploymentSignificance": None,
+                "entrypoint": None,
+                "privilegedBoundary": None,
+                "rootControl": None,
+                "seedAdvisoryAnchor": None,
+                "highImpactFamily": None,
+                "workShard": "all-workers",
+                "rankingReason": f"Included in the canonical supported inventory as {source.language} source ({surface}).",
+                "deferredReason": None,
+                "excludedReason": None,
             })
         deferred = []
         for item in inventory.deferred:
@@ -244,8 +257,11 @@ class ScanRunner:
             "supportedFiles": len(inventory.files),
             "maxFiles": self.max_files,
             "maxFileBytes": self.max_file_bytes,
-            "workspaceTrustedByHost": True,
+            "workspaceTrustedByHost": None,
         }
+        if scan["mode"] == "deep":
+            requested = (scan.get("capabilities") or {}).get("deepHost") or {}
+            capabilities["deepHost"] = self.deep.preflight_host(requested.get("modelId"), requested.get("runtime"))
         self.workbench.set_capabilities(scan_id, capabilities)
         self.workbench.set_scan_target(scan_id, revision=inventory.revision, snapshot_digest=inventory.snapshot_digest)
         inventory_path = self._inventory_path(scan)

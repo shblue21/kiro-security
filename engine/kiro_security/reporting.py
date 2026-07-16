@@ -295,10 +295,15 @@ def build_findings_document(scan_id: str, findings: list[dict[str, Any]], writeu
         locations = item.get("locations", [])
         source = next((location for location in locations if location.get("role") == "source"), None)
         sink = next((location for location in locations if location.get("role") == "sink"), None)
+        details = item.get("details") or {}
         root_cause = {
             "summary": f"The {item['taxonomy']['category']} boundary does not establish a safe transition before the privileged sink.",
             "evidenceRefs": [evidence["id"] for evidence in item.get("codeEvidence", [])],
         }
+        provenance = {"source": "kiro_security_power", "engineVersion": __version__}
+        deep_provenance = details.get("deepProvenance")
+        if isinstance(deep_provenance, dict):
+            provenance["deep"] = deep_provenance
         finding = {
             "findingId": item["findingId"],
             "occurrenceId": item["occurrenceId"],
@@ -315,13 +320,12 @@ def build_findings_document(scan_id: str, findings: list[dict[str, Any]], writeu
             "taxonomy": item["taxonomy"],
             "locations": locations,
             "codeEvidence": item.get("codeEvidence", []),
-            "rootCause": root_cause,
             "remediation": item["remediation"],
             "validation": validation,
             "attackPath": attack,
             "remediationTests": ["Add a regression test proving the original attacker-controlled input no longer reaches the sink."],
             "preventiveControls": ["Centralize the affected security boundary and block unsafe direct use in review or linting."],
-            "provenance": {"source": "kiro_security_power", "engineVersion": __version__},
+            "provenance": provenance,
             "extensions": {
                 "validationStatus": item.get("validationStatus"),
                 "triageStatus": item.get("triageStatus"),
@@ -329,6 +333,10 @@ def build_findings_document(scan_id: str, findings: list[dict[str, Any]], writeu
                 "sink": sink,
             },
         }
+        if details.get("legacyContract") is not True:
+            finding["rootCause"] = root_cause
+        elif details.get("rootCause"):
+            finding["rootCause"] = details["rootCause"]
         if item["findingId"] in writeup_paths:
             finding["writeup"] = {"reportPath": writeup_paths[item["findingId"]]}
         result.append(finding)

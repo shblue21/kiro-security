@@ -300,6 +300,9 @@ export class SecurityController implements vscode.Disposable {
     options: { scope?: string; diffTargetKind?: "working_tree" | "commit" | "range"; diffBaseRevision?: string; diffHeadRevision?: string } = {},
   ): Promise<ScanRecord | undefined> {
     return this.userAction("Start scan", async () => {
+      if (mode === "deep") {
+        throw new Error("Deep scans must be started from Kiro Agent because the VSIX cannot provide host model/runtime attestation.");
+      }
       const engine = await this.ensureEngine();
       const config = vscode.workspace.getConfiguration("kiroSecurity");
       const scope = this.validateScope(options.scope ?? config.get<string>("defaultScope", "."));
