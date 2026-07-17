@@ -16,6 +16,7 @@ from .finalizer import finalize_scan, prepare_finalization
 from .reporting import write_canonical_documents
 from .scanner import Inventory, build_inventory, scan_inventory
 from .security import redact, utc_now, write_json
+from .security_context import write_security_context
 from .tail import DeepTailCoordinator
 from .threat_model import build_threat_model
 from .validator import validate_finding
@@ -297,15 +298,42 @@ class ScanRunner:
     def _phase_threat_model(self, scan_id: str) -> None:
         scan = self.workbench.get_scan(scan_id)
         inventory = self._build_inventory(scan, require_same_snapshot=True)
-        output = (
-            Path(scan["artifact_dir"]) / "context" / "pre-discovery-threat-model.md"
-            if scan["mode"] == "deep"
-            else Path(scan["artifact_dir"]) / ARTIFACT_KINDS["threatModel"]
-        )
+        if scan["mode"] == "deep":
+            context = write_security_context(self.workbench.workspace, scan, inventory)
+            inventory_path = self._inventory_path(scan)
+            inventory_data = (
+                json.loads(inventory_path.read_text(encoding="utf-8"))
+                if inventory_path.exists()
+                else self._inventory_data(inventory)
+            )
+            row_policy_refs = context.pop("rowPolicyRefs")
+            inventory_data["securityContext"] = context
+            for row in inventory_data.get("files") or []:
+                refs = row_policy_refs.get(str(row.get("path") or ""), {})
+                row.update({
+                    "securityContextPath": context["path"],
+                    "securityContextDigest": context["contextDigest"],
+                    "securityContextArtifactDigest": context["artifactDigest"],
+                    "securityGuidancePath": context["guidancePath"],
+                    "securityGuidanceDigest": context["guidanceDigest"],
+                    "policyRefs": refs.get("securityPolicies") or [],
+                    "guidanceRefs": refs.get("securityGuidance") or [],
+                })
+            write_json(inventory_path, inventory_data)
+            artifacts = (
+                ("inventory", inventory_path, "application/json"),
+                ("securityContext", Path(scan["artifact_dir"]) / context["path"], "application/json"),
+                ("securityGuidance", Path(scan["artifact_dir"]) / context["guidancePath"], "text/markdown"),
+                ("deepDiscoveryContext", Path(scan["artifact_dir"]) / "context" / "pre-discovery-threat-model.md", "text/markdown"),
+            )
+            for kind, path, media_type in artifacts:
+                artifact = self.workbench.add_artifact(scan_id, kind, path, media_type)
+                self._emit("artifact.created", {"scanId": scan_id, "artifact": artifact})
+            self._progress(scan_id, len(inventory.files), len(inventory.files), "repository security context")
+            return
+        output = Path(scan["artifact_dir"]) / ARTIFACT_KINDS["threatModel"]
         build_threat_model(self.workbench.workspace, inventory, output)
-        artifact = self.workbench.add_artifact(
-            scan_id, "deepDiscoveryContext" if scan["mode"] == "deep" else "threatModel", output, "text/markdown"
-        )
+        artifact = self.workbench.add_artifact(scan_id, "threatModel", output, "text/markdown")
         self._emit("artifact.created", {"scanId": scan_id, "artifact": artifact})
         self._progress(scan_id, len(inventory.files), len(inventory.files), "threat model")
 

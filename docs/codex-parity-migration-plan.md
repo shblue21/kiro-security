@@ -35,7 +35,7 @@
 | WS-A | Coverage & Finalization correctness | **P0** | row-level coverage ledger, strict finalizer, seal |
 | WS-B | Deep orchestration 신뢰성 (**완료**) | **P0/P1** | claim barrier, identity 강제, host capability preflight, worker artifact suite |
 | WS-C | Model-based 분석 tail (**완료**) | **P1** | validation/attack-path/writeup/hardening을 실제 모델 assignment로 |
-| WS-D | Repository security context & policy compilation | **P1** | repository-specific context, policy provenance, snapshot-bound digest |
+| WS-D | Repository security context & policy compilation (**완료**) | **P1** | repository-specific context, policy provenance, snapshot-bound digest |
 | WS-E | Standard/Diff 재정의 | **P1** | Fast Scan 분리 + 모델 workflow 신설 |
 | WS-F | Finding identity 안정화 | **P1** | semantic fingerprint |
 | WS-G | Scope & 보안 표면 확장 | **P1** | 비소스 보안 표면(IaC, config, deps) |
@@ -178,17 +178,17 @@ WS-C C2가 discovery 이후 canonical threat-model synthesis를 담당한다. WS
 않고 discovery 이전에 repository-specific 보안 문맥과 정책을 근거·digest와 함께 compile하여
 각 독립 worker와 WS-C canonical synthesis 입력에 제공한다.
 
-- [ ] **D1. Repository-specific security context compile**
+- [x] **D1. Repository-specific security context compile**
   - 대상: `engine/kiro_security/threat_model.py` 및 기존 inventory/worklist 입력 경계
   - assets, trust boundaries, attacker-controlled inputs, privileged operations, auth/tenant model,
     deployment/runtime을 실제 repository path 근거와 unknown/proof gap으로 구조화
   - 위험 문자열 탐지나 고정 template을 repository-specific 사실 또는 검증 결과로 표시하지 않음
-- [ ] **D2. Security policy/guidance provenance**
+- [x] **D2. Security policy/guidance provenance**
   - `SECURITY.md`를 repository security policy로, `AGENTS.md`의 security-relevant guidance를
     출처 path·content digest·적용 scope와 함께 compile
   - 상충하거나 적용 범위가 불명확한 guidance는 임의로 해석하지 않고 explicit conflict/unknown으로 보존
   - 문서 안의 command나 code를 실행하지 않으며 정책 근거와 분석 지침으로만 취급
-- [ ] **D3. Snapshot-bound context delivery & invalidation**
+- [x] **D3. Snapshot-bound context delivery & invalidation**
   - compiled context digest를 revision/snapshot, scope, inventory/worklist digest, policy/guidance file digest에 결합
   - revision, scope, inventory 또는 guidance가 바뀌면 기존 context/cache를 재사용하지 않음
   - 동일 immutable context를 각 discovery worker에 제공하되 worker별 분석 독립성은 유지
@@ -197,6 +197,16 @@ WS-C C2가 discovery 이후 canonical threat-model synthesis를 담당한다. WS
 **WS-D 비목표:** 두 번째 canonical threat-model assignment/merge, validation, attack-path,
 writeup, hardening 또는 WS-C tail state machine을 새로 만들지 않는다. discovery 이후 canonical
 synthesis와 authoritative tail provenance는 완료된 WS-C 계약을 그대로 재사용한다.
+
+**WS-D 완료 검증:** repository별 context와 policy/guidance provenance가 snapshot·scope·
+inventory/worklist digest에 결합되고, all-six worker에 동일한 immutable context가 전달되는 것을
+독립 smoke로 확인했다. 동일 길이 README/manifest/deployment 문서 변경과 source set 변경은
+`security_context_changed`로 거부되며, 1MiB 초과 policy는 `security_context_invalid`로 차단된다.
+사용 불가능한 context source는 C2 evidence로 승격되지 않고 정상 policy evidence만 허용된다.
+7,000개 source scope에서도 bounded provenance payload로 threat-model assignment가 생성되었고,
+zero-finding Deep tail 및 Standard/Diff 회귀 smoke도 통과했다. Python compile, Python 3.9 grammar,
+`git diff --check`는 통과했다. 환경에 도구가 없어 pytest, jsonschema 및 TypeScript
+build/diagnostics는 실행하지 못했으며 의존성을 임의 설치하지 않았다.
 
 ---
 

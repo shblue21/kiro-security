@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import time
@@ -341,6 +342,93 @@ def test_deep_and_diff_modes_use_real_repository_state(workspace: Path) -> None:
         diff_findings = service.list_findings({"scanId": diff["id"]})
         assert diff_findings
         assert all(item["locations"][0]["path"] == "src/safe.py" for item in diff_findings)
+    finally:
+        service.shutdown({})
+
+
+def test_deep_security_context_policy_binding_and_tamper(tmp_path: Path) -> None:
+    workspace = tmp_path / "context-workspace"
+    for relative, content in {
+        "SECURITY.md": "Root repository security policy.\n",
+        "AGENTS.md": "Use the repository formatter.\n",
+        "README.md": "Repository service AAAA.\n",
+        "src/SECURITY.md": "Nested source security policy.\n",
+        "src/AGENTS.md": "Security scan guidance: inspect authentication boundaries.\n",
+        "src/service.py": "def route(request):\n    return request.token\n",
+        "lib/helper.py": "def helper(config):\n    return config\n",
+    }.items():
+        path = workspace / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    (workspace / "Dockerfile").write_bytes(b"FROM invalid\xff\n")
+    service = service_for(workspace)
+    try:
+        scan = service.start_scan(deep_scan_params())
+        deadline = time.monotonic() + 10
+        while service.deep_get_status({"scanId": scan["id"]}).get("nextAction") != "claim_worker":
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+        state = service.workbench.get_deep_scan_state(scan["id"])
+        context_path = Path(scan["artifact_dir"]) / "context" / "security-context.json"
+        context = json.loads(context_path.read_text(encoding="utf-8"))
+        assert [(item["path"], item["appliesTo"]) for item in context["policySources"]] == [
+            ("SECURITY.md", "."), ("src/SECURITY.md", "src")
+        ]
+        assert [item["path"] for item in context["guidanceSources"]] == ["src/AGENTS.md"]
+        considered = {item["path"]: item["includedAsSecurityGuidance"] for item in context["consideredGuidanceSources"]}
+        assert considered == {"AGENTS.md": False, "src/AGENTS.md": True}
+        rows = {item["path"]: item for item in state["worklist"]}
+        assert len(rows["src/service.py"]["policyRefs"]) == 2
+        assert len(rows["lib/helper.py"]["policyRefs"]) == 1
+        assert rows["src/service.py"]["guidanceRefs"] and not rows["lib/helper.py"]["guidanceRefs"]
+        encoded = json.dumps(state["worklist"], sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        assert hashlib.sha256(encoded.encode("utf-8", "surrogatepass")).hexdigest() == state["worklist_digest"]
+        payload = service.runner.tail._threat_payload(service.workbench.get_scan(scan["id"]))
+        provenance = {item["path"]: item for item in payload["repositoryContext"]["sourceProvenance"]}
+        assert "src/service.py" not in provenance and "lib/helper.py" not in provenance
+        assert provenance["Dockerfile"]["status"] == "invalid_utf8"
+        assert "Dockerfile" not in payload["evidencePaths"]
+        assert {"README.md", "SECURITY.md"} <= set(payload["evidencePaths"])
+        readme = workspace / "README.md"
+        original = readme.read_text(encoding="utf-8")
+        changed = original.replace("AAAA", "BBBB")
+        assert len(original) == len(changed)
+        readme.write_text(changed, encoding="utf-8")
+        with pytest.raises(EngineError) as error:
+            service.deep_claim_worker({
+                "scanId": scan["id"], "modelId": "integration-model",
+                "delegationId": "changed-readme", "runtime": DEEP_WORKER_RUNTIME,
+            })
+        assert error.value.code == "security_context_changed"
+        readme.write_text(original, encoding="utf-8")
+        assignments = [service.deep_claim_worker({
+            "scanId": scan["id"], "modelId": "integration-model",
+            "delegationId": f"context-worker-{index}", "runtime": DEEP_WORKER_RUNTIME,
+        }) for index in range(6)]
+        assert len({(item["securityContextPath"], item["securityContextDigest"], item["securityGuidanceDigest"]) for item in assignments}) == 1
+        context_path.write_text(context_path.read_text(encoding="utf-8") + " ", encoding="utf-8")
+        with pytest.raises(EngineError) as error:
+            service.deep_submit_worker({
+                "scanId": scan["id"], "workerId": assignments[0]["workerId"],
+                "claimToken": assignments[0]["claimToken"], "rowReceipts": [], "candidates": [],
+                "completionAttestation": DEEP_COMPLETION_ATTESTATION,
+            })
+        assert error.value.code == "security_context_changed"
+    finally:
+        service.shutdown({})
+
+
+def test_deep_security_context_rejects_undigestible_policy(tmp_path: Path) -> None:
+    workspace = tmp_path / "oversized-policy-workspace"
+    workspace.mkdir()
+    (workspace / "app.py").write_text("value = input()\n", encoding="utf-8")
+    (workspace / "SECURITY.md").write_bytes(b"A" * (1024 * 1024 + 1))
+    service = service_for(workspace)
+    try:
+        scan = service.start_scan(deep_scan_params())
+        failed = wait_for_scan(service, scan["id"])
+        assert failed["status"] == "failed"
+        assert failed["failure_code"] == "security_context_invalid"
     finally:
         service.shutdown({})
 

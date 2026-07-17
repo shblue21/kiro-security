@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -304,6 +305,13 @@ _DIRECT_SOURCE = re.compile(
 _SECRET_LITERAL = re.compile(
     r"(?i)\b(?:api[_-]?key|secret|password|token)\b\s*[:=]\s*['\"](?P<value>[A-Za-z0-9_\-+/=]{16,})['\"]"
 )
+_IDENTITY_STRING_LITERAL = re.compile(r'''(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)''')
+_IDENTITY_NUMBER = re.compile(r"(?<![A-Za-z0-9_])(?:0x[0-9A-Fa-f]+|\d+(?:\.\d+)?)(?![A-Za-z0-9_])")
+_IDENTITY_SCOPE = re.compile(
+    r"^\s*(?:(?:(?:async\s+)?def|class|function)\s+(?P<named>[A-Za-z_$][A-Za-z0-9_$]*)"
+    r"|(?:const|let|var)\s+(?P<assigned>[A-Za-z_$][A-Za-z0-9_$]*)(?:\s*:\s*[^=;\n]+)?\s*=\s*"
+    r"(?:async\s+)?(?:function\b|\([^\n)]*\)\s*=>))"
+)
 
 
 def _source_variables(lines: list[str]) -> dict[str, int]:
@@ -346,6 +354,47 @@ def _evidence(source_file: SourceFile, line: int, role: str, explanation: str) -
     }
 
 
+def _identity_fragment(value: str) -> str:
+    redacted = _IDENTITY_STRING_LITERAL.sub("<string>", value)
+    redacted = _IDENTITY_NUMBER.sub("<number>", redacted)
+    redacted = re.sub(r"\s+(?://|#).*$", "", redacted)
+    return " ".join(redacted.split())
+
+
+def _identity_scopes(lines: list[str]) -> list[tuple[tuple[str, ...], tuple[int, ...]]]:
+    stack: list[tuple[int, str, int]] = []
+    result = []
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped and not stripped.startswith(("#", "//", "*")):
+            indent = len(line) - len(line.lstrip())
+            match = _IDENTITY_SCOPE.match(line)
+            while stack and indent <= stack[-1][0]:
+                stack.pop()
+            if match:
+                stack.append((indent, match.group("named") or match.group("assigned"), index))
+        result.append((tuple(item[1] for item in stack), tuple(item[2] for item in stack)))
+    return result
+
+
+def _semantic_instance(source_file: SourceFile, sink_line: int, details: dict[str, Any]) -> str:
+    statement = _identity_fragment(source_file.lines[sink_line - 1])
+    scopes = _identity_scopes(source_file.lines)
+    scope_names, scope_starts = scopes[sink_line - 1]
+    ordinal = sum(
+        1
+        for index, line in enumerate(source_file.lines[:sink_line])
+        if scopes[index][1] == scope_starts and _identity_fragment(line) == statement
+    )
+    target = _identity_fragment(str(details.get("sink") or details.get("route") or ""))
+    encoded = json.dumps(
+        {"language": source_file.language, "scope": scope_names or ("module",), "statement": statement, "target": target, "ordinal": ordinal},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return f"semantic:{hashlib.sha256(encoded.encode('utf-8')).hexdigest()[:32]}"
+
+
 def _candidate(
     source_file: SourceFile,
     *,
@@ -365,7 +414,9 @@ def _candidate(
     source_label: str | None = None,
     details: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    primary = f"{source_file.relative_path}:{sink_line}:{rule_id}:{anchor}"
+    candidate_details = details or {}
+    instance = _semantic_instance(source_file, sink_line, candidate_details)
+    primary = f"{rule_id}:{anchor}:{instance}"
     fingerprint_digest = hashlib.sha256(primary.encode("utf-8", "surrogatepass")).hexdigest()
     locations: list[dict[str, Any]] = []
     evidence: list[dict[str, Any]] = []
@@ -377,7 +428,7 @@ def _candidate(
     return {
         "fingerprint": f"kiro-security/v1:sha256:{fingerprint_digest}",
         "ruleId": rule_id,
-        "identity": {"anchor": anchor, "instance": f"{source_file.relative_path}:{sink_line}"},
+        "identity": {"anchor": anchor, "instance": instance},
         "title": title,
         "summary": summary,
         "severity": {
@@ -391,7 +442,7 @@ def _candidate(
         "locations": locations,
         "remediation": remediation,
         "codeEvidence": evidence,
-        "details": details or {},
+        "details": candidate_details,
     }
 
 
@@ -635,6 +686,21 @@ def scan_source_file(source_file: SourceFile, pass_name: str = "all") -> list[di
     return findings
 
 
+def _disambiguate_semantic_collision(candidate: dict[str, Any]) -> dict[str, Any]:
+    identity = dict(candidate["identity"])
+    location_key = json.dumps(
+        sorted((location["path"], location["role"]) for location in candidate["locations"]),
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    suffix = hashlib.sha256(location_key.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+    identity["instance"] = f"{identity['instance']}:collision:{suffix}"
+    primary = f"{candidate['ruleId']}:{identity['anchor']}:{identity['instance']}"
+    candidate["identity"] = identity
+    candidate["fingerprint"] = f"kiro-security/v1:sha256:{hashlib.sha256(primary.encode('utf-8', 'surrogatepass')).hexdigest()}"
+    return candidate
+
+
 def scan_inventory(
     inventory: Inventory,
     *,
@@ -643,7 +709,7 @@ def scan_inventory(
     cancelled: Callable[[], bool] | None = None,
     interrupted: Callable[[], bool] | None = None,
 ) -> list[dict[str, Any]]:
-    findings: dict[str, dict[str, Any]] = {}
+    groups: dict[str, list[dict[str, Any]]] = {}
     total = len(inventory.files)
     for completed, source_file in enumerate(inventory.files, start=1):
         if cancelled and cancelled():
@@ -651,7 +717,11 @@ def scan_inventory(
         if interrupted and interrupted():
             raise InterruptedScan()
         for candidate in scan_source_file(source_file, pass_name=pass_name):
-            findings[candidate["fingerprint"]] = candidate
+            groups.setdefault(candidate["fingerprint"], []).append(candidate)
         if progress:
             progress(completed, total, source_file.relative_path)
-    return list(findings.values())
+    return [
+        candidate if len(group) == 1 else _disambiguate_semantic_collision(candidate)
+        for group in groups.values()
+        for candidate in group
+    ]

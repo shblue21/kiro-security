@@ -130,6 +130,7 @@ class DeepTailCoordinator:
             "revision": scan.get("target_revision"),
             "snapshotDigest": scan.get("snapshot_digest"),
             "worklistDigest": state["worklist_digest"],
+            "securityContextDigest": state["worklist"][0].get("securityContextDigest") if state["worklist"] else None,
         }
 
     def _assert_snapshot(self, scan: dict[str, Any], payload: dict[str, Any]) -> None:
@@ -137,6 +138,9 @@ class DeepTailCoordinator:
         actual = self._snapshot(scan)
         if expected != actual:
             raise EngineError("deep_tail_snapshot_drift", "The immutable Deep snapshot changed after assignment creation.", {"expected": expected, "actual": actual})
+        state = self.workbench.get_deep_scan_state(scan["id"])
+        assert state is not None
+        self.deep._validate_security_context(scan, state["worklist"])
 
     def _ensure_assignment(self, scan_id: str, kind: str, subject_id: str, payload: dict[str, Any]) -> None:
         now = utc_now()
@@ -175,6 +179,7 @@ class DeepTailCoordinator:
     def _threat_payload(self, scan: dict[str, Any]) -> dict[str, Any]:
         state = self.workbench.get_deep_scan_state(scan["id"])
         assert state is not None
+        context = self.deep._validate_security_context(scan, state["worklist"])
         connection = self.workbench._connect()
         try:
             workers = connection.execute(
@@ -191,6 +196,29 @@ class DeepTailCoordinator:
             for item in state["canonicalCandidates"]
         ]
         receipts = self.workbench.list_coverage_rows(scan["id"])
+        provenance = []
+        evidence_paths = {row["path"] for row in state["worklist"]}
+        for source in [
+            *context.get("repositoryEvidenceSources", []),
+            *context.get("policySources", []),
+            *context.get("guidanceSources", []),
+        ]:
+            path = str(source.get("path") or "")
+            if not path:
+                continue
+            if (
+                source.get("status") == "ok"
+                and source.get("digestScope") == "full_content"
+                and str(source.get("contentDigest") or "").startswith("sha256:")
+            ):
+                evidence_paths.add(path)
+            provenance.append({
+                "path": path,
+                "kind": source.get("kind"),
+                "status": source.get("status"),
+                "contentDigest": source.get("contentDigest"),
+                "appliesTo": source.get("appliesTo"),
+            })
         return {
             "scanId": scan["id"], "subjectId": scan["id"], "snapshot": self._snapshot(scan),
             "workerThreatModels": [
@@ -203,7 +231,17 @@ class DeepTailCoordinator:
                 "rowCount": len(receipts),
                 "deferred": [{"rowId": row["rowId"], "path": row["path"], "reason": row["reason"]} for row in receipts if row["disposition"] == "deferred"],
             },
-            "evidencePaths": [row["path"] for row in state["worklist"]],
+            "repositoryContext": {
+                "status": "compiled",
+                "path": state["worklist"][0]["securityContextPath"],
+                "contextDigest": context["contextDigest"],
+                "guidanceDigest": context["guidanceProjectionDigest"],
+                "sourceProvenance": provenance,
+                "unknowns": context.get("unknowns") or [],
+                "applicablePolicyPaths": [item["path"] for item in context.get("policySources", [])],
+                "applicableGuidancePaths": [item["path"] for item in context.get("guidanceSources", [])],
+            },
+            "evidencePaths": sorted(evidence_paths),
             "proofContract": {
                 "required": ["protectedAssets", "actors", "trustBoundaries", "entrypoints", "privilegedOperations", "securityControls", "highImpactAttackSurfaces", "candidateThreatAssumptions", "evidenceReferences", "unknowns"],
                 "repositorySpecific": True,
