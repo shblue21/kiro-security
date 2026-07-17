@@ -13,6 +13,7 @@ const commands = new Set(manifest.contributes.commands.map((entry: { command: st
 const required = [
   "kiroSecurity.openPanel",
   "kiroSecurity.openPanelRight",
+  "kiroSecurity.startFastScan",
   "kiroSecurity.startStandardScan",
   "kiroSecurity.startDeepScan",
   "kiroSecurity.scanGitChanges",

@@ -7,6 +7,19 @@ import path from "node:path";
 import { PROTOCOL_VERSION } from "../packages/protocol/src";
 
 const root = path.resolve(__dirname, "..", "..");
+const MODEL_RUNTIME = {
+  contractVersion: "deep-worker/v2",
+  agentType: "delegated-worker",
+  reasoningEffort: "high",
+  hostVersion: "mcp-sharing-test/1.0",
+  delegationMode: "fresh",
+  capabilities: {
+    delegatedAgentAvailable: true,
+    freshContextMode: true,
+    usableWorkerSlots: 6,
+    goalSupport: true,
+  },
+};
 
 class LineRpc {
   private nextId = 1;
@@ -117,27 +130,21 @@ test("MCP and a second engine client observe the same scan and findings", { time
     assert.equal(tools.tools.some((tool: any) => tool.name === "security_create_tracking_handoff"), true);
 
     await engine.request("initialize", { protocolVersion: PROTOCOL_VERSION, clientInfo: { name: "sharing-test", version: "1" } });
-    const started = await mcp.request("tools/call", { name: "security_start_scan", arguments: { workspaceRoot: workspace, mode: "standard", scope: "." } });
+    const started = await mcp.request("tools/call", {
+      name: "security_start_scan",
+      arguments: {
+        workspaceRoot: workspace, mode: "standard", analysisProfile: "model", scope: ".",
+        modelId: "mcp-sharing-model", runtime: MODEL_RUNTIME,
+      },
+    });
     assert.equal(started.isError, false, started.content?.[0]?.text);
     const scanId = started.structuredContent.result.id;
 
     const sharedDuringRun = await engine.request("get_scan", { scanId });
     assert.equal(sharedDuringRun.id, scanId);
-    const completed = await waitForScan(mcp, workspace, scanId);
-    assert.equal(completed.status, "completed", completed.failure_message);
-
-    const mcpFindings = await mcp.request("tools/call", { name: "security_list_findings", arguments: { workspaceRoot: workspace, scanId } });
-    assert.equal(mcpFindings.isError, false);
-    const directFindings = await engine.request("list_findings", { scanId, limit: 2000 });
-    assert.equal(directFindings.length, mcpFindings.structuredContent.result.length);
-    assert.ok(directFindings.length >= 5);
-    const handoff = await mcp.request("tools/call", {
-      name: "security_create_tracking_handoff",
-      arguments: { workspaceRoot: workspace, occurrenceId: directFindings[0].occurrenceId, provider: "manual", destination: "review" },
-    });
-    assert.equal(handoff.isError, false, handoff.content?.[0]?.text);
-    const directDetail = await engine.request("get_finding", { occurrenceId: directFindings[0].occurrenceId });
-    assert.equal(directDetail.trackingRecords[0].status, "prepared");
+    await engine.request("cancel_scan", { scanId });
+    const cancelled = await waitForScan(mcp, workspace, scanId);
+    assert.equal(cancelled.status, "cancelled", cancelled.failure_message);
 
     const startedByExtensionSide = await engine.request("start_scan", { mode: "standard", scope: "." });
     const visibleThroughMcp = await mcp.request("tools/call", {
@@ -147,6 +154,28 @@ test("MCP and a second engine client observe the same scan and findings", { time
     assert.equal(visibleThroughMcp.structuredContent.result.id, startedByExtensionSide.id);
     const completedThroughMcp = await waitForScan(mcp, workspace, startedByExtensionSide.id);
     assert.equal(completedThroughMcp.status, "completed", completedThroughMcp.failure_message);
+
+    const mcpFindings = await mcp.request("tools/call", { name: "security_list_findings", arguments: { workspaceRoot: workspace, scanId: startedByExtensionSide.id } });
+    assert.equal(mcpFindings.isError, false);
+    const directFindings = await engine.request("list_findings", { scanId: startedByExtensionSide.id, limit: 2000 });
+    assert.equal(directFindings.length, mcpFindings.structuredContent.result.length);
+    assert.ok(directFindings.length >= 5);
+    const handoff = await mcp.request("tools/call", {
+      name: "security_create_tracking_handoff",
+      arguments: {
+        workspaceRoot: workspace, occurrenceId: directFindings[0].occurrenceId,
+        provider: "manual", destination: "review",
+        trackingProof: {
+          connector: { provider: "manual", host: "manual.invalid", identity: "sharing-test" },
+          duplicateSearch: { status: "none", query: "finding id and fingerprint", candidateIds: [] },
+          visibility: "private", audience: ["security-team"],
+        },
+      },
+    });
+    assert.equal(handoff.isError, false, handoff.content?.[0]?.text);
+    const directDetail = await engine.request("get_finding", { occurrenceId: directFindings[0].occurrenceId });
+    assert.equal(directDetail.trackingRecords[0].status, "prepared");
+
   } finally {
     try { await engine.request("shutdown", {}, 10_000); } catch { /* ignored */ }
     await Promise.allSettled([engine.stop(), mcp.stop()]);

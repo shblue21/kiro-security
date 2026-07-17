@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .constants import ARTIFACT_KINDS
+from .constants import ARTIFACT_KINDS, is_model_scan
 from .coverage import coverage_finding_reference, expected_coverage_frontier, make_coverage_row
 from .db import Workbench
 from .security import atomic_write, write_json
@@ -73,7 +73,7 @@ def synchronize_coverage_ledger(
         surface = str(item.get("surface") or f"source_review:{item.get('language') or 'text'}")
         reportable, suppressed, evidence_refs = _finding_references_for_path(findings, path)
         prior = existing.get(row_id)
-        if scan["mode"] == "deep" and prior is not None and prior["disposition"] == "deferred":
+        if is_model_scan(scan) and prior is not None and prior["disposition"] == "deferred":
             related = [*reportable, *suppressed]
             candidate_ids = (
                 sorted({coverage_finding_reference(finding) for finding in related})
@@ -130,7 +130,7 @@ def synchronize_coverage_ledger(
                 )
             )
             continue
-        if scan["mode"] == "deep":
+        if is_model_scan(scan):
             if prior is not None:
                 final_rows.append(
                     make_coverage_row(
@@ -220,7 +220,7 @@ def build_coverage_document(
         for item in ledger_rows
         if item["rowId"] in expected and item["disposition"] == "deferred"
     ]
-    deep_state = workbench.get_deep_scan_state(scan["id"]) if scan["mode"] == "deep" else None
+    deep_state = workbench.get_deep_scan_state(scan["id"]) if is_model_scan(scan) else None
     deep_status = deep_state.get("status") if deep_state else None
     supported_count = len(expected_supported)
     if supported_count == 0:

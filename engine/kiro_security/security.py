@@ -13,7 +13,8 @@ from typing import Any, Iterable
 from .errors import EngineError
 
 _SECRET_PATTERNS = [
-    re.compile(r"(?i)(api[_-]?key|token|secret|password|authorization)(\s*[=:]\s*)([^\s,;]+)"),
+    re.compile(r"(?i)([\"']?authorization[\"']?)(\s*[=:]\s*[\"']?)(?:(?:bearer|basic)\s+)?([^\s,;\"']+)"),
+    re.compile(r"(?i)(api[_-]?key|token|secret|password)(\s*[=:]\s*)([^\s,;]+)"),
     re.compile(r"\b(?:sk|ghp|github_pat|xox[baprs])-?[A-Za-z0-9_\-]{12,}\b"),
 ]
 _GIT_REF = re.compile(r"^[A-Za-z0-9._/@+\-~^:]+$")

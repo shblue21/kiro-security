@@ -6,7 +6,7 @@ import shutil
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from .constants import ARTIFACT_KINDS
+from .constants import ARTIFACT_KINDS, is_model_scan
 from .db import Workbench
 from .deep import _PROFILE_FIELDS, DeepCoordinator
 from .errors import EngineError
@@ -62,8 +62,8 @@ class DeepTailCoordinator:
 
     def _require_scan(self, scan_id: str) -> dict[str, Any]:
         scan = self.workbench.get_scan(scan_id)
-        if scan["mode"] != "deep":
-            raise EngineError("not_deep_scan", "Deep tail assignments require a Deep scan.")
+        if not is_model_scan(scan):
+            raise EngineError("not_model_scan", "Model tail assignments require an Agent model scan.")
         if scan["status"] != "running" or scan.get("cancellation_requested"):
             raise EngineError("deep_tail_scan_inactive", f"Deep tail submission is unavailable while the scan is {scan['status']}.")
         return scan
@@ -131,6 +131,7 @@ class DeepTailCoordinator:
             "snapshotDigest": scan.get("snapshot_digest"),
             "worklistDigest": state["worklist_digest"],
             "securityContextDigest": state["worklist"][0].get("securityContextDigest") if state["worklist"] else None,
+            "diffContextDigest": state["worklist"][0].get("diffContextDigest") if state["worklist"] else None,
         }
 
     def _assert_snapshot(self, scan: dict[str, Any], payload: dict[str, Any]) -> None:
@@ -198,6 +199,8 @@ class DeepTailCoordinator:
         receipts = self.workbench.list_coverage_rows(scan["id"])
         provenance = []
         evidence_paths = {row["path"] for row in state["worklist"]}
+        for row in state["worklist"]:
+            evidence_paths.update(str(path) for path in row.get("diffSupportingPaths") or [])
         for source in [
             *context.get("repositoryEvidenceSources", []),
             *context.get("policySources", []),
@@ -286,7 +289,11 @@ class DeepTailCoordinator:
             self._ensure_assignment(scan_id, "attack_path", finding["occurrenceId"], {
                 "scanId": scan_id, "subjectId": finding["occurrenceId"], "findingId": finding["findingId"],
                 "snapshot": self._snapshot(scan), "finding": finding, "validation": validation,
-                "reviewPaths": [row["path"] for row in self.workbench.get_deep_scan_state(scan_id)["worklist"]],
+                "reviewPaths": sorted({
+                    str(path)
+                    for row in self.workbench.get_deep_scan_state(scan_id)["worklist"]
+                    for path in [row["path"], *(row.get("diffSupportingPaths") or [])]
+                }),
                 "proofContract": {"evidenceBacked": True, "severityReassessmentRequired": True},
             })
         if len(self._completed(scan_id, "attack_path")) != len(eligible):
@@ -720,7 +727,7 @@ class DeepTailCoordinator:
             ("Privileged operations", result["privilegedOperations"]), ("Security controls", result["securityControls"]),
             ("High-impact attack surfaces", result["highImpactAttackSurfaces"]), ("Unknowns and proof gaps", result["unknowns"]),
         ]
-        lines = ["# Canonical Deep threat model", "", result["summary"], ""]
+        lines = ["# Canonical model threat model", "", result["summary"], ""]
         for title, items in sections:
             lines.extend([f"## {title}", "", *[f"- {item}" for item in items], ""])
         lines.extend(["## Candidate threat assumptions", ""])

@@ -17,7 +17,9 @@ find_kiro() {
   fi
   local candidates=(
     "/Applications/Kiro.app/Contents/Resources/app/bin/kiro"
+    "/Applications/Kiro.app/Contents/Resources/app/bin/code"
     "${HOME}/Applications/Kiro.app/Contents/Resources/app/bin/kiro"
+    "${HOME}/Applications/Kiro.app/Contents/Resources/app/bin/code"
     "/usr/local/bin/kiro"
     "/usr/bin/kiro"
     "/opt/kiro/bin/kiro"
@@ -80,33 +82,26 @@ if ! grep -Fqi "${EXTENSION_ID}" <<<"${INSTALLED}"; then
 fi
 
 echo "VSIX installation was reported by Kiro. Launching the isolated fixture workspace."
-cat > "${RESULT_FILE}" <<JSON
-{
-  "schemaVersion": "1.0",
-  "productVersion": "${VERSION}",
-  "vsixPath": "${VSIX}",
-  "kiroExecutable": "${KIRO_BIN}",
-  "testedAt": null,
-  "platform": "$(uname -s 2>/dev/null || echo unknown)",
-  "checks": {
-    "installed": true,
-    "activityBarIcon": null,
-    "secondarySideBar": null,
-    "standardScan": null,
-    "liveProgress": null,
-    "realFinding": null,
-    "sourceNavigation": null,
-    "problemsDiagnostic": null,
-    "exports": null,
-    "historyAfterRestart": null,
-    "resumeInterruptedScan": null,
-    "mcpToVsix": null,
-    "vsixToMcp": null,
-    "disableAndUninstall": null
-  },
-  "notes": []
-}
-JSON
+RESULT_FILE="${RESULT_FILE}" PRODUCT_VERSION="${VERSION}" VSIX_PATH="${VSIX}" KIRO_EXECUTABLE="${KIRO_BIN}" \
+PLATFORM="$(uname -s 2>/dev/null || echo unknown)" node - <<'JS'
+const fs = require("node:fs");
+const checks = Object.fromEntries([
+  "activityBarIcon", "secondarySideBar", "agentSetupVerified", "agentCapabilities", "nativePowerPrepared",
+  "fastScan", "modelStandardScan", "modelDiffScan", "deepSixWorker", "deepMultiRound", "deepTail",
+  "canonicalSeal", "liveProgress", "realFinding", "sourceNavigation", "problemsDiagnostic", "exports",
+  "historyAfterRestart", "resumeInterruptedScan", "mcpToVsix", "vsixToMcp", "disableAndUninstall",
+].map((name) => [name, null]));
+fs.writeFileSync(process.env.RESULT_FILE, JSON.stringify({
+  schemaVersion: "1.0",
+  productVersion: process.env.PRODUCT_VERSION,
+  vsixPath: process.env.VSIX_PATH,
+  kiroExecutable: process.env.KIRO_EXECUTABLE,
+  testedAt: null,
+  platform: process.env.PLATFORM,
+  checks: { installed: true, ...checks },
+  notes: [],
+}, null, 2) + "\n");
+JS
 
 cat <<MSG
 

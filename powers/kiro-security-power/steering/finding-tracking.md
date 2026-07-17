@@ -2,6 +2,9 @@
 
 1. Retrieve the canonical finding with `security_get_finding`.
 2. Confirm validation and triage state and check the intended destination for duplicate work.
-3. Call `security_create_tracking_handoff` with the selected manual, GitHub, Linear, or Jira provider.
-4. Review the generated JSON artifact and obtain explicit approval before any separately configured connector performs an external write.
-5. Never report that an external issue was created: this Power only prepares and records the handoff in the shared workbench.
+3. Call `security_create_tracking_handoff` with the selected provider and a truthful `trackingProof` containing the connector host/identity, duplicate query and outcome, visibility, and audience. This seals a preview but does not claim approval. GitHub must use `github.com`, Linear `linear.app`, and Jira the approved `*.atlassian.net` tenant; URL query, fragment, and credentials are forbidden.
+4. Verify the exact provider identity, destination, visibility, and permissions; search the pinned destination for both finding ID and fingerprint and read plausible duplicates.
+5. Review the exact title, body, metadata, duplicate outcome, and disclosure audience from the sealed handoff. Obtain explicit approval for that exact write.
+6. Immediately recheck the sealed source, connector identity, destination, visibility, duplicate result, and unchanged payload. If any check changes, stop for a new preview.
+7. Only when the separately configured connector is available, perform one approved create/update or reuse. Never retry an uncertain create. Read the exact provider object back through the same connector and compare the finding/fingerprint bindings plus title/body digests.
+8. For a verified outcome, call `security_record_tracking_result` with the sanitized readback and the approval object (`approved=true`, the exact `approvedPreviewDigest` and `approvedPayloadSha256`, approver, time, and scope); the connector readback must contain the canonical approval digest for that object. This binds approval to the whole routing handoff, including connector, duplicate result, visibility, and audience. It records external identity, status, and readback digest but performs no provider network write. If connector access, audience, duplicate state, approval, or readback is unavailable, record `blocked`, `failed`, or `uncertain` with no external mutation and do not claim an issue exists.

@@ -5,7 +5,9 @@ from pathlib import Path
 
 import pytest
 
+from kiro_security.errors import EngineError
 from kiro_security.scanner import Inventory, SourceFile, build_inventory, scan_inventory, scan_source_file
+from kiro_security.runner import ScanRunner
 from kiro_security.security import stable_id
 
 from .conftest import run_git
@@ -43,6 +45,74 @@ def test_standard_inventory_and_finding_normalization(workspace: Path) -> None:
     fingerprints = [finding["fingerprint"] for finding in findings]
     assert len(fingerprints) == len(set(fingerprints))
     assert all("safe.py" not in location["path"] for finding in findings for location in finding["locations"])
+
+
+def test_security_surface_inventory_is_relevance_based(tmp_path: Path) -> None:
+    root = tmp_path / "security-surfaces"
+    samples = {
+        "Dockerfile": "FROM scratch\n",
+        "compose.yaml": "services: {}\n",
+        "infra/main.tf": "resource \"example\" \"main\" {}\n",
+        "k8s/deployment.yaml": "apiVersion: v1\nkind: Pod\n",
+        ".github/workflows/ci.yml": "jobs: {}\n",
+        "package-lock.json": "{}\n",
+        "requirements-prod.txt": "example==1.0\n",
+        "db/migrations/001.sql": "CREATE TABLE example(id INT);\n",
+        "nginx/nginx.conf": "server {}\n",
+        "iam/role-policy.json": "{}\n",
+        ".env.example": "TOKEN=placeholder\n",
+        "api/service.proto": "syntax = \"proto3\";\n",
+        "api/openapi.yaml": "openapi: 3.0.0\n",
+        "config/runtime.xml": "<configuration/>\n",
+        "data.json": "{}\n",
+        "src/app.py": "print('ok')\n",
+        "tests/test_app.py": "def test_ok(): pass\n",
+    }
+    for relative, content in samples.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    invalid = root / "deploy" / "invalid.yaml"
+    invalid.parent.mkdir(parents=True, exist_ok=True)
+    invalid.write_bytes(b"setting: \xff\n")
+
+    deep = inventory(root, mode="deep")
+    surfaces = ScanRunner._inventory_data(deep)
+    rows = {item["path"]: item for item in surfaces["files"]}
+    assert rows["Dockerfile"]["surface"] == "deployment_review:container"
+    assert rows["infra/main.tf"]["surface"] == "deployment_review:infrastructure_as_code"
+    assert rows["k8s/deployment.yaml"]["surface"] == "deployment_review:orchestration"
+    assert rows[".github/workflows/ci.yml"]["surface"] == "workflow_review:ci"
+    assert rows["package-lock.json"]["surface"] == "dependency_review:lockfile"
+    assert rows["db/migrations/001.sql"]["surface"] == "data_review:migration"
+    assert rows["iam/role-policy.json"]["surface"] == "authorization_review:iam_policy"
+    assert rows["api/openapi.yaml"]["surface"] == "interface_review:openapi"
+    assert rows["config/runtime.xml"]["surface"] == "configuration_review:runtime"
+    assert rows["Dockerfile"]["runtimeRelevance"] and rows["Dockerfile"]["rankingReason"]
+    assert rows["Dockerfile"]["entrypoint"] is None and rows["Dockerfile"]["privilegedBoundary"] is None
+    assert "data.json" not in rows and "deploy/invalid.yaml" not in rows
+    assert any(item["path"] == "data.json" and item["surface"] == "unsupported_file" for item in surfaces["deferred"])
+    assert any(item["path"] == "deploy/invalid.yaml" and item["kind"] == "invalid_security_surface_text" for item in surfaces["deferred"])
+
+    standard = ScanRunner._inventory_data(inventory(root, mode="standard"))
+    assert {item["path"] for item in standard["files"]} == {"src/app.py", "tests/test_app.py"}
+    assert any(
+        item["path"] == "Dockerfile"
+        and item["kind"] == "security_surface_unreviewed"
+        and item["surface"] == "deployment_review:container"
+        for item in standard["deferred"]
+    )
+
+    capped = inventory(root, mode="deep", max_files=1)
+    assert len(capped.files) == 1 and capped.files[0].surface is not None
+    assert capped.files[0].relative_path not in {"src/app.py", "tests/test_app.py"}
+    assert any(item["surface"] == "inventory_limit" for item in capped.deferred)
+    exact = root / "exact"
+    exact.mkdir()
+    (exact / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+    exact_limit = inventory(root, mode="deep", scope="exact", max_files=1)
+    assert len(exact_limit.files) == 1
+    assert not any(item["surface"] == "inventory_limit" for item in exact_limit.deferred)
 
 
 def test_finding_identity_survives_line_shift_and_rename_without_merging_siblings() -> None:
@@ -83,6 +153,16 @@ def test_finding_identity_survives_line_shift_and_rename_without_merging_sibling
     assert {item["locations"][-1]["path"]: item["fingerprint"] for item in shifted_findings} == clone_fingerprints
     shifted_location = next(item["locations"][-1] for item in shifted_findings if item["locations"][-1]["path"] == "jobs/admin.py")
     assert shifted_location["startLine"] == 5
+
+    same_path_clone = (
+        "import os\nif enabled:\n    def target():\n        os.system(input())\n"
+        "else:\n    def target():\n        os.system(input())\n"
+    )
+    same_path_findings = scan_inventory(Inventory([
+        SourceFile(Path("conditional.py"), "conditional.py", same_path_clone, "python", len(same_path_clone))
+    ], ["."], [], [], None, "same-path-snapshot", False))
+    assert len(same_path_findings) == 2
+    assert len({item["fingerprint"] for item in same_path_findings}) == 2
 
     target = "import os\ndef target():\n    user = input()\n    os.system(user)\n"
     with_unrelated = "import os\ndef unrelated():\n    user = input()\n    os.system(user)\n\n" + target.split("\n", 1)[1]
@@ -151,6 +231,27 @@ def test_diff_commit_deletion_is_reported(workspace: Path) -> None:
     head = run_git(workspace, "rev-parse", "HEAD")
     result = inventory(workspace, mode="diff", diff_target_kind="commit", diff_head_revision=head)
     assert any(item["kind"] == "deleted_file" and item["path"] == "src/app.py" for item in result.deferred)
+    model_inventory = ScanRunner._inventory_data(result, include_diff_context_row=True)
+    assert [(item["path"], item["surface"]) for item in model_inventory["files"]] == [
+        ("context/diff-context.json", "diff_review:bounded_patch")
+    ]
+
+
+def test_diff_commit_rejects_content_from_a_different_checkout(workspace: Path) -> None:
+    target = run_git(workspace, "rev-parse", "HEAD")
+    (workspace / "src" / "safe.py").write_text('print("new checkout")\n', encoding="utf-8")
+    run_git(workspace, "add", "src/safe.py")
+    run_git(workspace, "commit", "-m", "advance checkout")
+
+    with pytest.raises(EngineError) as error:
+        inventory(workspace, mode="diff", diff_target_kind="commit", diff_head_revision=target)
+    assert error.value.code == "diff_target_not_checked_out"
+
+    target = run_git(workspace, "rev-parse", "HEAD")
+    (workspace / "src" / "safe.py").write_text('print("dirty worktree")\n', encoding="utf-8")
+    with pytest.raises(EngineError) as error:
+        inventory(workspace, mode="diff", diff_target_kind="commit", diff_head_revision=target)
+    assert error.value.code == "diff_target_worktree_changed"
 
 
 def test_symlink_outside_workspace_is_excluded(workspace: Path, tmp_path: Path) -> None:

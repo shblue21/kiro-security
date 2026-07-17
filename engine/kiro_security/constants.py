@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 MODES = ("diff", "standard", "deep")
+ANALYSIS_PROFILES = ("fast", "model")
 PHASES = ("preflight", "threat_model", "discovery", "validation", "attack_path", "reporting")
 SCAN_STATUSES = ("queued", "running", "interrupted", "completed", "cancelled", "failed")
 ACTIVE_SCAN_STATUSES = ("queued", "running")
@@ -33,3 +34,14 @@ SOURCE_EXTENSIONS = {
     ".py", ".pyw", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".java", ".go",
     ".rb", ".php", ".cs", ".rs", ".sh", ".bash", ".zsh", ".kt", ".kts", ".scala",
 }
+
+
+def analysis_profile(scan: dict) -> str:
+    if scan.get("mode") == "deep":
+        return "model"
+    capabilities = scan.get("capabilities") or {}
+    return "model" if capabilities.get("analysisProfile") == "model" else "fast"
+
+
+def is_model_scan(scan: dict) -> bool:
+    return analysis_profile(scan) == "model"

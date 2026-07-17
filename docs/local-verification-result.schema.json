@@ -51,7 +51,13 @@
         "nativePowerPrepared",
         "agentCapabilities",
         "agentSetupVerified",
-        "standardScan",
+        "fastScan",
+        "modelStandardScan",
+        "modelDiffScan",
+        "deepSixWorker",
+        "deepMultiRound",
+        "deepTail",
+        "canonicalSeal",
         "liveProgress",
         "realFinding",
         "sourceNavigation",
@@ -73,7 +79,25 @@
         "secondarySideBar": {
           "$ref": "#/$defs/check"
         },
-        "standardScan": {
+        "fastScan": {
+          "$ref": "#/$defs/check"
+        },
+        "modelStandardScan": {
+          "$ref": "#/$defs/check"
+        },
+        "modelDiffScan": {
+          "$ref": "#/$defs/check"
+        },
+        "deepSixWorker": {
+          "$ref": "#/$defs/check"
+        },
+        "deepMultiRound": {
+          "$ref": "#/$defs/check"
+        },
+        "deepTail": {
+          "$ref": "#/$defs/check"
+        },
+        "canonicalSeal": {
           "$ref": "#/$defs/check"
         },
         "liveProgress": {

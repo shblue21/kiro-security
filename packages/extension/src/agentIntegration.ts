@@ -29,21 +29,32 @@ const READ_ONLY_TOOLS = [
 const REQUIRED_TOOLS = [
   "security_get_capabilities",
   "security_start_scan",
+  "security_list_scans",
   "security_resume_scan",
   "security_cancel_scan",
   "security_get_scan",
+  "security_get_progress",
   "security_deep_get_status",
   "security_deep_claim_worker",
   "security_deep_submit_worker_result",
   "security_deep_retry_worker",
   "security_deep_claim_merge",
   "security_deep_submit_merge",
+  "security_deep_get_tail_assignment",
+  "security_deep_submit_tail_result",
+  "security_deep_retry_writeup",
   "security_list_findings",
   "security_get_finding",
   "security_validate_finding",
   "security_triage_finding",
   "security_create_remediation",
+  "security_prepare_remediation_patch",
+  "security_apply_remediation_patch",
+  "security_verify_remediation_patch",
+  "security_create_triage_intake",
+  "security_submit_triage_assessment",
   "security_create_tracking_handoff",
+  "security_record_tracking_result",
   "security_create_hardening_proposal",
   "security_create_threat_model",
   "security_export_report",
@@ -220,13 +231,13 @@ Use the MCP server named \`${AGENT_MCP_SERVER_NAME}\` for repository security wo
 
 1. Pass the canonical current workspace as \`workspaceRoot\` to every security tool.
 2. Call \`security_get_capabilities\` before substantive work.
-3. Start scans only with \`security_start_scan\` in \`standard\`, \`deep\`, or \`diff\` mode.
-4. Deep mode is model-orchestrated: start it with the selected \`modelId\` and the same truthful \`deep-worker/v2\` host-attested \`runtime\` used by every claim, then use \`security_deep_get_status\`, run exactly six independent workers per round through \`security_deep_claim_worker\` and \`security_deep_submit_worker_result\`, and use the merge tools until a complete round adds zero new canonical candidates or round 10 is explicitly capped. Never substitute Standard results. Claim all six workers before the first result is submitted, with one identical host-attested runtime profile per round (\`contractVersion: "deep-worker/v2"\`, \`delegationMode: "fresh"\`, capability flags, \`usableWorkerSlots >= 6\`). Submit each result with a truthful host \`completionAttestation\` (\`freshContext\`, no inherited coordinator history, \`workerState: "completed_idle"\`) and evidence-grounded candidates only: non-empty \`codeEvidence\` with explicit origin/control and sink/impact roles, impact, root cause, and severity/confidence rationales — the engine never fabricates evidence, seed research, or dedupe judgments. Each canonical merge candidate requires \`mergeRationale\`, \`identityRationale\`, and \`remediationSubsumption\`, and must not drift or re-register prior canonical identities.
+3. Start model Standard/Diff/Deep scans only with \`security_start_scan\`, \`analysisProfile: "model"\`, the selected \`modelId\`, and truthful \`deep-worker/v2\` host-attested \`runtime\`. VSIX Fast Scan is the explicitly deterministic heuristic path.
+4. Use \`security_deep_get_status\`, run exactly six independent workers per round through \`security_deep_claim_worker\` and \`security_deep_submit_worker_result\`, and use the merge tools. Standard/Diff close after one semantic merge; Deep repeats until a complete round adds zero new canonical candidates or round 10 is explicitly capped. Never substitute Fast results. Claim all six workers before the first result is submitted, with one identical host-attested runtime profile per round (\`contractVersion: "deep-worker/v2"\`, \`delegationMode: "fresh"\`, capability flags, \`usableWorkerSlots >= 6\`). Submit each result with a truthful host \`completionAttestation\` (\`freshContext\`, no inherited coordinator history, \`workerState: "completed_idle"\`) and evidence-grounded candidates only: non-empty \`codeEvidence\` with explicit origin/control and sink/impact roles, impact, root cause, and severity/confidence rationales — the engine never fabricates evidence, seed research, or dedupe judgments. Each canonical merge candidate requires \`mergeRationale\`, \`identityRationale\`, and \`remediationSubsumption\`, and must not drift or re-register prior canonical identities.
 5. Poll \`security_get_scan\` until a terminal or resumable state; never invent progress or results.
 6. Read evidence with \`security_list_findings\` and \`security_get_finding\`.
-7. Validate material candidates with \`security_validate_finding\` before calling them verified.
+7. For VSIX Fast findings, use \`security_validate_finding\` before calling them verified. Model scans already carry authoritative tail validation and attack-path proof from \`security_get_finding\`; never overwrite it with the deterministic validation tool.
 8. Record user-directed triage through \`security_triage_finding\`; never silently suppress a finding.
-9. Use the remediation, hardening, tracking-handoff, and export tools for durable artifacts.
+9. Use remediation, tracking-handoff, and export tools for durable artifacts. Use deterministic hardening only for Fast scans; model scans already materialize immutable tail hardening.
 10. Do not create a second scanner, database, or fixture-backed result path.
 
 ## Safety

@@ -2,7 +2,7 @@ import { spawn, ChildProcessWithoutNullStreams } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { PROTOCOL_VERSION as ENGINE_PROTOCOL_VERSION } from "../../protocol/src";
+import { PROTOCOL_VERSION as ENGINE_PROTOCOL_VERSION, isRpcEnvelope } from "../../protocol/src";
 
 const MAX_LINE_BYTES = 2 * 1024 * 1024;
 const SERVER_VERSION = "0.3.0";
@@ -11,6 +11,12 @@ const extensionRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)),
 
 interface JsonRpcRequest { jsonrpc: "2.0"; id?: string | number | null; method: string; params?: Record<string, unknown>; }
 interface Pending { resolve(value: unknown): void; reject(error: Error): void; timer: NodeJS.Timeout; }
+
+class EngineRpcError extends Error {
+  constructor(message: string, readonly engineCode?: string) {
+    super(engineCode ? `${message} (${engineCode})` : message);
+  }
+}
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -109,15 +115,19 @@ class EngineProcess {
       this.buffer = this.buffer.slice(index + 1);
       if (!line) continue;
       try {
-        const message = JSON.parse(line) as Record<string, unknown>;
-        if (message.protocolVersion !== ENGINE_PROTOCOL_VERSION || message.jsonrpc !== "2.0") continue;
-        if (typeof message.method === "string") continue;
-        if (typeof message.id !== "number") continue;
+        const message: unknown = JSON.parse(line);
+        if (!isRpcEnvelope(message) || "method" in message || typeof message.id !== "number") continue;
         const pending = this.pending.get(message.id);
         if (!pending) continue;
         clearTimeout(pending.timer);
         this.pending.delete(message.id);
-        if (isObject(message.error)) pending.reject(new Error(String(message.error.message ?? "Engine error")));
+        if ("error" in message) {
+          const data = isObject(message.error.data) ? message.error.data : {};
+          const engineCode = typeof data.engineCode === "string" && /^[a-z0-9_]{1,128}$/.test(data.engineCode)
+            ? data.engineCode
+            : undefined;
+          pending.reject(new EngineRpcError(String(message.error.message ?? "Engine error"), engineCode));
+        }
         else pending.resolve(message.result);
       } catch {
         // The engine contract requires one JSON object per line; malformed output is ignored and logged on stderr.
@@ -225,8 +235,8 @@ const toolDefinitions = [
   },
   {
     name: "security_start_scan",
-    description: "Start a Standard, Deep, or Git-diff repository security scan. Deep requires the same truthful modelId/runtime host attestation used by worker claims.",
-    inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, mode: { type: "string", enum: ["standard", "deep", "diff"] }, scope: { type: "string", default: "." }, diffTargetKind: { type: "string", enum: ["working_tree", "commit", "range"] }, diffBaseRevision: { type: "string" }, diffHeadRevision: { type: "string" }, modelId: { type: "string" }, runtime: { type: "object" } }, required: ["workspaceRoot", "mode"], additionalProperties: false },
+    description: "Start a model Standard, Deep, or Git-diff scan with explicit analysisProfile=model and truthful model/runtime host attestation. VSIX Fast is separate.",
+    inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, mode: { type: "string", enum: ["standard", "deep", "diff"] }, analysisProfile: { type: "string", const: "model" }, scope: { type: "string", default: "." }, diffTargetKind: { type: "string", enum: ["working_tree", "commit", "range"] }, diffBaseRevision: { type: "string" }, diffHeadRevision: { type: "string" }, modelId: { type: "string" }, runtime: { type: "object" } }, required: ["workspaceRoot", "mode", "analysisProfile", "modelId", "runtime"], additionalProperties: false },
   },
   { name: "security_list_scans", description: "List recent scans, including scans started by the VSIX or another MCP session.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 200 } }, required: ["workspaceRoot"], additionalProperties: false } },
   { name: "security_resume_scan", description: "Resume an interrupted or failed scan using durable handoff state.", inputSchema: idSchema("scanId") },
@@ -316,11 +326,36 @@ const toolDefinitions = [
   { name: "security_validate_finding", description: "Validate a finding and produce an attack-path record where applicable.", inputSchema: idSchema("occurrenceId") },
   { name: "security_triage_finding", description: "Record an auditable triage decision for a finding.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, occurrenceId: { type: "string" }, decision: { type: "string", enum: ["open", "accepted_risk", "false_positive", "already_fixed", "wont_fix"] }, note: { type: "string", maxLength: 4000 } }, required: ["workspaceRoot", "occurrenceId", "decision"], additionalProperties: false } },
   { name: "security_create_remediation", description: "Create finding-specific remediation guidance in the shared artifact directory.", inputSchema: idSchema("occurrenceId") },
-  { name: "security_create_tracking_handoff", description: "Prepare an approval-ready manual/GitHub/Linear/Jira tracking payload without writing to an external service.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, occurrenceId: { type: "string" }, provider: { type: "string", enum: ["manual", "github", "linear", "jira"] }, destination: { type: "string", maxLength: 512 }, stableLink: { type: "string", maxLength: 4096 } }, required: ["workspaceRoot", "occurrenceId", "provider"], additionalProperties: false } },
+  { name: "security_prepare_remediation_patch", description: "Prepare and drift-check a bounded existing-file unified diff without changing the workspace.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, occurrenceId: { type: "string" }, patch: { type: "string", maxLength: 600000 }, plan: { type: "string", maxLength: 12000 }, verificationPlan: { type: "array", minItems: 1, maxItems: 50, items: { type: "string", maxLength: 2000 } } }, required: ["workspaceRoot", "occurrenceId", "patch", "plan", "verificationPlan"], additionalProperties: false } },
+  { name: "security_apply_remediation_patch", description: "Apply exactly one prepared patch after digest, revision, file-drift, and state revalidation.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, remediationId: { type: "string" }, expectedVersion: { type: "integer", minimum: 1 } }, required: ["workspaceRoot", "remediationId", "expectedVersion"], additionalProperties: false } },
+  { name: "security_verify_remediation_patch", description: "Record bounded Agent verification proof; incomplete gates cannot become verified.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, remediationId: { type: "string" }, expectedVersion: { type: "integer", minimum: 1 }, verification: { type: "object" } }, required: ["workspaceRoot", "remediationId", "expectedVersion", "verification"], additionalProperties: false } },
+  { name: "security_create_triage_intake", description: "Persist one bounded untrusted external finding intake.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, occurrenceId: { type: "string" }, sourceType: { type: "string", enum: ["sarif", "cve", "advisory", "scanner_ticket", "bug_bounty", "codex_security_finding", "freeform", "unknown"] }, inputId: { type: "string", maxLength: 512 }, input: { type: "object" } }, required: ["workspaceRoot", "sourceType", "inputId", "input"], additionalProperties: false } },
+  { name: "security_submit_triage_assessment", description: "Complete one pending intake with a static proof-chain result.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, assessmentId: { type: "string" }, result: { type: "object" } }, required: ["workspaceRoot", "assessmentId", "result"], additionalProperties: false } },
+  { name: "security_create_tracking_handoff", description: "Seal an approved connector/destination/duplicate-search proof without an external write.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, occurrenceId: { type: "string" }, provider: { type: "string", enum: ["manual", "github", "linear", "jira"] }, destination: { type: "string", maxLength: 512 }, stableLink: { type: "string", maxLength: 4096 }, trackingProof: { type: "object" } }, required: ["workspaceRoot", "occurrenceId", "provider", "trackingProof"], additionalProperties: false } },
+  { name: "security_record_tracking_result", description: "Record sanitized connector readback for an approved handoff; performs no provider network write.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, recordId: { type: "string" }, payloadSha256: { type: "string", pattern: "^[a-f0-9]{64}$" }, outcome: { type: "string", enum: ["created", "updated", "reused", "blocked", "failed", "uncertain"] }, externalMutationPerformed: { type: "boolean" }, externalId: { type: "string", maxLength: 512 }, externalUrl: { type: "string", maxLength: 4096 }, reason: { type: "string", maxLength: 4000 }, approval: { type: "object", properties: { approved: { const: true }, approvedPreviewDigest: { type: "string", pattern: "^[a-f0-9]{64}$" }, approvedPayloadSha256: { type: "string", pattern: "^[a-f0-9]{64}$" }, approvedBy: { type: "string", maxLength: 512 }, approvedAt: { type: "string", maxLength: 128 }, scope: { type: "string", maxLength: 2000 } }, required: ["approved", "approvedPreviewDigest", "approvedPayloadSha256", "approvedBy", "approvedAt", "scope"], additionalProperties: false }, readback: { type: "object" } }, required: ["workspaceRoot", "recordId", "payloadSha256", "outcome", "externalMutationPerformed"], additionalProperties: false } },
   { name: "security_create_hardening_proposal", description: "Create a structural hardening proposal for a scan.", inputSchema: idSchema("scanId") },
   { name: "security_create_threat_model", description: "Create or refresh a workspace threat model.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, scope: { type: "string", default: "." } }, required: ["workspaceRoot"], additionalProperties: false } },
   { name: "security_export_report", description: "Export a scan or one finding as Markdown, JSON, CSV, or SARIF.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, scanId: { type: "string" }, occurrenceId: { type: "string" }, format: { type: "string", enum: ["markdown", "json", "csv", "sarif"] }, destination: { type: "string" } }, required: ["workspaceRoot", "scanId", "format"], additionalProperties: false } },
 ];
+
+const TOOL_STRING_LIMITS: Record<string, number> = {
+  workspaceRoot: 8192, mode: 16, analysisProfile: 16, scope: 4096,
+  diffTargetKind: 32, diffBaseRevision: 256, diffHeadRevision: 256,
+  modelId: 256, delegationId: 256, scanId: 256, workerId: 256,
+  claimToken: 256, threatModel: 200000, summary: 20000,
+  seedResearch: 200000, dedupeReport: 200000, reason: 4000,
+  assignmentId: 256, search: 200, occurrenceId: 256, findingId: 256,
+  decision: 32, sourceType: 64, inputId: 512, assessmentId: 256,
+  patch: 600000, plan: 12000, remediationId: 256, recordId: 256,
+  payloadSha256: 64, outcome: 32, externalId: 512, externalUrl: 4096,
+  provider: 32, destination: 8192, stableLink: 4096, format: 16,
+};
+for (const tool of toolDefinitions) {
+  const properties = tool.inputSchema.properties as Record<string, Record<string, unknown>>;
+  for (const [name, schema] of Object.entries(properties)) {
+    if (schema.type === "string" && schema.maxLength === undefined && TOOL_STRING_LIMITS[name] !== undefined) schema.maxLength = TOOL_STRING_LIMITS[name];
+  }
+}
 
 function idSchema(name: string): Record<string, unknown> {
   return { type: "object", properties: { workspaceRoot: { type: "string" }, [name]: { type: "string" } }, required: ["workspaceRoot", name], additionalProperties: false };
@@ -335,12 +370,15 @@ async function callTool(name: string, rawArguments: unknown): Promise<unknown> {
     case "security_start_scan": {
       const mode = requiredString(params, "mode", 16);
       if (!["standard", "deep", "diff"].includes(mode)) throw new Error("mode must be standard, deep, or diff.");
+      if (params.analysisProfile !== "model") throw new Error("Agent Standard, Diff, and Deep starts require analysisProfile=model.");
+      if (!isObject(params.runtime)) throw new Error("Model scan start requires a host-attested runtime object.");
       const scope = params.scope === undefined ? "." : requiredString(params, "scope");
       return engine.request("start_scan", {
         mode,
+        analysisProfile: "model",
         scope,
-        modelId: mode === "deep" ? requiredString(params, "modelId", 256) : undefined,
-        runtime: mode === "deep" ? params.runtime : undefined,
+        modelId: requiredString(params, "modelId", 256),
+        runtime: params.runtime,
         diffTargetKind: mode === "diff" ? (params.diffTargetKind ?? "working_tree") : undefined,
         diffBaseRevision: mode === "diff" ? safeGitRef(params.diffBaseRevision, "diffBaseRevision") : undefined,
         diffHeadRevision: mode === "diff" ? safeGitRef(params.diffHeadRevision, "diffHeadRevision") : undefined,
@@ -369,13 +407,19 @@ async function callTool(name: string, rawArguments: unknown): Promise<unknown> {
       return engine.request("triage_finding", { occurrenceId: requiredString(params, "occurrenceId", 256), decision, note: params.note });
     }
     case "security_create_remediation": return engine.request("create_remediation", { occurrenceId: requiredString(params, "occurrenceId", 256) });
+    case "security_prepare_remediation_patch": return engine.request("prepare_remediation_patch", { occurrenceId: requiredString(params, "occurrenceId", 256), patch: requiredString(params, "patch", 600000), plan: requiredString(params, "plan", 12000), verificationPlan: params.verificationPlan });
+    case "security_apply_remediation_patch": return engine.request("apply_remediation_patch", { remediationId: requiredString(params, "remediationId", 256), expectedVersion: params.expectedVersion });
+    case "security_verify_remediation_patch": return engine.request("verify_remediation_patch", { remediationId: requiredString(params, "remediationId", 256), expectedVersion: params.expectedVersion, verification: params.verification });
+    case "security_create_triage_intake": return engine.request("create_triage_intake", { occurrenceId: params.occurrenceId, sourceType: requiredString(params, "sourceType", 64), inputId: requiredString(params, "inputId", 512), input: params.input });
+    case "security_submit_triage_assessment": return engine.request("submit_triage_assessment", { assessmentId: requiredString(params, "assessmentId", 256), result: params.result });
     case "security_create_tracking_handoff": {
       const provider = requiredString(params, "provider", 32);
       if (!["manual", "github", "linear", "jira"].includes(provider)) throw new Error("Invalid tracking provider.");
       const destination = params.destination === undefined ? "manual-review" : requiredString(params, "destination", 512);
       const stableLink = params.stableLink === undefined ? undefined : requiredString(params, "stableLink", 4096);
-      return engine.request("create_tracking_handoff", { occurrenceId: requiredString(params, "occurrenceId", 256), provider, destination, stableLink });
+      return engine.request("create_tracking_handoff", { occurrenceId: requiredString(params, "occurrenceId", 256), provider, destination, stableLink, trackingProof: params.trackingProof });
     }
+    case "security_record_tracking_result": return engine.request("record_tracking_result", { recordId: requiredString(params, "recordId", 256), payloadSha256: requiredString(params, "payloadSha256", 64), outcome: requiredString(params, "outcome", 32), externalMutationPerformed: params.externalMutationPerformed, externalId: params.externalId, externalUrl: params.externalUrl, reason: params.reason, approval: params.approval, readback: params.readback });
     case "security_create_hardening_proposal": return engine.request("create_hardening_proposal", { scanId: requiredString(params, "scanId", 256) });
     case "security_create_threat_model": return engine.request("refresh_threat_model", { scope: params.scope === undefined ? "." : requiredString(params, "scope") });
     case "security_export_report": {

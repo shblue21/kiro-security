@@ -21,6 +21,10 @@ class SourceFile:
     language: str
     size: int
     changed: bool = True
+    surface: str | None = None
+    runtime_relevance: str | None = None
+    deployment_significance: str | None = None
+    ranking_reason: str | None = None
 
     @property
     def lines(self) -> list[str]:
@@ -37,6 +41,7 @@ class Inventory:
     snapshot_digest: str
     git_available: bool
     diff_summary: str | None = None
+    diff_context: dict[str, Any] | None = None
     warnings: list[str] = field(default_factory=list)
 
 
@@ -50,6 +55,179 @@ _LANGUAGE_BY_EXTENSION = {
 
 def language_for(path: Path) -> str:
     return _LANGUAGE_BY_EXTENSION.get(path.suffix.lower(), "text")
+
+
+def _security_surface(relative: str) -> dict[str, Any] | None:
+    path = PurePosixPath(relative)
+    parts = tuple(part.lower() for part in path.parts)
+    name = path.name.lower()
+    suffix = path.suffix.lower()
+    config_suffixes = {".json", ".yaml", ".yml", ".xml"}
+
+    def surface(
+        name: str,
+        language: str,
+        relevance: str,
+        ranking_reason: str,
+        *,
+        deployment: str | None = None,
+        priority: int = 0,
+    ) -> dict[str, Any]:
+        return {
+            "surface": name,
+            "language": language,
+            "runtimeRelevance": relevance,
+            "deploymentSignificance": deployment,
+            "rankingReason": ranking_reason,
+            "priority": priority,
+        }
+
+    if name in {"dockerfile", "containerfile"} or name.startswith(("dockerfile.", "containerfile.")):
+        return surface(
+            "deployment_review:container", "dockerfile",
+            "Recognized container build artifact selected for security review.",
+            "Matched a canonical Dockerfile or Containerfile name; content semantics are not assumed.",
+            deployment="Defines a container build input.",
+        )
+    if suffix in {".yaml", ".yml"} and (
+        name in {"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"}
+        or name.startswith(("docker-compose.", "compose."))
+    ):
+        return surface(
+            "deployment_review:container", "yaml",
+            "Recognized container composition artifact selected for security review.",
+            "Matched a canonical container composition filename; content semantics are not assumed.",
+            deployment="Defines container composition input.",
+        )
+    if suffix in {".tf", ".tfvars"} or name.endswith(".tf.json"):
+        return surface(
+            "deployment_review:infrastructure_as_code", "terraform",
+            "Recognized Terraform artifact selected for security review.",
+            "Matched a Terraform file extension; resource security properties remain unconfirmed.",
+            deployment="Defines infrastructure-as-code input.",
+        )
+    if suffix in config_suffixes and (
+        name.startswith(("cloudformation", "template.", "sam-template", "serverless."))
+        or any(part in {"cloudformation", "sam", "serverless"} for part in parts[:-1])
+    ):
+        return surface(
+            "deployment_review:cloud_template", "yaml" if suffix in {".yaml", ".yml"} else suffix[1:],
+            "Recognized cloud deployment template selected for security review.",
+            "Matched a bounded cloud-template path rule; deployed resources remain unconfirmed.",
+            deployment="Defines cloud deployment input.",
+        )
+    if suffix in {".yaml", ".yml"} and (
+        name == "chart.yaml" or any(part in {"k8s", "kubernetes", "helm", "charts", "manifests"} for part in parts[:-1])
+    ):
+        return surface(
+            "deployment_review:orchestration", "yaml",
+            "Recognized Kubernetes or Helm path selected for security review.",
+            "Matched a Kubernetes, Helm, chart, or manifest path; runtime reachability remains unconfirmed.",
+            deployment="Defines an orchestration or packaging input.",
+        )
+    if (
+        suffix in {".yaml", ".yml"}
+        and len(parts) >= 3 and parts[0:2] == (".github", "workflows")
+    ) or name in {".gitlab-ci.yml", ".gitlab-ci.yaml"}:
+        return surface(
+            "workflow_review:ci", "yaml",
+            "Recognized CI workflow selected for security review.",
+            "Matched a GitHub Actions or GitLab CI path; job permissions and execution remain unconfirmed.",
+            deployment="Defines continuous-integration workflow input.",
+        )
+    dependency_manifests = {
+        "package.json", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
+        "pyproject.toml", "poetry.lock", "pipfile", "pipfile.lock", "pom.xml", "build.gradle",
+        "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "gradle.properties", "gradle.lockfile",
+        "cargo.toml", "cargo.lock", "go.mod", "go.sum",
+    }
+    if name in dependency_manifests or (name.startswith("requirements") and suffix in {".txt", ".in"}):
+        is_lock = name.endswith(".lock") or name in {
+            "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml",
+            "pipfile.lock", "gradle.lockfile", "cargo.lock", "go.sum",
+        }
+        return surface(
+            f"dependency_review:{'lockfile' if is_lock else 'manifest'}",
+            {
+                ".json": "json", ".yaml": "yaml", ".yml": "yaml", ".xml": "xml",
+                ".toml": "toml", ".kts": "kotlin", ".gradle": "gradle",
+            }.get(suffix, "text"),
+            "Recognized dependency manifest or lockfile selected for security review.",
+            "Matched a canonical package manifest or lockfile name; dependency risk is not inferred.",
+            priority=1,
+        )
+    if suffix == ".sql" and (
+        name == "schema.sql" or any(part in {"migration", "migrations", "migrate"} for part in parts[:-1])
+    ):
+        return surface(
+            "data_review:migration", "sql",
+            "Recognized database schema or migration artifact selected for security review.",
+            "Matched a schema or migration path; execution and privilege context remain unconfirmed.",
+            deployment="Defines a database change input.",
+            priority=1,
+        )
+    if name in {"nginx.conf", "httpd.conf", "apache2.conf", ".htaccess"} or (
+        suffix == ".conf" and any(part in {"nginx", "apache", "apache2", "httpd"} for part in parts[:-1])
+    ):
+        return surface(
+            "deployment_review:web_server", "configuration",
+            "Recognized web-server configuration selected for security review.",
+            "Matched a canonical nginx or Apache configuration path; effective runtime settings remain unconfirmed.",
+            deployment="Defines web-server configuration input.",
+        )
+    if suffix in config_suffixes and (
+        any(part == "iam" for part in parts[:-1])
+        or any(token in name for token in ("iam-policy", "trust-policy", "assume-role-policy"))
+    ):
+        return surface(
+            "authorization_review:iam_policy", "yaml" if suffix in {".yaml", ".yml"} else suffix[1:],
+            "Recognized IAM policy artifact selected for security review.",
+            "Matched an IAM-specific path or filename; granted privileges remain unconfirmed.",
+            deployment="Defines an authorization policy input.",
+        )
+    if re.fullmatch(r"\.?env(?:\.[a-z0-9_-]+)*\.(?:example|sample|template)", name):
+        return surface(
+            "configuration_review:environment_template", "dotenv",
+            "Recognized environment configuration template selected for security review.",
+            "Matched an environment-template filename; no value is assumed to be a live secret.",
+            priority=1,
+        )
+    if suffix == ".proto":
+        return surface(
+            "interface_review:protobuf", "protobuf",
+            "Recognized Protocol Buffers interface definition selected for security review.",
+            "Matched a .proto interface definition; exposure and authorization remain unconfirmed.",
+            priority=1,
+        )
+    if suffix in {".json", ".yaml", ".yml"} and any(token in name for token in ("openapi", "swagger")):
+        return surface(
+            "interface_review:openapi", "yaml" if suffix in {".yaml", ".yml"} else "json",
+            "Recognized OpenAPI or Swagger contract selected for security review.",
+            "Matched an OpenAPI or Swagger filename; endpoint deployment remains unconfirmed.",
+            priority=1,
+        )
+    if suffix in config_suffixes and (
+        any(part in {"config", "configs", "configuration", "settings", "deploy", "deployment", "infra", "infrastructure"} for part in parts[:-1])
+        or name in {"application.yml", "application.yaml", "appsettings.json", "config.yml", "config.yaml", "settings.json", "web.config", "web.xml"}
+    ):
+        return surface(
+            "configuration_review:runtime", "yaml" if suffix in {".yaml", ".yml"} else suffix[1:],
+            "Recognized runtime or deployment configuration path selected for security review.",
+            "Matched a bounded configuration path rule; effective runtime use remains unconfirmed.",
+            priority=1,
+        )
+    return None
+
+
+def _inventory_priority(relative: str) -> tuple[int, str]:
+    surface = _security_surface(relative)
+    if surface:
+        return int(surface["priority"]), relative
+    path = PurePosixPath(relative)
+    if path.suffix.lower() in SOURCE_EXTENSIONS:
+        secondary = any(part.lower() in {"test", "tests", "spec", "specs", "fixtures", "examples", "demo", "demos"} for part in path.parts[:-1])
+        return (3 if secondary else 2), relative
+    return 4, relative
 
 
 def _is_probably_text(data: bytes) -> bool:
@@ -74,12 +252,58 @@ def _read_source(path: Path, max_bytes: int) -> tuple[str, int] | None:
         return data.decode("utf-8", errors="replace"), size
 
 
+def _read_security_surface(path: Path, max_bytes: int) -> tuple[str | None, int, bytes] | None:
+    try:
+        with path.open("rb") as handle:
+            data = handle.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            return None
+    except OSError:
+        return None
+    size = len(data)
+    if not _is_probably_text(data):
+        return None, size, data
+    try:
+        return data.decode("utf-8"), size, data
+    except UnicodeDecodeError:
+        return None, size, data
+
+
 def _git_revision(workspace: Path) -> tuple[bool, str | None]:
     try:
         result = run_process("git", ["rev-parse", "HEAD"], cwd=workspace, timeout=10)
         return True, result.stdout.strip() or None
     except EngineError:
         return False, None
+
+
+def _require_checked_out_diff_head(workspace: Path, kind: str, head: str | None, revision: str | None) -> None:
+    if kind not in ("commit", "range") or not head:
+        return
+    target = run_process(
+        "git", ["rev-parse", "--verify", f"{require_git_ref(head, 'diffHeadRevision')}^{{commit}}"],
+        cwd=workspace, timeout=10,
+    ).stdout.strip()
+    if not revision or target != revision:
+        raise EngineError(
+            "diff_target_not_checked_out",
+            "Commit and range Diff scans require diffHeadRevision to match the checked-out HEAD.",
+            {"checkedOutRevision": revision, "diffHeadRevision": target},
+        )
+
+
+def _require_clean_diff_paths(workspace: Path, scope: str, kind: str, changed: DiffPaths) -> None:
+    if kind not in ("commit", "range"):
+        return
+    dirty = _diff_name_only(workspace, ["diff", "--name-only", "-z", "HEAD", "--", scope])
+    dirty |= _diff_name_only(workspace, ["ls-files", "--others", "--exclude-standard", "-z", "--", scope])
+    overlap = sorted(dirty & changed.existing)
+    if overlap:
+        raise EngineError(
+            "diff_target_worktree_changed",
+            "Commit and range Diff source files must match the checked-out target revision.",
+            {"paths": overlap[:20]},
+        )
 
 
 def _parse_nul_paths(output: str) -> list[str]:
@@ -138,6 +362,123 @@ def _diff_paths(
     raise EngineError("invalid_diff_target", f"Unsupported diff target kind: {kind}")
 
 
+def _diff_patch(workspace: Path, scope: str, kind: str, base: str | None, head: str | None) -> str:
+    common = ["--no-ext-diff", "--no-textconv", "--find-renames", "--unified=40"]
+    if kind == "working_tree":
+        args = ["diff", *common, "HEAD", "--", scope]
+    elif kind == "commit":
+        if not head:
+            raise EngineError("invalid_diff_target", "Commit diff requires diffHeadRevision.")
+        args = ["show", "--format=", *common, require_git_ref(head, "diffHeadRevision"), "--", scope]
+    elif kind == "range":
+        if not base or not head:
+            raise EngineError("invalid_diff_target", "Range diff requires diffBaseRevision and diffHeadRevision.")
+        target = f"{require_git_ref(base, 'diffBaseRevision')}...{require_git_ref(head, 'diffHeadRevision')}"
+        args = ["diff", *common, target, "--", scope]
+    else:
+        raise EngineError("invalid_diff_target", f"Unsupported diff target kind: {kind}")
+    output = run_process("git", args, cwd=workspace).stdout
+    data = output.encode("utf-8", "surrogatepass")
+    if len(data) > 600_000:
+        raise EngineError("diff_context_too_large", "The bounded Git patch exceeds 600000 bytes; narrow the Diff scope.")
+    return output
+
+
+def _diff_context(
+    workspace: Path,
+    scope: str,
+    kind: str,
+    base: str | None,
+    head: str | None,
+    changed: DiffPaths,
+    max_file_bytes: int,
+) -> dict[str, Any]:
+    patch = _diff_patch(workspace, scope, kind, base, head)
+    if kind == "working_tree":
+        untracked = _diff_name_only(workspace, ["ls-files", "--others", "--exclude-standard", "-z", "--", scope])
+        additions = []
+        for relative in sorted(untracked):
+            loaded = _read_source(workspace / relative, max_file_bytes)
+            if loaded is None:
+                continue
+            text, _ = loaded
+            lines = text.splitlines()
+            additions.extend([
+                f"diff --git a/{relative} b/{relative}", "new file mode 100644", "--- /dev/null",
+                f"+++ b/{relative}", f"@@ -0,0 +1,{len(lines)} @@", *[f"+{line}" for line in lines],
+            ])
+        if additions:
+            patch += ("\n" if patch and not patch.endswith("\n") else "") + "\n".join(additions) + "\n"
+        if len(patch.encode("utf-8", "surrogatepass")) > 600_000:
+            raise EngineError("diff_context_too_large", "The bounded Git patch exceeds 600000 bytes; narrow the Diff scope.")
+    siblings = _diff_supporting_paths(
+        workspace, changed.existing, changed.deleted, max_file_bytes,
+    )
+    rename_hints = []
+    for line in patch.splitlines():
+        if line.startswith("rename from "):
+            rename_hints.append({"from": line[len("rename from "):], "to": None})
+        elif line.startswith("rename to ") and rename_hints and rename_hints[-1]["to"] is None:
+            rename_hints[-1]["to"] = line[len("rename to "):]
+    payload = {
+        "documentType": "kiro-security-power.diff-context",
+        "schemaVersion": "1.0",
+        "target": {"kind": kind, "baseRevision": base, "headRevision": head, "scope": scope},
+        "changedPaths": sorted(changed.existing),
+        "deletedPaths": sorted(changed.deleted),
+        "renameHints": rename_hints[:200],
+        "supportingPaths": siblings,
+        "patch": patch,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    payload["contextDigest"] = "sha256:" + sha256_bytes(encoded.encode("utf-8"))
+    return payload
+
+
+def _diff_supporting_paths(
+    workspace: Path,
+    changed_paths: Iterable[str],
+    deleted_paths: Iterable[str],
+    max_file_bytes: int,
+) -> list[dict[str, Any]]:
+    workspace = workspace.resolve()
+    siblings: list[dict[str, Any]] = []
+    changed = set(changed_paths)
+    seen = changed | set(deleted_paths)
+    for relative in sorted(changed):
+        parent = (workspace / relative).parent
+        try:
+            candidates = sorted(parent.iterdir())
+        except OSError:
+            continue
+        for candidate in candidates:
+            if len(siblings) >= 200:
+                break
+            try:
+                sibling = candidate.relative_to(workspace).as_posix()
+                resolved = candidate.resolve(strict=True)
+            except ValueError:
+                continue
+            except OSError:
+                continue
+            if (
+                sibling in seen or candidate.is_symlink() or workspace.resolve() not in resolved.parents
+                or not candidate.is_file() or candidate.suffix.lower() not in SOURCE_EXTENSIONS
+            ):
+                continue
+            loaded = _read_security_surface(candidate, max_file_bytes)
+            if loaded is None or loaded[0] is None:
+                continue
+            _, _, data = loaded
+            siblings.append({
+                "path": sibling,
+                "relationship": "same-directory source sibling; caller relationship is unconfirmed",
+                "contentDigest": "sha256:" + sha256_bytes(data),
+            })
+            seen.add(sibling)
+    return siblings
+
+
 def _default_ignored(relative: str) -> bool:
     return any(part in DEFAULT_IGNORES for part in PurePosixPath(relative).parts)
 
@@ -152,6 +493,7 @@ def build_inventory(
     diff_head_revision: str | None,
     max_files: int,
     max_file_bytes: int,
+    include_security_surfaces: bool | None = None,
 ) -> Inventory:
     scope_path = resolve_within(workspace, scope, must_exist=True)
     git_available, revision = _git_revision(workspace)
@@ -160,6 +502,9 @@ def build_inventory(
     if mode == "diff":
         if not git_available:
             raise EngineError("git_required", "Diff scans require a Git worktree with a resolvable HEAD.")
+        _require_checked_out_diff_head(
+            workspace, diff_target_kind or "working_tree", diff_head_revision, revision
+        )
         changed_paths, diff_summary = _diff_paths(
             workspace,
             scope,
@@ -167,12 +512,17 @@ def build_inventory(
             diff_base_revision,
             diff_head_revision,
         )
+        _require_clean_diff_paths(workspace, scope, diff_target_kind or "working_tree", changed_paths)
+    include_surfaces = mode == "deep" if include_security_surfaces is None else include_security_surfaces
 
     candidates: Iterable[Path]
     if scope_path.is_file():
         candidates = [scope_path]
     else:
-        candidates = (path for path in scope_path.rglob("*") if path.is_file())
+        candidates = sorted(
+            (path for path in scope_path.rglob("*") if path.is_file()),
+            key=lambda path: _inventory_priority(path.relative_to(workspace).as_posix()),
+        )
 
     files: list[SourceFile] = []
     excluded: list[str] = []
@@ -205,6 +555,72 @@ def build_inventory(
         if resolved != workspace and workspace not in resolved.parents:
             excluded.append(relative)
             continue
+        security_surface = _security_surface(relative)
+        if security_surface:
+            loaded_surface = _read_security_surface(resolved, max_file_bytes)
+            if loaded_surface is None:
+                try:
+                    stat = resolved.stat()
+                    digest.update(relative.encode("utf-8", "surrogatepass"))
+                    digest.update(b"\0unreadable-security-surface\0")
+                    digest.update(f"{stat.st_size}:{stat.st_mtime_ns}".encode("ascii"))
+                except OSError:
+                    pass
+                deferred.append({
+                    "id": relative,
+                    "path": relative,
+                    "kind": "unreadable_or_oversized_security_surface",
+                    "surface": security_surface["surface"],
+                    "reason": f"The recognized security surface was unreadable or larger than {max_file_bytes} bytes and was not reviewed.",
+                })
+                continue
+            text, size, data = loaded_surface
+            digest.update(relative.encode("utf-8", "surrogatepass"))
+            digest.update(b"\0")
+            digest.update(hashlib.sha256(data).digest())
+            if text is None:
+                deferred.append({
+                    "id": relative,
+                    "path": relative,
+                    "kind": "invalid_security_surface_text",
+                    "surface": security_surface["surface"],
+                    "reason": "The recognized security surface was binary or invalid UTF-8 and was not reviewed.",
+                })
+                continue
+            if not include_surfaces:
+                deferred.append({
+                    "id": relative,
+                    "path": relative,
+                    "kind": "security_surface_unreviewed",
+                    "surface": security_surface["surface"],
+                    "language": security_surface["language"],
+                    "runtimeRelevance": security_surface["runtimeRelevance"],
+                    "reason": "The security-relevant repository surface is inventoried, but the deterministic scanner has no authoritative review receipt for it.",
+                })
+                continue
+            if len(files) >= max_files:
+                truncated = True
+                deferred.append({
+                    "id": "file-limit",
+                    "path": scope,
+                    "kind": "file_limit",
+                    "surface": "inventory_limit",
+                    "reason": f"The maximum supported-file count {max_files} was reached; remaining in-scope files were not reviewed.",
+                })
+                break
+            files.append(SourceFile(
+                resolved,
+                relative,
+                text,
+                security_surface["language"],
+                size,
+                changed_paths is None or relative in changed_paths.existing,
+                security_surface["surface"],
+                security_surface["runtimeRelevance"],
+                security_surface["deploymentSignificance"],
+                security_surface["rankingReason"],
+            ))
+            continue
         if path.suffix.lower() not in SOURCE_EXTENSIONS:
             try:
                 stat = resolved.stat()
@@ -235,7 +651,6 @@ def build_inventory(
         digest.update(relative.encode("utf-8", "surrogatepass"))
         digest.update(b"\0")
         digest.update(hashlib.sha256(text.encode("utf-8", "surrogatepass")).digest())
-        files.append(SourceFile(resolved, relative, text, language_for(path), size, changed_paths is None or relative in changed_paths.existing))
         if len(files) >= max_files:
             truncated = True
             deferred.append({
@@ -246,6 +661,7 @@ def build_inventory(
                 "reason": f"The maximum supported-file count {max_files} was reached; remaining in-scope files were not reviewed.",
             })
             break
+        files.append(SourceFile(resolved, relative, text, language_for(path), size, changed_paths is None or relative in changed_paths.existing))
     if changed_paths is not None:
         # Deleted changed paths never appear in the filesystem walk, but their
         # base-revision contents were part of the change and were not reviewed.
@@ -280,6 +696,13 @@ def build_inventory(
                     "reason": "The Git-reported changed path was not present in the filesystem inventory and was not reviewed.",
                 })
     files.sort(key=lambda item: item.relative_path)
+    diff_context = (
+        _diff_context(
+            workspace, scope, diff_target_kind or "working_tree", diff_base_revision,
+            diff_head_revision, changed_paths, max_file_bytes,
+        )
+        if changed_paths is not None else None
+    )
     return Inventory(
         files=files,
         include_paths=[scope],
@@ -289,6 +712,7 @@ def build_inventory(
         snapshot_digest=f"kiro-security-snapshot/v1:sha256:{digest.hexdigest()}",
         git_available=git_available,
         diff_summary=diff_summary,
+        diff_context=diff_context,
         warnings=[] if files else ["No supported source files were found in the selected scope."],
     )
 
@@ -686,13 +1110,19 @@ def scan_source_file(source_file: SourceFile, pass_name: str = "all") -> list[di
     return findings
 
 
-def _disambiguate_semantic_collision(candidate: dict[str, Any]) -> dict[str, Any]:
-    identity = dict(candidate["identity"])
-    location_key = json.dumps(
+def _semantic_collision_key(candidate: dict[str, Any]) -> str:
+    return json.dumps(
         sorted((location["path"], location["role"]) for location in candidate["locations"]),
         separators=(",", ":"),
         ensure_ascii=False,
     )
+
+
+def _disambiguate_semantic_collision(candidate: dict[str, Any], occurrence: int | None = None) -> dict[str, Any]:
+    identity = dict(candidate["identity"])
+    location_key = _semantic_collision_key(candidate)
+    if occurrence is not None:
+        location_key = f"{location_key}:{occurrence}"
     suffix = hashlib.sha256(location_key.encode("utf-8", "surrogatepass")).hexdigest()[:16]
     identity["instance"] = f"{identity['instance']}:collision:{suffix}"
     primary = f"{candidate['ruleId']}:{identity['anchor']}:{identity['instance']}"
@@ -720,8 +1150,17 @@ def scan_inventory(
             groups.setdefault(candidate["fingerprint"], []).append(candidate)
         if progress:
             progress(completed, total, source_file.relative_path)
-    return [
-        candidate if len(group) == 1 else _disambiguate_semantic_collision(candidate)
-        for group in groups.values()
-        for candidate in group
-    ]
+    result = []
+    for group in groups.values():
+        if len(group) == 1:
+            result.extend(group)
+            continue
+        keys = [_semantic_collision_key(candidate) for candidate in group]
+        occurrences: dict[str, int] = {}
+        for candidate, key in zip(group, keys):
+            occurrence = occurrences.get(key, 0) + 1
+            occurrences[key] = occurrence
+            result.append(
+                _disambiguate_semantic_collision(candidate, occurrence if keys.count(key) > 1 else None)
+            )
+    return result

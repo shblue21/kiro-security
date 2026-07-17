@@ -148,7 +148,7 @@ function dashboardView(): string {
   const coverage = selected?.coverage;
   return `<div class="stack">
     <section class="card scan-form"><h2>Start a scan</h2>
-      <label>Mode<select id="scan-mode"><option value="standard" ${dashboard.workspace.default_mode === "standard" ? "selected" : ""}>Standard</option><option value="deep" ${dashboard.workspace.default_mode === "deep" ? "selected" : ""}>Deep</option><option value="diff" ${dashboard.workspace.default_mode === "diff" ? "selected" : ""}>Git changes</option></select></label>
+      <label>Mode<select id="scan-mode"><option value="fast" ${dashboard.workspace.default_mode === "standard" ? "selected" : ""}>Fast (deterministic)</option><option value="standard">Standard (Kiro Agent)</option><option value="deep" ${dashboard.workspace.default_mode === "deep" ? "selected" : ""}>Deep (Kiro Agent)</option><option value="diff" ${dashboard.workspace.default_mode === "diff" ? "selected" : ""}>Git changes (Kiro Agent)</option></select></label>
       <label>Scope<input id="scan-scope" value="${attr(dashboard.workspace.default_scope || ".")}" maxlength="4096" autocomplete="off"></label>
       <div id="diff-options" class="diff-options hidden">
         <label>Diff target<select id="diff-kind"><option value="working_tree">Working tree</option><option value="commit">Commit</option><option value="range">Range</option></select></label>
@@ -295,7 +295,7 @@ async function handleAction(element: HTMLElement): Promise<void> {
   if (action === "start") {
     const mode = (document.getElementById("scan-mode") as HTMLSelectElement)?.value ?? "standard";
     const scope = (document.getElementById("scan-scope") as HTMLInputElement)?.value ?? ".";
-    const message: any = { type: "startScan", mode, scope };
+    const message: any = { type: "startScan", mode: mode === "fast" ? "standard" : mode, scope, analysisProfile: mode === "fast" ? "fast" : "model" };
     if (mode === "diff") {
       message.diffTargetKind = (document.getElementById("diff-kind") as HTMLSelectElement)?.value ?? "working_tree";
       const base = (document.getElementById("diff-base") as HTMLInputElement)?.value;

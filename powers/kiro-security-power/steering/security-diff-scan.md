@@ -1,2 +1,2 @@
 # Security diff scan
-Use `diff` mode with a safe working-tree, commit, or range target. Confirm the target in the resulting scan record and interpret findings in change context without hiding pre-existing risk discovered in changed files.
+Start `diff` mode with `analysisProfile: "model"`, truthful model/runtime attestation, and a safe working-tree, commit, or range target. Run one all-six discovery round and semantic merge, then complete the shared model tail. Treat the immutable bounded `diff-context.json` as target evidence: inspect its hunks, deleted lines, rename hints, and snapshot-bound supporting sibling paths. Do not infer caller relationships from a sibling-path hint, cite paths outside the assigned snapshot, or substitute Fast heuristic output.

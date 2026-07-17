@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Separated deterministic Fast Scan from Kiro Agent model Standard, Diff, and iterative six-worker Deep workflows; model scans share strict worker, semantic merge, validation, attack-path, writeup, hardening, and finalization contracts.
+- Added row-level coverage receipts, immutable canonical snapshots, strict schema validation, sealed manifest reconciliation, and durable integrity-issue events.
+- Added snapshot-bound repository security context and bounded policy provenance, expanded security-surface inventory, and stable semantic finding identity.
+- Added approval-gated remediation patch preparation/apply/verification, proof-chain triage intake, and digest-bound tracking handoffs with sanitized connector readback. The engine does not run model-submitted commands or perform provider network writes.
+- Added focused coverage, finalizer, identity, protocol, Deep resume/context/tail regressions and Kiro Desktop verification helpers. Actual delegated multi-round Desktop verification remains a release gate and is not claimed by these helpers.
+
 ## 0.2.0 — 2026-07-14
 
 - Added an approval-driven **Install or Repair Agent Integration** flow to the VSIX Setup view, plus a one-time per-workspace onboarding prompt after upgrade.

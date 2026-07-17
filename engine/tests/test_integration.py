@@ -10,7 +10,10 @@ import jsonschema
 import pytest
 
 from kiro_security.errors import EngineError
+from kiro_security.remediation import parse_remediation_patch
+from kiro_security.security import redact
 from kiro_security.service import SecurityService
+from kiro_security.tracking import normalize_tracking_readback
 
 from .conftest import PROJECT_ROOT, run_git, wait_for_scan
 
@@ -50,6 +53,15 @@ DEEP_COMPLETION_ATTESTATION = {
 
 def deep_scan_params(**overrides: object) -> dict:
     return {"mode": "deep", "scope": ".", "modelId": "integration-model", "runtime": DEEP_WORKER_RUNTIME, **overrides}
+
+
+def tracking_proof(provider: str = "github", host: str = "github.com") -> dict:
+    return {
+        "connector": {"provider": provider, "host": host, "identity": "integration-connector"},
+        "duplicateSearch": {"status": "none", "query": "finding-id and fingerprint", "candidateIds": []},
+        "visibility": "private",
+        "audience": ["security-team"],
+    }
 
 
 def zero_finding_tail_result(assignment: dict, scan_id: str) -> dict:
@@ -175,6 +187,206 @@ def complete_empty_deep_round(service: SecurityService, scan_id: str, timeout: f
     raise AssertionError("Deep zero-finding tail did not complete")
 
 
+def test_deep_two_round_discovery_enforces_worker_merge_and_receipt_contracts(workspace: Path) -> None:
+    service = service_for(workspace)
+
+    def receipts(assignment: dict, candidate_id: str | None = None, candidate_path: str | None = None) -> list[dict]:
+        return [
+            {
+                "rowId": row["rowId"],
+                "disposition": "reportable" if candidate_id and row["path"] == candidate_path else "not_applicable",
+                "reason": "The independent worker reviewed this complete worklist row.",
+                "evidenceRefs": [],
+                "candidateIds": [candidate_id] if candidate_id and row["path"] == candidate_path else [],
+            }
+            for row in assignment["worklist"]
+        ]
+
+    def submit(assignment: dict, *, candidates: list[dict] | None = None, completion: dict | None = None) -> dict:
+        submitted = candidates or []
+        candidate_id = submitted[0]["candidateId"] if submitted else None
+        candidate_path = submitted[0]["affectedLocations"][0]["path"] if submitted else None
+        return service.deep_submit_worker({
+            "scanId": scan["id"],
+            "workerId": assignment["workerId"],
+            "claimToken": assignment["claimToken"],
+            "rowReceipts": receipts(assignment, candidate_id, candidate_path),
+            "threatModel": f"Independent round {assignment['round']} worker {assignment['workerIndex']} threat model.",
+            "summary": "Focused multi-round discovery regression.",
+            "seedResearch": "Repository-native seed review." if submitted else None,
+            "dedupeReport": "No prior canonical candidate subsumed this candidate." if submitted else None,
+            "candidates": submitted,
+            "completionAttestation": completion or DEEP_COMPLETION_ATTESTATION,
+        })
+
+    try:
+        scan = service.start_scan(deep_scan_params())
+        deadline = time.monotonic() + 10
+        while service.deep_get_status({"scanId": scan["id"]}).get("nextAction") != "claim_worker":
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+
+        first = service.deep_claim_worker({
+            "scanId": scan["id"], "modelId": "integration-model",
+            "delegationId": "round-1-interrupted", "runtime": DEEP_WORKER_RUNTIME,
+        })
+        with pytest.raises(EngineError) as error:
+            submit(first)
+        assert error.value.code == "deep_round_not_fully_claimed"
+
+        service.deep_retry_worker({
+            "scanId": scan["id"], "workerIndex": first["workerIndex"],
+            "reason": "Simulated interrupted delegated worker replacement.",
+        })
+        replacement = service.deep_claim_worker({
+            "scanId": scan["id"], "modelId": "integration-model",
+            "delegationId": "round-1-replacement", "runtime": DEEP_WORKER_RUNTIME,
+        })
+        with pytest.raises(EngineError) as error:
+            submit(first)
+        assert error.value.code == "invalid_worker_claim"
+
+        mismatched_runtime = {**DEEP_WORKER_RUNTIME, "reasoningEffort": "medium"}
+        with pytest.raises(EngineError) as error:
+            service.deep_claim_worker({
+                "scanId": scan["id"], "modelId": "integration-model",
+                "delegationId": "round-1-profile-drift", "runtime": mismatched_runtime,
+            })
+        assert error.value.code == "deep_worker_profile_mismatch"
+
+        round_one = [replacement] + [
+            service.deep_claim_worker({
+                "scanId": scan["id"], "modelId": "integration-model",
+                "delegationId": f"round-1-worker-{index}", "runtime": DEEP_WORKER_RUNTIME,
+            })
+            for index in range(2, 7)
+        ]
+        assert len(round_one) == 6
+        assert {item["workerIndex"] for item in round_one} == set(range(1, 7))
+        with pytest.raises(EngineError) as error:
+            service.deep_claim_worker({
+                "scanId": scan["id"], "modelId": "integration-model",
+                "delegationId": "round-1-worker-7", "runtime": DEEP_WORKER_RUNTIME,
+            })
+        assert error.value.code == "deep_no_pending_worker"
+        assert len({(
+            item["worklistDigest"], item["securityContextPath"], item["securityContextDigest"],
+            item["securityGuidanceDigest"],
+        ) for item in round_one}) == 1
+
+        with pytest.raises(EngineError) as error:
+            submit(replacement, completion={
+                "freshContext": False,
+                "coordinatorHistoryInherited": False,
+                "workerState": "completed_idle",
+            })
+        assert error.value.code == "invalid_worker_completion_attestation"
+
+        candidate_path = next(row["path"] for row in replacement["worklist"] if row["language"] == "python")
+        source_lines = (workspace / candidate_path).read_text(encoding="utf-8").splitlines()
+        source_line = next(index for index, line in enumerate(source_lines, start=1) if "request.args.get('command')" in line)
+        sink_line = next(index for index, line in enumerate(source_lines, start=1) if "os.system(command)" in line)
+        candidate = {
+            "candidateId": "round-1-command-injection",
+            "ruleId": "integration.command-injection",
+            "identity": {"anchor": "command-execution-boundary", "instance": "request-command-to-os-system"},
+            "title": "Request input reaches command execution",
+            "summary": "An independently reviewed request value reaches a command execution boundary.",
+            "severity": {"level": "high", "rationale": "The sink executes attacker-controlled command text."},
+            "confidence": {"level": "high", "rationale": "The submitted source and sink evidence show the flow."},
+            "taxonomy": {"category": "command-injection", "cwe": ["CWE-78"]},
+            "affectedLocations": [
+                {"path": candidate_path, "startLine": source_line, "endLine": source_line, "role": "source"},
+                {"path": candidate_path, "startLine": sink_line, "endLine": sink_line, "role": "sink"},
+            ],
+            "impact": "An attacker may execute commands with the application process privileges.",
+            "rootCause": "Attacker-controlled command text crosses into a shell execution sink without an allowlist.",
+            "remediation": "Replace shell execution with a fixed executable and validated argument array.",
+            "codeEvidence": [
+                {"path": candidate_path, "startLine": source_line, "endLine": source_line, "role": "source", "code": source_lines[source_line - 1].strip(), "explanation": "The request supplies command text."},
+                {"path": candidate_path, "startLine": sink_line, "endLine": sink_line, "role": "sink", "code": source_lines[sink_line - 1].strip(), "explanation": "The value reaches a shell execution sink."},
+            ],
+        }
+        submit(replacement, candidates=[candidate])
+        for assignment in round_one[1:]:
+            submit(assignment)
+
+        receipt_rows = service.workbench.list_deep_worker_coverage_receipts(scan["id"], 1)
+        assert len(receipt_rows) == 6 * len(replacement["worklist"])
+        assert {item["workerId"] for item in receipt_rows} == {item["workerId"] for item in round_one}
+        worker_dir = Path(scan["artifact_dir"]) / "deep_discovery" / "round-01" / "worker-01"
+        for relative in (
+            "worker-result.json", "threat-model.md", "finding-discovery-report.md", "seed-research.md",
+            "dedupe-report.md", "work-ledger.jsonl", "raw-candidates.jsonl", "deduped-candidates.jsonl",
+            "repository-coverage-ledger.md", "candidate-ledger/r1-w1-c1.json",
+        ):
+            assert (worker_dir / relative).is_file(), relative
+
+        merge = service.deep_claim_merge({"scanId": scan["id"]})
+        connection = service.workbench._connect()
+        try:
+            result = connection.execute("SELECT result_json FROM deep_workers WHERE id=?", (replacement["workerId"],)).fetchone()
+        finally:
+            connection.close()
+        source = json.loads(result["result_json"])["candidates"][0]
+        canonical = {
+            **source,
+            "sourceRefs": [source["sourceRef"]],
+            "mergeRationale": "The single evidence chain is retained without deduplication.",
+            "identityRationale": "The canonical semantic identity matches the submitted source identity.",
+            "remediationSubsumption": "The canonical remediation preserves the submitted remediation.",
+        }
+        with pytest.raises(EngineError) as error:
+            service.deep_submit_merge({
+                "scanId": scan["id"], "claimToken": merge["claimToken"],
+                "canonicalCandidates": [{**canonical, "sourceRefs": ["r1-w1-c999"]}],
+            })
+        assert error.value.code == "incomplete_semantic_merge"
+        with pytest.raises(EngineError) as error:
+            service.deep_submit_merge({
+                "scanId": scan["id"], "claimToken": merge["claimToken"],
+                "canonicalCandidates": [{**canonical, "identity": {**canonical["identity"], "instance": "manipulated"}}],
+            })
+        assert error.value.code == "canonical_source_identity_mismatch"
+        first_merge = service.deep_submit_merge({
+            "scanId": scan["id"], "claimToken": merge["claimToken"], "canonicalCandidates": [canonical],
+        })
+        assert first_merge["status"] == "awaiting_workers"
+        assert first_merge["round"] == 2 and first_merge["noveltyCount"] == 1
+
+        round_two = [
+            service.deep_claim_worker({
+                "scanId": scan["id"], "modelId": "integration-model",
+                "delegationId": f"round-2-worker-{index}", "runtime": DEEP_WORKER_RUNTIME,
+            })
+            for index in range(1, 7)
+        ]
+        for assignment in round_two:
+            submit(assignment)
+        retained = service.workbench.get_deep_scan_state(scan["id"])["canonicalCandidates"][0]
+        retained_identity = (retained["canonicalId"], retained["fingerprint"], retained["identity"])
+        second_merge = service.deep_claim_merge({"scanId": scan["id"]})
+        saturated = service.deep_submit_merge({
+            "scanId": scan["id"],
+            "claimToken": second_merge["claimToken"],
+            "canonicalCandidates": [{
+                **retained,
+                "sourceRefs": [],
+                "mergeRationale": "No new source candidate changed the retained canonical finding.",
+                "identityRationale": "The prior canonical identity and fingerprint are unchanged.",
+                "remediationSubsumption": "The prior canonical remediation is retained unchanged.",
+            }],
+        })
+        assert saturated["status"] == "saturated"
+        assert saturated["round"] == 2 and saturated["noveltyCount"] == 0
+        assert saturated["maxRounds"] == 10 and saturated["canonicalCandidateCount"] == 1
+        final_candidate = service.workbench.get_deep_scan_state(scan["id"])["canonicalCandidates"][0]
+        assert (final_candidate["canonicalId"], final_candidate["fingerprint"], final_candidate["identity"]) == retained_identity
+        assert len(service.workbench.list_deep_worker_coverage_receipts(scan["id"], 2)) == 6 * len(round_two[0]["worklist"])
+    finally:
+        service.shutdown({})
+
+
 def test_standard_scan_artifacts_validation_exports_and_events(workspace: Path, tmp_path: Path) -> None:
     events: list[dict] = []
     service = service_for(workspace, events)
@@ -290,6 +502,12 @@ def test_deep_get_finding_overlays_completed_tail_proof(workspace: Path) -> None
         detail = service.get_finding({"occurrenceId": finding["occurrenceId"]})
         assert detail["validation"]["tests"][0]["result"] == "PASS"
         assert detail["attackPath"]["actor"] == "remote user"
+        with pytest.raises(EngineError) as immutable_validation:
+            service.validate_finding({"occurrenceId": finding["occurrenceId"]})
+        assert immutable_validation.value.code == "model_tail_result_immutable"
+        with pytest.raises(EngineError) as immutable_hardening:
+            service.create_hardening_proposal({"scanId": scan["id"]})
+        assert immutable_hardening.value.code == "model_tail_result_immutable"
     finally:
         service.shutdown({})
 
@@ -443,13 +661,23 @@ def test_cancellation_is_cooperative_and_terminal(workspace: Path) -> None:
         terminal = wait_for_scan(service, scan["id"])
         assert terminal["status"] == "cancelled"
         assert terminal["cancellation_requested"]
+        handoff = service.workbench.create_scan(
+            workspace_id=service.workspace_record["id"], mode="standard", scope=".",
+            artifact_dir=None, session_id=service.session_id,
+        )
+        service.workbench.set_capabilities(handoff["id"], {"analysisProfile": "model"})
+        for phase in ("threat_model", "discovery", "validation"):
+            service.workbench.set_phase(handoff["id"], phase)
+        cancelled = service.cancel_scan({"scanId": handoff["id"]})
+        assert cancelled["status"] == "cancelled"
+        assert cancelled["phase"] == "validation"
     finally:
         service.shutdown({})
 
 
 def test_shutdown_handoff_and_resume_after_restart(workspace: Path) -> None:
     first = service_for(workspace)
-    scan = first.start_scan(deep_scan_params())
+    scan = first.start_scan(deep_scan_params(maxFiles=321, maxFileBytes=4096))
     first.runner._shutdown.set()  # deterministic interruption at the next cooperative boundary
     interrupted = wait_for_scan(first, scan["id"])
     assert interrupted["status"] == "interrupted"
@@ -460,6 +688,8 @@ def test_shutdown_handoff_and_resume_after_restart(workspace: Path) -> None:
     try:
         resumed = second.resume_scan({"scanId": scan["id"]})
         assert resumed["status"] == "running"
+        assert resumed["capabilities"]["maxFiles"] == 321
+        assert resumed["capabilities"]["maxFileBytes"] == 4096
         complete_empty_deep_round(second, scan["id"], timeout=45)
         completed = wait_for_scan(second, scan["id"], timeout=45)
         assert completed["status"] == "completed", completed["failure_message"]
@@ -501,6 +731,7 @@ def test_tracking_handoff_related_artifacts_and_cleanup(workspace: Path, tmp_pat
             "provider": "github",
             "destination": "owner/repository",
             "stableLink": "vscode://test/finding/example",
+            "trackingProof": tracking_proof(),
         })
         payload_path = Path(handoff["artifact"]["path"])
         payload = json.loads(payload_path.read_text(encoding="utf-8"))
@@ -533,5 +764,224 @@ def test_tracking_handoff_related_artifacts_and_cleanup(workspace: Path, tmp_pat
         with pytest.raises(EngineError) as error:
             service.get_scan({"scanId": scan["id"]})
         assert error.value.code == "scan_not_found"
+    finally:
+        service.shutdown({})
+
+
+def test_h_workflow_artifacts_state_and_proof_are_immutable(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    service = service_for(workspace)
+    try:
+        scan = service.start_scan({"mode": "standard", "scope": "."})
+        completed = wait_for_scan(service, scan["id"])
+        assert completed["status"] == "completed"
+        finding = next(
+            item for item in service.list_findings({"scanId": scan["id"]})
+            if item["locations"][0]["path"] == "src/app.py" and item["taxonomy"]["category"] == "command-injection"
+        )
+        with pytest.raises(EngineError) as reserved:
+            parse_remediation_patch("--- a/.kiro/state\n+++ b/.kiro/state\n@@ -1 +1 @@\n-old\n+new\n")
+        assert reserved.value.code == "unsafe_remediation_patch"
+        patch = (
+            "--- a/src/app.py\n+++ b/src/app.py\n@@ -8,7 +8,7 @@\n @app.get('/run')\n"
+            " def run_command():\n     command = request.args.get('command')\n-    os.system(command)\n"
+            "+    os.system('echo safe')\n     return 'ok'\n \n @app.get('/users')\n"
+        )
+        prepared_one = service.prepare_remediation_patch({
+            "occurrenceId": finding["occurrenceId"], "patch": patch, "plan": "Replace the unsafe sink.",
+            "verificationPlan": ["Run the focused command route test."],
+        })
+        prepared_two = service.prepare_remediation_patch({
+            "occurrenceId": finding["occurrenceId"], "patch": patch, "plan": "Replace the unsafe sink.",
+            "verificationPlan": ["Run the focused command route test."],
+        })
+        assert service.workbench.get_remediation_record(prepared_one["id"])["state"] == "superseded"
+        service.workbench.transition_remediation(
+            prepared_two["id"], prepared_two["version"], "generated", "verifying",
+            verification_summary=json.dumps({
+                "phase": "applying", "patchDigest": prepared_two["patch_digest"],
+                "ownerSessionId": service.session_id,
+            }),
+        )
+        peer = service_for(workspace)
+        try:
+            with pytest.raises(EngineError) as live_owner:
+                peer._reconcile_remediation_record(peer.workbench.get_remediation_record(prepared_two["id"]))
+            assert live_owner.value.code == "remediation_busy"
+            service.workbench.close_session(service.session_id)
+            assert peer._reconcile_remediation_record(
+                peer.workbench.get_remediation_record(prepared_two["id"])
+            )["state"] == "generated"
+        finally:
+            peer.shutdown({})
+        applied = service.apply_remediation_patch({
+            "remediationId": prepared_two["id"], "expectedVersion": prepared_two["version"],
+        })
+        assert applied["state"] == "applied"
+        with pytest.raises(EngineError) as busy:
+            service.prepare_remediation_patch({
+                "occurrenceId": finding["occurrenceId"], "patch": patch, "plan": "Do not supersede applied work.",
+                "verificationPlan": ["No-op"],
+            })
+        assert busy.value.code == "remediation_busy"
+        verified = service.verify_remediation_patch({
+            "remediationId": applied["id"], "expectedVersion": applied["version"],
+            "verification": {
+                "outcome": "verified", "originalIssueNoLongerReproduces": True, "preservedBehavior": True,
+                "securityValidation": {"status": "passed", "method": "focused", "rationale": "token=secret-value-hidden", "evidence": ["route rejects attacker control"]},
+                "tests": [{"command": "TOKEN=secret-value-hidden pytest focused", "status": "passed", "summary": "passed"}],
+                "proofGaps": [],
+            },
+        })
+        verification_path = Path(verified["verificationArtifact"]["path"])
+        assert verified["state"] == "verified" and prepared_two["id"] in str(verification_path)
+        assert "secret-value-hidden" not in verification_path.read_text(encoding="utf-8")
+        assert all(part not in (".git", ".kiro") for part in Path(prepared_two["artifact_path"]).parts[-3:])
+        service.workbench.transition_remediation(
+            prepared_two["id"], prepared_two["version"], "verified", "verifying",
+            verification_summary=json.dumps({"phase": "applying", "patchDigest": prepared_two["patch_digest"]}),
+        )
+        Path(prepared_two["artifact_path"]).unlink()
+        orphaned = service._reconcile_remediation_record(
+            service.workbench.get_remediation_record(prepared_two["id"])
+        )
+        assert orphaned["state"] == "failed" and "reconciliation_failed" in orphaned["verification_summary"]
+
+        assert redact("Authorization: Bearer secret-value-hidden") == "Authorization: <redacted>"
+        assert redact("Authorization=Basic dXNlcjpwYXNz") == "Authorization=<redacted>"
+        assert "secret-value-hidden" not in redact('{"Authorization": "Bearer secret-value-hidden"}')
+        intake = service.create_triage_intake({
+            "occurrenceId": finding["occurrenceId"], "sourceType": "scanner_ticket", "inputId": "external-1",
+            "input": {"summary": "authorization: Bearer secret-value-hidden"},
+        })
+        assert "secret-value-hidden" not in Path(intake["intakeArtifactPath"]).read_text(encoding="utf-8")
+        with pytest.raises(EngineError) as empty_proof:
+            service.submit_triage_assessment({
+                "assessmentId": intake["id"],
+                "result": {
+                    "inputId": "external-1", "verdict": "confirmed", "confidence": "high",
+                    "rationale": "Missing proof.", "source": "unknown", "control": "unknown", "sink": "unknown",
+                    "affectedLocations": [], "reachablePath": [], "evidence": [], "counterevidence": [], "proofGaps": [],
+                    "boundaryAssessment": {"productSurface": "unknown", "sourceTrust": "unknown", "boundaryCrossed": None, "policyBasis": "unknown"},
+                    "exploitabilityStackRank": {"rankQueue": "confirmed", "rank": 1, "rationale": "unknown", "drivers": []},
+                    "recommendedNextStep": "Review.",
+                },
+            })
+        assert empty_proof.value.code == "invalid_triage_result"
+        triage = service.submit_triage_assessment({
+            "assessmentId": intake["id"],
+            "result": {
+                "inputId": "external-1", "verdict": "confirmed", "confidence": "high",
+                "rationale": "Repository proof confirms reachability.", "source": "request argument",
+                "control": "missing validation", "sink": "command execution",
+                "affectedLocations": [{"path": "src/app.py", "startLine": 11, "endLine": 11, "role": "sink", "detail": "patched sink"}],
+                "reachablePath": ["request -> command -> sink"],
+                "boundaryAssessment": {"productSurface": "route", "sourceTrust": "untrusted", "boundaryCrossed": True, "policyBasis": "request boundary"},
+                "exploitabilityStackRank": {"rankQueue": "confirmed", "rank": 1, "rationale": "direct", "drivers": ["reachable"]},
+                "evidence": ["current source"], "counterevidence": [], "proofGaps": [],
+                "recommendedNextStep": "Retain the patch.",
+            },
+        })
+        assert triage["result"]["repositoryBinding"]["findingId"] == finding["findingId"]
+        assert len(triage["result"]["repositoryBinding"]["locations"][0]["contentDigest"]) == 64
+        result_path = Path(triage["resultArtifactPath"])
+        conflicting_result = {**triage["result"], "rationale": "A conflicting immutable retry."}
+        with pytest.raises(EngineError) as immutable_triage:
+            service.submit_triage_assessment({"assessmentId": intake["id"], "result": conflicting_result})
+        assert immutable_triage.value.code in ("triage_subject_mismatch", "triage_assessment_immutable")
+        assert result_path.exists()
+
+        contradictory_proof = tracking_proof()
+        contradictory_proof["duplicateSearch"]["candidateIds"] = ["issue-existing"]
+        with pytest.raises(EngineError) as contradictory_duplicate:
+            service.create_tracking_handoff({
+                "occurrenceId": finding["occurrenceId"], "provider": "github",
+                "destination": "https://github.com/owner/repository", "trackingProof": contradictory_proof,
+            })
+        assert contradictory_duplicate.value.code == "invalid_tracking_proof"
+        with pytest.raises(EngineError) as unsafe_destination:
+            service.create_tracking_handoff({
+                "occurrenceId": finding["occurrenceId"], "provider": "github",
+                "destination": "https://github.com/owner/repository?token=secret", "trackingProof": tracking_proof(),
+            })
+        assert unsafe_destination.value.code == "invalid_tracking_proof"
+        findings_path = Path(completed["artifact_dir"]) / "findings.json"
+        sealed_findings = findings_path.read_bytes()
+        findings_path.write_text("{}\n", encoding="utf-8")
+        with pytest.raises(EngineError) as changed_findings:
+            service.create_tracking_handoff({
+                "occurrenceId": finding["occurrenceId"], "provider": "github",
+                "destination": "https://github.com/owner/repository", "trackingProof": tracking_proof(),
+            })
+        assert changed_findings.value.code == "remediation_source_unsealed"
+        findings_path.write_bytes(sealed_findings)
+        handoff = service.create_tracking_handoff({
+            "occurrenceId": finding["occurrenceId"], "provider": "github",
+            "destination": "https://github.com/owner/repository", "trackingProof": tracking_proof(),
+        })
+        payload_path = Path(handoff["artifact"]["path"])
+        payload = json.loads(payload_path.read_text(encoding="utf-8"))
+        record = service.workbench.get_tracking_record(handoff["id"])
+        assert record["payload_artifact_path"] == str(payload_path)
+        readback_proof = {
+            "bindingFindingId": payload["finding"]["findingId"],
+            "bindingFingerprint": payload["finding"]["fingerprint"],
+            "titleDigest": payload["writePreview"]["titleDigest"], "bodyDigest": payload["writePreview"]["bodyDigest"],
+            "previewDigest": payload["writePreview"]["previewDigest"],
+            "connectorHost": "github.com",
+            "duplicateQueryDigest": payload["routingProof"]["duplicateSearch"]["queryDigest"],
+            "destinationDigest": payload["routingProof"]["destination"]["digest"],
+            "visibility": "private", "audienceDigest": payload["routingProof"]["audienceDigest"],
+        }
+        approval = {
+            "approved": True, "approvedPreviewDigest": payload["writePreview"]["previewDigest"],
+            "approvedPayloadSha256": handoff["payloadSha256"],
+            "approvedBy": "integration-reviewer", "approvedAt": "2026-01-01T00:00:00Z",
+            "scope": "exact sealed preview",
+        }
+        readback_proof["approvalDigest"] = hashlib.sha256(json.dumps(
+            approval, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        ).encode("utf-8")).hexdigest()
+        with pytest.raises(EngineError) as uncertain_mutation:
+            service.record_tracking_result({
+                "recordId": handoff["id"], "payloadSha256": handoff["payloadSha256"], "outcome": "uncertain",
+                "externalMutationPerformed": True,
+            })
+        assert uncertain_mutation.value.code == "invalid_tracking_result"
+        tracking_result = {
+            "recordId": handoff["id"], "payloadSha256": handoff["payloadSha256"], "outcome": "created",
+            "externalMutationPerformed": True, "externalId": "issue-1",
+            "externalUrl": "https://github.com/owner/repository/issues/1", "approval": approval,
+            "readback": readback_proof,
+        }
+        duplicate_handoff = json.loads(json.dumps(payload))
+        duplicate_handoff["routingProof"]["duplicateSearch"].update({
+            "status": "existing", "candidateIds": ["issue-existing"],
+        })
+        with pytest.raises(EngineError) as duplicate_mismatch:
+            normalize_tracking_readback(tracking_result, duplicate_handoff)
+        assert duplicate_mismatch.value.code == "tracking_readback_mismatch"
+        with pytest.raises(EngineError) as missing_duplicate:
+            normalize_tracking_readback(
+                {**tracking_result, "outcome": "reused", "externalMutationPerformed": False}, payload,
+            )
+        assert missing_duplicate.value.code == "tracking_readback_mismatch"
+        register_artifact = service.workbench._register_artifact
+        monkeypatch.setattr(service.workbench, "_register_artifact", lambda *_args: (_ for _ in ()).throw(OSError("injected registry failure")))
+        with pytest.raises(OSError):
+            service.record_tracking_result(tracking_result)
+        assert service.workbench.get_tracking_record(handoff["id"])["status"] == "prepared"
+        monkeypatch.setattr(service.workbench, "_register_artifact", register_artifact)
+        tracked = service.record_tracking_result(tracking_result)
+        readback_path = Path(tracked["artifact"]["path"])
+        with pytest.raises(EngineError) as same_tracking:
+            service.record_tracking_result(tracking_result)
+        assert same_tracking.value.code == "tracking_record_immutable" and readback_path.exists()
+        with pytest.raises(EngineError) as immutable_tracking:
+            service.record_tracking_result({
+                "recordId": handoff["id"], "payloadSha256": handoff["payloadSha256"], "outcome": "failed",
+                "externalMutationPerformed": False,
+            })
+        assert immutable_tracking.value.code == "tracking_record_immutable"
+        assert readback_path.exists()
     finally:
         service.shutdown({})

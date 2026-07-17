@@ -79,19 +79,20 @@ The transport is one UTF-8 JSON object per line over stdio. The first request mu
 - `scan.completed`
 - `scan.cancelled`
 - `scan.failed`
+- `scan.integrityIssue`
 - `engine.log`
 
 The extension also polls durable state so events emitted by an MCP-owned engine process appear in the VSIX.
 
 ## Scan execution
 
-Standard mode performs one repository or scoped-path deterministic pass. Deep mode creates an authoritative worklist, persists one disposition receipt per row from each Agent-driven discovery worker, consolidates those receipts at semantic merge, and continues through its centralized deterministic validation/reporting tail without silently falling back to Standard mode. Worker homogeneity and host-capability enforcement remain a separate parity workstream. Diff mode resolves changed paths from Git using argument arrays and analyzes the requested working tree, commit, or range.
+The explicit Fast profile performs the deterministic Standard/Diff pass. Model Standard, Diff, and Deep create an authoritative worklist, require six homogeneous host-attested Agent discovery workers, consolidate their receipts at semantic merge, and continue through the durable model validation/reporting tail without silently falling back to Fast. Diff resolves changed paths from Git using argument arrays; commit/range scans require the requested head to be checked out so worklist bytes cannot diverge from the bounded patch.
 
 Each phase commits progress and artifacts independently. Cancellation is represented in SQLite and checked between files and phase work. Shutdown asks runner threads to hand off, persists `interrupted`, and exits without deleting partial state.
 
 ## Coverage ledger and finalization
 
-Coverage is not inferred from finding categories. Every `coverage.surfaces[]` entry is the projection of one durable `coverage_ledger` row and uses exactly one canonical disposition: `reportable`, `suppressed`, `not_applicable`, or `deferred`. There is no separate surface-summary disposition vocabulary. `receiptDigest` is SHA-256 over canonical sorted JSON containing `rowId`, disposition, reason, evidence references, and candidate/finding references. The current finding-reference adapter is isolated in `coverage_finding_reference()` so WS-F can replace finding identity without rewriting the ledger.
+Coverage is not inferred from finding categories. Every `coverage.surfaces[]` entry is the projection of one durable `coverage_ledger` row and uses exactly one canonical disposition: `reportable`, `suppressed`, `not_applicable`, or `deferred`. There is no separate surface-summary disposition vocabulary. `receiptDigest` is SHA-256 over canonical sorted JSON containing `rowId`, disposition, reason, evidence references, and candidate/finding references. Stable semantic finding references are isolated in `coverage_finding_reference()` so the ledger does not depend on mutable locations.
 
 For Standard and Diff, `not_applicable` means only that the bounded configured rule-family traversal ran for that supported source row and emitted no candidate; it is not a claim that the file is vulnerability-free. Deep never invents a clean receipt for a missing worklist row. Unsupported, unreadable, oversized, or inventory-limited in-scope items are explicit `deferred` rows. Completeness is therefore:
 
@@ -99,7 +100,7 @@ For Standard and Diff, `not_applicable` means only that the bounded configured r
 - `partial`: any row is unclosed or deferred, or Deep terminated at its round cap.
 - `unknown`: no supported source file was reviewed, including Standard/Diff scopes containing only unsupported files.
 
-`coverage.json`, `findings.json`, `discovery.json`, `validation.json`, and `attack-path.json` form the canonical JSON bundle. Coverage and findings are validated against strict schemas; the auxiliary sealed JSON documents receive dependency-free top-level contract validation until WS-I supplies full schemas. A completed `scan-manifest.json` is validated in memory and fixes the canonical artifact digests. `report.md`, `hardening/hardening.md`, and per-finding writeups are derived projections and never appear in `manifest.scan.artifacts`; they are listed separately under `derivedArtifacts`. The workbench publishes completed status, coverage, manifest digest, canonical and derived artifact records, and the official finalization files through one transaction boundary, preventing a reader from seeing a completed scan before its final artifacts are available.
+`coverage.json`, `findings.json`, `discovery.json`, `validation.json`, and `attack-path.json` form the canonical JSON bundle. Coverage and findings use strict schemas; the auxiliary sealed documents use explicit dependency-free top-level contracts. A completed `scan-manifest.json` is validated in memory and fixes every sealed artifact digest. `report.md`, `hardening/hardening.md`, and per-finding writeups are derived projections and never appear in `manifest.scan.artifacts`; they are listed separately under `derivedArtifacts`. The workbench publishes completed status, coverage, manifest digest, canonical and derived artifact records, and the official finalization files through one transaction boundary, preventing a reader from seeing a completed scan before its final artifacts are available.
 
 ## Webview data flow
 

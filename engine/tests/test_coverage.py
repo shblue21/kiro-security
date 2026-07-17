@@ -206,8 +206,11 @@ def test_unclosed_deep_row_is_partial_and_auditable(workspace: Path) -> None:
     ]
 
 
-def test_legacy_reviewed_paths_workers_merge_as_deferred_partial(workspace: Path) -> None:
+def test_legacy_reviewed_paths_workers_merge_as_deferred_partial(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     import json
+    from kiro_security import deep as deep_module
 
     workbench = Workbench(workspace)
     scan = _create_scan(workbench, "deep")
@@ -216,7 +219,20 @@ def test_legacy_reviewed_paths_workers_merge_as_deferred_partial(workspace: Path
     source = _source("src/app.py")
     inventory = _inventory(files=[source])
     coordinator = DeepCoordinator(workbench)
+    monkeypatch.setattr(coordinator, "_validate_security_context", lambda *_args: {})
     coordinator.ensure(scan, inventory)
+    with workbench.transaction() as connection:
+        connection.execute("UPDATE scans SET status='interrupted' WHERE id=?", (scan["id"],))
+    for mutation in (
+        lambda: coordinator.submit_worker({"scanId": scan["id"]}),
+        lambda: coordinator.submit_merge({"scanId": scan["id"], "canonicalCandidates": []}),
+        lambda: coordinator.retry_worker(scan["id"], 1, "retry"),
+    ):
+        with pytest.raises(EngineError) as error:
+            mutation()
+        assert error.value.code == "deep_scan_not_active"
+    with workbench.transaction() as connection:
+        connection.execute("UPDATE scans SET status='running' WHERE id=?", (scan["id"],))
     # Simulate six workers completed before migration 008: an attendance-only
     # reviewedPaths result and no durable row receipts.
     legacy_result = json.dumps({
@@ -239,6 +255,22 @@ def test_legacy_reviewed_paths_workers_merge_as_deferred_partial(workspace: Path
     first_receipts = workbench.list_deep_worker_coverage_receipts(scan["id"], 1)
     assert len(first_receipts) == 6
     assert all(item["disposition"] == "deferred" for item in first_receipts)
+    original_write_json = deep_module.write_json
+    monkeypatch.setattr(
+        deep_module,
+        "write_json",
+        lambda path, payload: (_ for _ in ()).throw(OSError("injected merge artifact failure"))
+        if path.name == "merge.json" else original_write_json(path, payload),
+    )
+    with pytest.raises(OSError, match="injected merge artifact failure"):
+        coordinator.submit_merge({
+            "scanId": scan["id"],
+            "claimToken": merge["claimToken"],
+            "canonicalCandidates": [],
+        })
+    assert coordinator.status(scan["id"])["status"] == "awaiting_merge"
+    assert workbench.list_coverage_rows(scan["id"]) == []
+    monkeypatch.setattr(deep_module, "write_json", original_write_json)
     status = coordinator.submit_merge({
         "scanId": scan["id"],
         "claimToken": merge["claimToken"],
@@ -249,6 +281,17 @@ def test_legacy_reviewed_paths_workers_merge_as_deferred_partial(workspace: Path
     coordinator._backfill_legacy_worker_receipts(scan["id"], 1, [source])
     second_receipts = workbench.list_deep_worker_coverage_receipts(scan["id"], 1)
     assert {item["id"] for item in second_receipts} == {item["id"] for item in first_receipts}
+    current_refs = [f"r2-w1-c{index}" for index in range(1, 26)]
+    provenance = coordinator._deep_provenance(
+        canonical_id="candidate-current", round_number=2, refs=current_refs,
+        workers_by_round_index={}, prior=None,
+        rationales={
+            "mergeRationale": "Current sources agree.",
+            "identityRationale": "Semantic identity matches.",
+            "remediationSubsumption": "One remediation covers the sources.",
+        },
+    )
+    assert provenance["sourceRefs"] == current_refs
 
     rows = workbench.list_coverage_rows(scan["id"])
     assert [row["disposition"] for row in rows] == ["deferred"]
@@ -280,6 +323,11 @@ def test_unsupported_in_scope_file_is_explicit_and_never_complete(tmp_path: Path
     coverage = build_coverage_document(workbench, scan, inventory)
 
     assert inventory["supportedFileCount"] == 0
-    assert any(item["path"] == "Dockerfile" and item["surface"] == "unsupported_file" for item in inventory["deferred"])
+    assert any(
+        item["path"] == "Dockerfile"
+        and item["kind"] == "security_surface_unreviewed"
+        and item["surface"] == "deployment_review:container"
+        for item in inventory["deferred"]
+    )
     assert coverage["completeness"] == "unknown"
     assert any(item["path"] == "Dockerfile" and item["disposition"] == "deferred" for item in coverage["surfaces"])

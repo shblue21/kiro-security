@@ -21,7 +21,13 @@ def test_python_mcp_contract_exposes_full_shared_workbench_surface() -> None:
         "security_validate_finding",
         "security_triage_finding",
         "security_create_remediation",
+        "security_prepare_remediation_patch",
+        "security_apply_remediation_patch",
+        "security_verify_remediation_patch",
+        "security_create_triage_intake",
+        "security_submit_triage_assessment",
         "security_create_tracking_handoff",
+        "security_record_tracking_result",
         "security_create_hardening_proposal",
         "security_create_threat_model",
         "security_export_report",
@@ -30,6 +36,11 @@ def test_python_mcp_contract_exposes_full_shared_workbench_surface() -> None:
     for tool in TOOLS:
         assert tool["inputSchema"]["type"] == "object"
         assert tool["name"].startswith("security_")
+    tracking = next(tool for tool in TOOLS if tool["name"] == "security_create_tracking_handoff")
+    assert "trackingProof" in tracking["inputSchema"]["required"]
+    assert tracking["inputSchema"]["properties"]["destination"]["maxLength"] == 512
+    tail = next(tool for tool in TOOLS if tool["name"] == "security_deep_submit_tail_result")
+    assert tail["inputSchema"]["properties"]["claimToken"]["maxLength"] == 256
 
 
 def test_python_mcp_capabilities_use_workspace_engine_and_current_version(tmp_path: Path) -> None:

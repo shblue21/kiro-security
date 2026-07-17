@@ -43,7 +43,7 @@ def candidate(path: str = "src/app.py") -> dict:
 def test_migrations_integrity_snapshot_and_active_lock(workspace: Path, tmp_path: Path) -> None:
     workbench = Workbench(workspace)
     info = workbench.database_info()
-    assert info["schemaVersion"] == 8
+    assert info["schemaVersion"] == 10
     assert info["journalMode"].lower() == "wal"
     assert info["integrity"] == "ok"
     scan = create_scan(workbench)
@@ -95,20 +95,38 @@ def test_findings_validation_triage_remediation_and_parameterized_search(workspa
 
 def test_migration_backups_are_created_before_and_after_pending_migration(workspace: Path) -> None:
     workbench = Workbench(workspace)
-    with workbench.transaction() as connection:
-        connection.execute("DROP TABLE deep_worker_coverage_receipts")
-        connection.execute("DROP TABLE coverage_ledger")
-        connection.execute("DELETE FROM schema_migrations WHERE version=8")
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            Path(f"{workbench.db_path}{suffix}").unlink()
+        except FileNotFoundError:
+            pass
+    connection = sqlite3.connect(workbench.db_path)
+    try:
+        connection.execute(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)"
+        )
+        for migration in sorted(workbench.migrations_dir.glob("[0-9][0-9][0-9]_*.sql")):
+            version = int(migration.name[:3])
+            if version >= 10:
+                break
+            connection.executescript(migration.read_text(encoding="utf-8"))
+            connection.execute(
+                "INSERT INTO schema_migrations(version,name,applied_at) VALUES (?,?,?)",
+                (version, migration.stem, "2026-01-01T00:00:00.000Z"),
+            )
+        connection.commit()
+    finally:
+        connection.close()
     migrated = Workbench(workspace)
-    pre_backups = list(workbench.state_dir.glob("workbench.pre-migration-v7.*.sqlite"))
-    post_backups = list(workbench.state_dir.glob("workbench.post-migration-v8.*.sqlite"))
+    pre_backups = list(workbench.state_dir.glob("workbench.pre-migration-v9.*.sqlite"))
+    post_backups = list(workbench.state_dir.glob("workbench.post-migration-v10.*.sqlite"))
     assert pre_backups
     assert post_backups
-    assert migrated.database_info()["schemaVersion"] == 8
+    assert migrated.database_info()["schemaVersion"] == 10
     connection = sqlite3.connect(post_backups[-1])
     try:
         assert connection.execute("PRAGMA quick_check").fetchone()[0] == "ok"
-        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 8
+        assert connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0] == 10
     finally:
         connection.close()
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import threading
 from pathlib import Path
@@ -11,7 +12,8 @@ from kiro_security.coverage import coverage_row_id
 from kiro_security.db import Workbench
 from kiro_security.errors import EngineError
 from kiro_security.finalizer import finalize_scan, prepare_finalization
-from kiro_security.reporting import write_canonical_documents
+from kiro_security.reporting import build_findings_document, write_canonical_documents
+from kiro_security.schema_validation import validate_against_schema
 from kiro_security.security import sha256_file
 
 
@@ -307,6 +309,21 @@ def test_reconciliation_quarantines_tampered_completed_manifest(workspace: Path)
     assert workbench.get_scan(scan["id"])["status"] == "completed"
 
 
+def test_reconciliation_quarantines_manifest_when_sealed_artifact_changed(workspace: Path) -> None:
+    workbench = Workbench(workspace)
+    scan = _create_reporting_scan(workbench)
+    finalize_scan(workbench, _prepare_bundle(workbench, scan))
+    artifact_dir = Path(scan["artifact_dir"])
+    coverage_path = artifact_dir / ARTIFACT_KINDS["coverage"]
+    coverage_path.write_text(coverage_path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+
+    issues = workbench.reconcile_finalization_integrity()
+
+    mismatch = [item for item in issues if item["code"] == "sealed_artifact_digest_mismatch"]
+    assert mismatch and mismatch[0]["path"] == ARTIFACT_KINDS["coverage"]
+    assert not (artifact_dir / ARTIFACT_KINDS["manifest"]).exists()
+
+
 def test_reconciliation_quarantines_projections_when_sealed_manifest_missing(workspace: Path) -> None:
     workbench = Workbench(workspace)
     scan = _create_reporting_scan(workbench)
@@ -349,3 +366,135 @@ def test_invalid_findings_document_blocks_seal_and_preserves_partial_state(works
     assert not (artifact_dir / ARTIFACT_KINDS["manifest"]).exists()
     assert not (artifact_dir / ARTIFACT_KINDS["markdownReport"]).exists()
     assert not (artifact_dir / ARTIFACT_KINDS["hardening"]).exists()
+
+
+def test_canonical_schema_contract_rejects_malformed_mutations(workspace: Path) -> None:
+    workbench = Workbench(workspace)
+    scan = _create_reporting_scan(workbench)
+    prepared = _prepare_bundle(workbench, scan)
+    schema_dir = Path(__file__).parents[1] / "schemas"
+
+    def valid(document: dict, schema_name: str) -> None:
+        validate_against_schema(document, schema_dir / schema_name, schema_name)
+
+    def rejected(document: dict, schema_name: str) -> None:
+        with pytest.raises(EngineError) as error:
+            valid(document, schema_name)
+        assert error.value.code == "schema_validation_failed"
+
+    finding_id = "kspf_" + "a" * 24
+    occurrence_id = "occ_" + "b" * 24
+    item = {
+        "findingId": finding_id, "occurrenceId": occurrence_id, "ruleId": "test.rule",
+        "identity": {"anchor": "test", "instance": "sink"},
+        "fingerprint": "kiro-security/v1:sha256:" + "c" * 64,
+        "title": "Test finding", "summary": "Test summary.",
+        "severity": {"level": "high", "score": 8.0, "rationale": "Evidence-backed."},
+        "confidence": {"level": "high", "rationale": "Direct evidence."},
+        "taxonomy": {"category": "security", "cwe": ["CWE-78"]},
+        "locations": [{"path": "src/app.py", "startLine": 1, "endLine": 1, "role": "sink"}],
+        "codeEvidence": [{
+            "id": "evidence-1", "kind": "code", "label": "Sink", "path": "src/app.py",
+            "startLine": 1, "endLine": 1, "language": "python", "role": "sink",
+            "code": "sink(value)", "explanation": "Sink evidence.",
+        }],
+        "remediation": "Validate input.", "validationStatus": "validated", "triageStatus": "open", "details": {},
+        "validation": {"id": "val_" + "d" * 24, "createdAt": "2026-01-01T00:00:00Z", "status": "validated", "method": "static_trace", "rationale": "Still present.", "evidence": []},
+        "attackPath": {"id": "path_" + "e" * 24, "narrative": "Source reaches sink.", "path": [], "exploitability": "high", "impact": "Impact.", "severityRationale": "High impact."},
+    }
+    standard = build_findings_document(scan["id"], [item], {finding_id: f"writeups/{finding_id}.md"})
+    valid(standard, "findings.schema.json")
+    valid(prepared["documents"]["findings"], "findings.schema.json")
+
+    deep_validation = {
+        "findingId": finding_id, "status": "validated", "method": "repository_test", "rationale": "Proved.",
+        "evidence": [{"path": "src/app.py", "result": "PASS"}], "counterevidence": [],
+        "crossFileTrace": ["source to sink"], "frameworkControls": ["No mitigating middleware."],
+        "proofGaps": [], "tests": [{"name": "focused", "result": "PASS"}],
+        "dynamicValidationUnavailableReason": None,
+    }
+    deep_attack = {
+        "findingId": finding_id, "narrative": "Source reaches sink.", "actor": "remote user",
+        "attackerPrerequisite": "Network access.", "entrypoint": "Route", "attackerControlledSource": "Body",
+        "rootControl": "Authentication", "controlBypass": "Missing validation",
+        "crossFilePath": [{"path": "src/app.py", "step": "Input reaches sink."}], "privilegedSink": "Shell",
+        "impact": "Code execution.", "exploitPreconditions": ["Reachable route"], "counterevidence": [],
+        "residualUncertainty": "None observed.", "severity": {"level": "high", "rationale": "Code execution."},
+        "exploitability": "high", "confidence": {"level": "high", "rationale": "Focused test passed."},
+    }
+    deep_item = {**item, "fingerprint": "kiro-security/deep-v1:sha256:" + "d" * 64}
+    deep = build_findings_document(
+        scan["id"], [deep_item], {finding_id: f"findings/{finding_id}/{finding_id}.md"},
+        {"validation": {occurrence_id: deep_validation}, "attack_path": {occurrence_id: deep_attack}},
+    )
+    valid(deep, "findings.schema.json")
+    findings_path = Path(prepared["paths"]["findings"])
+    original_findings = findings_path.read_bytes()
+    identity_mismatch = deepcopy(deep)
+    identity_mismatch["findings"][0]["validation"]["findingId"] = "kspf_" + "f" * 24
+    findings_path.write_text(json.dumps(identity_mismatch), encoding="utf-8")
+    with pytest.raises(EngineError) as identity_error:
+        prepare_finalization(workbench, prepared)
+    assert identity_error.value.code == "canonical_finding_identity_mismatch"
+    findings_path.write_bytes(original_findings)
+    for forbidden in ("claimToken", "runtime", "capabilities", "rawResult"):
+        mutation = deepcopy(deep)
+        mutation["findings"][0]["provenance"][forbidden] = "secret"
+        rejected(mutation, "findings.schema.json")
+    mutation = deepcopy(deep)
+    mutation["findings"][0]["extensions"]["claimToken"] = "secret"
+    rejected(mutation, "findings.schema.json")
+    legacy_item = {**deep_item, "details": {"legacyContract": True}, "validation": None, "attackPath": None}
+    legacy = build_findings_document(scan["id"], [legacy_item])
+    assert "rootCause" not in legacy["findings"][0]
+    valid(legacy, "findings.schema.json")
+
+    for name, value in (("findingId", "bad"), ("occurrenceId", "bad")):
+        mutation = deepcopy(standard)
+        mutation["findings"][0][name] = value
+        rejected(mutation, "findings.schema.json")
+    mutation = deepcopy(standard)
+    mutation["findings"][0]["fingerprints"]["algorithm"] = "kiro-security/deep-v1"
+    rejected(mutation, "findings.schema.json")
+    for report_path in ("/tmp/report.md", "writeups/../report.md"):
+        mutation = deepcopy(standard)
+        mutation["findings"][0]["writeup"]["reportPath"] = report_path
+        rejected(mutation, "findings.schema.json")
+    for field in ("locations", "codeEvidence"):
+        for unsafe_path in ("../src/app.py", "C:src/app.py"):
+            mutation = deepcopy(standard)
+            mutation["findings"][0][field][0]["path"] = unsafe_path
+            rejected(mutation, "findings.schema.json")
+    for field in ("validation", "attackPath"):
+        mutation = deepcopy(standard)
+        mutation["findings"][0][field].pop("rationale" if field == "validation" else "impact")
+        rejected(mutation, "findings.schema.json")
+
+    coverage = prepared["documents"]["coverage"]
+    valid(coverage, "coverage.schema.json")
+    surface = coverage["surfaces"][0]
+    false_complete = [
+        {**deepcopy(coverage), "deferred": [{key: surface[key] for key in ("id", "rowId", "path", "reason", "receiptDigest")}]},
+        {**deepcopy(coverage), "unclosedRows": [{"rowId": surface["rowId"], "path": surface["path"], "surface": surface["surface"], "reason": "Unclosed."}]},
+        {**deepcopy(coverage), "deepStatus": "capped"},
+    ]
+    for mutation in false_complete:
+        rejected(mutation, "coverage.schema.json")
+
+    finalize_scan(workbench, prepared)
+    manifest_path = Path(scan["artifact_dir"]) / ARTIFACT_KINDS["manifest"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    valid(manifest, "scan-manifest.schema.json")
+    model_manifest = deepcopy(manifest)
+    model_manifest["scan"]["scope"]["validationMode"] = "agent-assisted-discovery+model-validation"
+    valid(model_manifest, "scan-manifest.schema.json")
+    for path in ("coverage.json", "findings.json"):
+        mutation = deepcopy(manifest)
+        mutation["scan"]["artifacts"] = [item for item in mutation["scan"]["artifacts"] if item["path"] != path]
+        rejected(mutation, "scan-manifest.schema.json")
+        mutation = deepcopy(manifest)
+        mutation["scan"]["artifacts"].append(next(item for item in mutation["scan"]["artifacts"] if item["path"] == path))
+        rejected(mutation, "scan-manifest.schema.json")
+    mutation = deepcopy(manifest)
+    next(item for item in mutation["scan"]["artifacts"] if item["path"] not in ("coverage.json", "findings.json"))["path"] = "../artifact.json"
+    rejected(mutation, "scan-manifest.schema.json")

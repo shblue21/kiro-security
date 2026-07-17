@@ -26,14 +26,14 @@
   "properties": {
     "documentType": { "const": "kiro-security-power.coverage" },
     "schemaVersion": { "const": "1.0" },
-    "scanId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "scanId": { "type": "string", "pattern": "^scan_[a-f0-9]{24}$" },
     "mode": {
       "enum": ["repository", "scoped_path", "diff", "commit", "branch_diff", "working_tree", "deep_repository"]
     },
     "completeness": { "enum": ["complete", "partial", "unknown"] },
     "inventoryStrategy": { "enum": ["repository", "scoped_path", "diff", "directory", "custom"] },
-    "includePaths": { "type": "array", "items": { "type": "string" } },
-    "excludePaths": { "type": "array", "items": { "type": "string" } },
+    "includePaths": { "type": "array", "items": { "$ref": "#/$defs/safeRelativePath" } },
+    "excludePaths": { "type": "array", "items": { "$ref": "#/$defs/safeRelativePath" } },
     "supportedFileCount": { "type": "integer", "minimum": 0 },
     "inScopeRowCount": { "type": "integer", "minimum": 0 },
     "closedRowCount": { "type": "integer", "minimum": 0 },
@@ -61,9 +61,9 @@
           "workerId"
         ],
         "properties": {
-          "id": { "type": "string", "minLength": 1 },
-          "rowId": { "type": "string", "minLength": 1 },
-          "path": { "type": "string", "minLength": 1, "maxLength": 4096 },
+          "id": { "type": "string", "pattern": "^coverage-receipt_[a-f0-9]{24}$" },
+          "rowId": { "$ref": "#/$defs/rowId" },
+          "path": { "$ref": "#/$defs/safeRelativePath" },
           "label": { "type": "string", "minLength": 1, "maxLength": 8192 },
           "surface": { "type": "string", "minLength": 1, "maxLength": 512 },
           "entrypoint": { "type": "string", "minLength": 1, "maxLength": 4096 },
@@ -81,7 +81,21 @@
           "evidenceRefs": { "type": "array", "uniqueItems": true, "items": { "type": "string" } },
           "candidateIds": { "type": "array", "uniqueItems": true, "items": { "type": "string" } },
           "workerId": { "type": ["string", "null"] }
-        }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "disposition": { "const": "reportable" } }, "required": ["disposition"] },
+            "then": {
+              "properties": {
+                "candidateIds": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": { "type": "string", "pattern": "^kspf_[a-f0-9]{24}$" }
+                }
+              }
+            }
+          }
+        ]
       }
     },
     "unclosedRows": {
@@ -91,8 +105,8 @@
         "additionalProperties": false,
         "required": ["rowId", "path", "surface", "reason"],
         "properties": {
-          "rowId": { "type": "string", "minLength": 1 },
-          "path": { "type": "string", "minLength": 1 },
+          "rowId": { "$ref": "#/$defs/rowId" },
+          "path": { "$ref": "#/$defs/safeRelativePath" },
           "surface": { "type": "string", "minLength": 1 },
           "reason": { "type": "string", "minLength": 1 }
         }
@@ -105,7 +119,7 @@
         "additionalProperties": false,
         "required": ["pattern", "reason"],
         "properties": {
-          "pattern": { "type": "string", "minLength": 1 },
+          "pattern": { "$ref": "#/$defs/safeRelativePath" },
           "reason": { "type": "string", "minLength": 1 }
         }
       }
@@ -117,9 +131,9 @@
         "additionalProperties": false,
         "required": ["id", "rowId", "path", "reason", "receiptDigest"],
         "properties": {
-          "id": { "type": "string", "minLength": 1 },
-          "rowId": { "type": "string", "minLength": 1 },
-          "path": { "type": "string", "minLength": 1 },
+          "id": { "type": "string", "pattern": "^coverage-receipt_[a-f0-9]{24}$" },
+          "rowId": { "$ref": "#/$defs/rowId" },
+          "path": { "$ref": "#/$defs/safeRelativePath" },
           "reason": { "type": "string", "minLength": 1 },
           "receiptDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
         }
@@ -136,6 +150,15 @@
           "followUpPrompt": { "type": "string" }
         }
       }
+    }
+  },
+  "$defs": {
+    "rowId": { "type": "string", "pattern": "^coverage-row_[a-f0-9]{24}$" },
+    "safeRelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)(?!.*\\x00).+$"
     }
   },
   "allOf": [

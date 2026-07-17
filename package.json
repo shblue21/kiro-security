@@ -24,6 +24,7 @@
     "onView:kiroSecurity.securityView",
     "onCommand:kiroSecurity.openPanel",
     "onCommand:kiroSecurity.openPanelRight",
+    "onCommand:kiroSecurity.startFastScan",
     "onCommand:kiroSecurity.startStandardScan",
     "onCommand:kiroSecurity.startDeepScan",
     "onCommand:kiroSecurity.scanGitChanges",
@@ -74,8 +75,14 @@
         "icon": "$(layout-sidebar-right)"
       },
       {
+        "command": "kiroSecurity.startFastScan",
+        "title": "Kiro Security: Start Fast Scan",
+        "category": "Kiro Security",
+        "icon": "$(play)"
+      },
+      {
         "command": "kiroSecurity.startStandardScan",
-        "title": "Kiro Security: Start Standard Scan",
+        "title": "Kiro Security: Start Standard Scan in Kiro Agent",
         "category": "Kiro Security",
         "icon": "$(play)"
       },
@@ -87,7 +94,7 @@
       },
       {
         "command": "kiroSecurity.scanGitChanges",
-        "title": "Kiro Security: Scan Git Changes",
+        "title": "Kiro Security: Start Diff Scan in Kiro Agent",
         "category": "Kiro Security",
         "icon": "$(git-compare)"
       },
@@ -216,7 +223,7 @@
     "menus": {
       "view/title": [
         {
-          "command": "kiroSecurity.startStandardScan",
+          "command": "kiroSecurity.startFastScan",
           "when": "view == kiroSecurity.securityView",
           "group": "navigation@1"
         },
@@ -238,14 +245,14 @@
       ],
       "editor/context": [
         {
-          "command": "kiroSecurity.startStandardScan",
+          "command": "kiroSecurity.startFastScan",
           "when": "resourceScheme == file && isInWorkspace",
           "group": "kiroSecurity@10"
         }
       ],
       "explorer/context": [
         {
-          "command": "kiroSecurity.startStandardScan",
+          "command": "kiroSecurity.startFastScan",
           "when": "resourceScheme == file",
           "group": "kiroSecurity@10"
         }
@@ -293,7 +300,7 @@
             "diff"
           ],
           "default": "standard",
-          "description": "Default scan mode shown in the Security dashboard."
+          "description": "Default model target shown in the Security dashboard; the VSIX Fast option remains the local deterministic pre-screen."
         },
         "kiroSecurity.defaultScope": {
           "type": "string",

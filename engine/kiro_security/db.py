@@ -7,10 +7,10 @@ import sqlite3
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterator
 
-from .constants import ARTIFACT_KINDS, PHASES
+from .constants import ARTIFACT_KINDS, PHASES, is_model_scan
 from .coverage import COVERAGE_DISPOSITIONS
 from .errors import EngineError
 from .security import random_id, sha256_file, stable_id, utc_now
@@ -183,6 +183,17 @@ class Workbench:
         with self.transaction() as connection:
             connection.execute("UPDATE engine_sessions SET closed_at=?, heartbeat_at=? WHERE id=?", (timestamp, timestamp, session_id))
 
+    def session_is_live(self, session_id: str, stale_after_seconds: int = 20) -> bool:
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=stale_after_seconds)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT heartbeat_at, closed_at FROM engine_sessions WHERE id=?", (session_id,)
+            ).fetchone()
+            return bool(row is not None and row["closed_at"] is None and row["heartbeat_at"] >= cutoff)
+        finally:
+            connection.close()
+
     def recover_stale_sessions(self, stale_after_seconds: int = 20) -> list[str]:
         cutoff = (datetime.now(timezone.utc) - timedelta(seconds=stale_after_seconds)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
         recovered: list[str] = []
@@ -244,6 +255,60 @@ class Workbench:
                     except OSError:
                         pass
 
+    @staticmethod
+    def _sealed_artifact_mismatch(artifact_dir: Path, manifest_path: Path) -> dict[str, Any] | None:
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            artifacts = manifest["scan"]["artifacts"]
+        except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            return {"path": ARTIFACT_KINDS["manifest"], "expected": None, "actual": None, "reason": str(exc)}
+        if not isinstance(artifacts, list):
+            return {"path": ARTIFACT_KINDS["manifest"], "expected": None, "actual": None, "reason": "invalid artifacts"}
+        root = artifact_dir.resolve(strict=True)
+        for artifact in artifacts:
+            relative = artifact.get("path") if isinstance(artifact, dict) else None
+            expected = artifact.get("sha256") if isinstance(artifact, dict) else None
+            if (
+                not isinstance(relative, str) or not relative or "\\" in relative or "\x00" in relative
+                or PurePosixPath(relative).is_absolute() or ".." in PurePosixPath(relative).parts
+                or not isinstance(expected, str)
+            ):
+                return {"path": relative, "expected": expected, "actual": None, "reason": "unsafe manifest artifact"}
+            path = artifact_dir / relative
+            actual = None
+            try:
+                cursor = artifact_dir
+                for part in PurePosixPath(relative).parts:
+                    cursor /= part
+                    if cursor.is_symlink():
+                        raise OSError("symlinked sealed artifact")
+                resolved = path.resolve(strict=True)
+                if resolved != root and root not in resolved.parents:
+                    raise OSError("sealed artifact escaped artifact directory")
+                if path.is_file():
+                    actual = sha256_file(path)
+            except OSError:
+                actual = None
+            if actual != expected:
+                return {"path": relative, "expected": expected, "actual": actual}
+        return None
+
+    def require_intact_sealed_bundle(self, scan_id: str) -> dict[str, Any]:
+        scan = self.get_scan(scan_id)
+        artifact_dir = Path(scan["artifact_dir"])
+        manifest_path = artifact_dir / ARTIFACT_KINDS["manifest"]
+        digest = scan.get("sealed_manifest_digest")
+        try:
+            manifest_digest = None if manifest_path.is_symlink() else sha256_file(manifest_path)
+        except OSError:
+            manifest_digest = None
+        if scan.get("status") != "completed" or not digest or manifest_digest != digest:
+            raise EngineError("sealed_bundle_invalid", "The completed scan manifest is missing or does not match its durable seal.")
+        mismatch = self._sealed_artifact_mismatch(artifact_dir, manifest_path)
+        if mismatch is not None:
+            raise EngineError("sealed_bundle_invalid", "A sealed scan artifact is missing or changed.", mismatch)
+        return json.loads(manifest_path.read_text(encoding="utf-8"))
+
     def reconcile_finalization_integrity(self) -> list[dict[str, Any]]:
         """Detect and repair filesystem/SQLite contradictions after a hard crash.
 
@@ -251,7 +316,8 @@ class Workbench:
         but before COMMIT, so a crash in that window can leave a completed
         manifest on disk while the durable scan state rolled back.  This
         startup pass restores the invariant that an official manifest exists
-        only for a completed scan whose sealed digest matches the file:
+        only for a completed scan whose sealed digest and sealed artifacts
+        match the file:
 
         - non-active scans with an official manifest but no committed seal
           have the manifest and its projections quarantined, and stale
@@ -329,6 +395,17 @@ class Workbench:
                             "actual": actual,
                             "quarantinedPaths": quarantined,
                         })
+                    else:
+                        mismatch = self._sealed_artifact_mismatch(artifact_dir, manifest_path)
+                        if mismatch is not None:
+                            quarantined = self._quarantine_publication(artifact_dir, stamp)
+                            issues.append({
+                                "scanId": row["id"],
+                                "code": "sealed_artifact_digest_mismatch",
+                                "message": "A manifest-sealed artifact is missing or changed; the publication was quarantined.",
+                                **mismatch,
+                                "quarantinedPaths": quarantined,
+                            })
             elif row["status"] in ("interrupted", "failed", "cancelled"):
                 if manifest_present:
                     quarantined = self._quarantine_publication(artifact_dir, stamp)
@@ -443,7 +520,10 @@ class Workbench:
             require_status_transition(row["status"], "running")
             timestamp = utc_now()
             orphaned_tail = []
-            if row["mode"] == "deep":
+            if is_model_scan({
+                "mode": row["mode"],
+                "capabilities": json.loads(row["capability_json"] or "{}"),
+            }):
                 orphaned_tail = connection.execute(
                     """
                     SELECT current.* FROM deep_tail_assignments current
@@ -978,20 +1058,26 @@ class Workbench:
         finally:
             connection.close()
 
-    def add_artifact(self, scan_id: str, kind: str, path: Path, media_type: str) -> dict[str, Any]:
+    @staticmethod
+    def _register_artifact(
+        connection: sqlite3.Connection, scan_id: str, kind: str, path: Path, media_type: str
+    ) -> dict[str, Any]:
         digest = sha256_file(path)
         timestamp = utc_now()
-        with self.transaction() as connection:
-            connection.execute(
-                """
-                INSERT INTO scan_artifacts(scan_id, kind, path, sha256, media_type, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(scan_id, kind) DO UPDATE SET path=excluded.path, sha256=excluded.sha256,
-                    media_type=excluded.media_type, created_at=excluded.created_at
-                """,
-                (scan_id, kind, str(path), digest, media_type, timestamp),
-            )
+        connection.execute(
+            """
+            INSERT INTO scan_artifacts(scan_id, kind, path, sha256, media_type, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(scan_id, kind) DO UPDATE SET path=excluded.path, sha256=excluded.sha256,
+                media_type=excluded.media_type, created_at=excluded.created_at
+            """,
+            (scan_id, kind, str(path), digest, media_type, timestamp),
+        )
         return {"kind": kind, "path": str(path), "sha256": digest, "mediaType": media_type, "createdAt": timestamp}
+
+    def add_artifact(self, scan_id: str, kind: str, path: Path, media_type: str) -> dict[str, Any]:
+        with self.transaction() as connection:
+            return self._register_artifact(connection, scan_id, kind, path, media_type)
 
     def artifact_records(self, scan_id: str) -> list[dict[str, Any]]:
         return self.get_scan(scan_id)["artifacts"]
@@ -1296,9 +1382,14 @@ class Workbench:
                 "SELECT * FROM validation_records WHERE occurrence_id=? ORDER BY created_at DESC LIMIT 1", (row["id"],)
             ).fetchone()
             attack = connection.execute("SELECT * FROM attack_paths WHERE occurrence_id=?", (row["id"],)).fetchone()
-            scan_mode = connection.execute("SELECT mode FROM scans WHERE id=?", (row["scan_id"],)).fetchone()["mode"]
+            scan_row = connection.execute(
+                "SELECT mode, capability_json FROM scans WHERE id=?", (row["scan_id"],)
+            ).fetchone()
             tail_validation = tail_attack = None
-            if scan_mode == "deep":
+            if is_model_scan({
+                "mode": scan_row["mode"],
+                "capabilities": json.loads(scan_row["capability_json"] or "{}"),
+            }):
                 tail_validation = connection.execute(
                     """
                     SELECT result_json FROM deep_tail_assignments
@@ -1316,6 +1407,9 @@ class Workbench:
                     (row["scan_id"], row["id"]),
                 ).fetchone()
             triage = connection.execute("SELECT * FROM triage_decisions WHERE occurrence_id=?", (row["id"],)).fetchone()
+            triage_assessments = connection.execute(
+                "SELECT * FROM triage_assessments WHERE occurrence_id=? ORDER BY created_at DESC", (row["id"],)
+            ).fetchall()
             remediation = connection.execute(
                 "SELECT * FROM remediation_records WHERE occurrence_id=? ORDER BY version DESC", (row["id"],)
             ).fetchall()
@@ -1374,6 +1468,7 @@ class Workbench:
             summary["triage"] = None if triage is None else {
                 "decision": triage["decision"], "note": triage["note"], "updatedAt": triage["updated_at"]
             }
+            summary["triageAssessments"] = [self._triage_assessment(item) for item in triage_assessments]
             summary["remediationRecords"] = [dict(item) for item in remediation]
             summary["trackingRecords"] = [dict(item) for item in tracking]
             summary["artifactLinks"] = [
@@ -1464,6 +1559,211 @@ class Workbench:
             )
         return self.get_finding(occurrence_id)
 
+    def create_patch_remediation(
+        self, record_id: str, occurrence_id: str, summary: str, artifact_path: str, patch_digest: str
+    ) -> dict[str, Any]:
+        timestamp = utc_now()
+        with self.transaction() as connection:
+            if connection.execute("SELECT 1 FROM finding_occurrences WHERE id=?", (occurrence_id,)).fetchone() is None:
+                raise EngineError("finding_not_found", f"Finding occurrence not found: {occurrence_id}")
+            active = connection.execute(
+                """
+                SELECT id, state FROM remediation_records
+                WHERE occurrence_id=? AND patch_digest IS NOT NULL AND state IN ('applied','verifying')
+                ORDER BY version DESC LIMIT 1
+                """,
+                (occurrence_id,),
+            ).fetchone()
+            if active is not None:
+                raise EngineError(
+                    "remediation_busy", "An applied or verifying remediation must be resolved before preparing another patch.",
+                    {"remediationId": active["id"], "state": active["state"]},
+                )
+            connection.execute(
+                """
+                UPDATE remediation_records SET state='superseded', updated_at=?
+                WHERE occurrence_id=? AND patch_digest IS NOT NULL AND state='generated'
+                """,
+                (timestamp, occurrence_id),
+            )
+            row = connection.execute(
+                "SELECT COALESCE(MAX(version), 0) AS version FROM remediation_records WHERE occurrence_id=?", (occurrence_id,)
+            ).fetchone()
+            version = int(row["version"]) + 1
+            connection.execute(
+                """
+                INSERT INTO remediation_records(
+                    id, occurrence_id, state, version, summary, artifact_path, patch_digest, created_at, updated_at
+                ) VALUES (?, ?, 'generated', ?, ?, ?, ?, ?, ?)
+                """,
+                (record_id, occurrence_id, version, summary[:500000], artifact_path, patch_digest, timestamp, timestamp),
+            )
+        return self.get_remediation_record(record_id)
+
+    def require_patch_remediation_available(self, occurrence_id: str) -> None:
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                """
+                SELECT id, state FROM remediation_records
+                WHERE occurrence_id=? AND patch_digest IS NOT NULL AND state IN ('applied','verifying')
+                ORDER BY version DESC LIMIT 1
+                """,
+                (occurrence_id,),
+            ).fetchone()
+            if row is not None:
+                raise EngineError(
+                    "remediation_busy", "An applied or verifying remediation must be resolved before preparing another patch.",
+                    {"remediationId": row["id"], "state": row["state"]},
+                )
+        finally:
+            connection.close()
+
+    def list_verifying_remediations(self) -> list[dict[str, Any]]:
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                """
+                SELECT r.*, o.scan_id, o.finding_id FROM remediation_records r
+                JOIN finding_occurrences o ON o.id=r.occurrence_id
+                WHERE r.state='verifying' ORDER BY r.updated_at, r.id
+                """
+            ).fetchall()
+            return [dict(row) for row in rows]
+        finally:
+            connection.close()
+
+    def get_remediation_record(self, record_id: str) -> dict[str, Any]:
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                """
+                SELECT r.*, o.scan_id, o.finding_id FROM remediation_records r
+                JOIN finding_occurrences o ON o.id=r.occurrence_id WHERE r.id=?
+                """,
+                (record_id,),
+            ).fetchone()
+            if row is None:
+                raise EngineError("remediation_not_found", f"Remediation record not found: {record_id}")
+            return dict(row)
+        finally:
+            connection.close()
+
+    def transition_remediation(
+        self,
+        record_id: str,
+        expected_version: int,
+        expected_state: str,
+        new_state: str,
+        *,
+        verification_summary: str | None = None,
+        artifact: tuple[str, str, Path, str] | None = None,
+    ) -> dict[str, Any]:
+        if new_state not in ("generated", "applied", "verifying", "verified", "failed", "superseded"):
+            raise EngineError("invalid_remediation_state", f"Unsupported remediation state: {new_state}")
+        timestamp = utc_now()
+        artifact_record = None
+        with self.transaction() as connection:
+            changed = connection.execute(
+                """
+                UPDATE remediation_records SET state=?, verification_summary=COALESCE(?, verification_summary), updated_at=?
+                WHERE id=? AND version=? AND state=?
+                """,
+                (new_state, verification_summary, timestamp, record_id, expected_version, expected_state),
+            ).rowcount
+            if not changed:
+                row = connection.execute("SELECT version, state FROM remediation_records WHERE id=?", (record_id,)).fetchone()
+                if row is None:
+                    raise EngineError("remediation_not_found", f"Remediation record not found: {record_id}")
+                raise EngineError(
+                    "remediation_state_conflict",
+                    "The remediation version or state changed before this operation.",
+                    {"expectedVersion": expected_version, "expectedState": expected_state, "actualVersion": row["version"], "actualState": row["state"]},
+                )
+            if artifact is not None:
+                artifact_record = self._register_artifact(connection, *artifact)
+        result = self.get_remediation_record(record_id)
+        if artifact_record is not None:
+            result["_artifact"] = artifact_record
+        return result
+
+    @staticmethod
+    def _triage_assessment(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": row["id"], "occurrenceId": row["occurrence_id"], "inputId": row["input_id"],
+            "sourceType": row["source_type"], "status": row["status"],
+            "intake": json.loads(row["intake_json"]),
+            "result": None if row["result_json"] is None else json.loads(row["result_json"]),
+            "resultDigest": row["result_digest"],
+            "intakeArtifactPath": row["intake_artifact_path"],
+            "resultArtifactPath": row["result_artifact_path"],
+            "artifactPath": row["result_artifact_path"] or row["intake_artifact_path"],
+            "createdAt": row["created_at"], "updatedAt": row["updated_at"],
+        }
+
+    def create_triage_assessment(
+        self, assessment_id: str, intake: dict[str, Any], occurrence_id: str | None, artifact_path: str
+    ) -> dict[str, Any]:
+        timestamp = utc_now()
+        with self.transaction() as connection:
+            if occurrence_id is not None and connection.execute(
+                "SELECT 1 FROM finding_occurrences WHERE id=?", (occurrence_id,)
+            ).fetchone() is None:
+                raise EngineError("finding_not_found", f"Finding occurrence not found: {occurrence_id}")
+            connection.execute(
+                """
+                INSERT INTO triage_assessments(
+                    id, occurrence_id, input_id, source_type, status, intake_json,
+                    intake_artifact_path, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)
+                """,
+                (
+                    assessment_id, occurrence_id, intake["inputId"], intake["sourceType"],
+                    json.dumps(intake, separators=(",", ":"), ensure_ascii=False), artifact_path, timestamp, timestamp,
+                ),
+            )
+        return self.get_triage_assessment(assessment_id)
+
+    def get_triage_assessment(self, assessment_id: str) -> dict[str, Any]:
+        connection = self._connect()
+        try:
+            row = connection.execute("SELECT * FROM triage_assessments WHERE id=?", (assessment_id,)).fetchone()
+            if row is None:
+                raise EngineError("triage_assessment_not_found", f"Triage assessment not found: {assessment_id}")
+            return self._triage_assessment(row)
+        finally:
+            connection.close()
+
+    def complete_triage_assessment(
+        self, assessment_id: str, result: dict[str, Any], result_digest: str, artifact_path: str,
+        *, artifact: tuple[str, str, Path, str] | None = None,
+    ) -> dict[str, Any]:
+        timestamp = utc_now()
+        artifact_record = None
+        with self.transaction() as connection:
+            changed = connection.execute(
+                """
+                UPDATE triage_assessments SET status='completed', result_json=?, result_digest=?,
+                    result_artifact_path=?, updated_at=?
+                WHERE id=? AND status='pending'
+                """,
+                (
+                    json.dumps(result, separators=(",", ":"), ensure_ascii=False), result_digest,
+                    artifact_path, timestamp, assessment_id,
+                ),
+            ).rowcount
+            if not changed:
+                row = connection.execute("SELECT status FROM triage_assessments WHERE id=?", (assessment_id,)).fetchone()
+                if row is None:
+                    raise EngineError("triage_assessment_not_found", f"Triage assessment not found: {assessment_id}")
+                raise EngineError("triage_assessment_immutable", f"Triage assessment is already {row['status']}.")
+            if artifact is not None:
+                artifact_record = self._register_artifact(connection, *artifact)
+        completed = self.get_triage_assessment(assessment_id)
+        if artifact_record is not None:
+            completed["_artifact"] = artifact_record
+        return completed
+
     def save_hardening(self, scan_id: str, title: str, summary: str, artifact_path: Path) -> dict[str, Any]:
         proposal_id = stable_id("hard", scan_id)
         timestamp = utc_now()
@@ -1491,9 +1791,8 @@ class Workbench:
         return {"id": export_id, "scanId": scan_id, "format": format_name, "path": str(path), "sha256": digest, "createdAt": timestamp}
 
     def save_tracking_handoff(
-        self, occurrence_id: str, provider: str, destination: str, payload_path: Path
+        self, record_id: str, occurrence_id: str, provider: str, destination: str, payload_path: Path
     ) -> dict[str, Any]:
-        record_id = random_id("track")
         digest = sha256_file(payload_path)
         timestamp = utc_now()
         with self.transaction() as connection:
@@ -1506,16 +1805,73 @@ class Workbench:
                 """
                 INSERT INTO tracking_records(
                     id, occurrence_id, provider, destination, external_id, external_url,
-                    payload_sha256, status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, NULL, NULL, ?, 'prepared', ?, ?)
+                    payload_sha256, payload_artifact_path, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, 'prepared', ?, ?)
                 """,
-                (record_id, occurrence_id, provider, destination, digest, timestamp, timestamp),
+                (record_id, occurrence_id, provider, destination, digest, str(payload_path), timestamp, timestamp),
             )
         return {
             "id": record_id, "occurrenceId": occurrence_id, "provider": provider,
             "destination": destination, "payloadPath": str(payload_path), "payloadSha256": digest,
             "status": "prepared", "createdAt": timestamp, "updatedAt": timestamp,
         }
+
+    def get_tracking_record(self, record_id: str) -> dict[str, Any]:
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                """
+                SELECT t.*, o.scan_id, o.finding_id FROM tracking_records t
+                JOIN finding_occurrences o ON o.id=t.occurrence_id WHERE t.id=?
+                """,
+                (record_id,),
+            ).fetchone()
+            if row is None:
+                raise EngineError("tracking_record_not_found", f"Tracking record not found: {record_id}")
+            return dict(row)
+        finally:
+            connection.close()
+
+    def record_tracking_result(
+        self,
+        record_id: str,
+        payload_sha256: str,
+        status: str,
+        external_id: str | None,
+        external_url: str | None,
+        readback_digest: str,
+        readback_artifact_path: str,
+        *, artifact: tuple[str, str, Path, str] | None = None,
+    ) -> dict[str, Any]:
+        timestamp = utc_now()
+        artifact_record = None
+        with self.transaction() as connection:
+            changed = connection.execute(
+                """
+                UPDATE tracking_records SET status=?, external_id=?, external_url=?,
+                    readback_digest=?, readback_artifact_path=?, updated_at=?
+                WHERE id=? AND status='prepared' AND payload_sha256=?
+                """,
+                (
+                    status, external_id, external_url, readback_digest, readback_artifact_path,
+                    timestamp, record_id, payload_sha256,
+                ),
+            ).rowcount
+            if not changed:
+                row = connection.execute(
+                    "SELECT status, payload_sha256 FROM tracking_records WHERE id=?", (record_id,)
+                ).fetchone()
+                if row is None:
+                    raise EngineError("tracking_record_not_found", f"Tracking record not found: {record_id}")
+                if row["payload_sha256"] != payload_sha256:
+                    raise EngineError("tracking_payload_changed", "The approved tracking payload digest does not match.")
+                raise EngineError("tracking_record_immutable", f"Tracking record is already {row['status']}.")
+            if artifact is not None:
+                artifact_record = self._register_artifact(connection, *artifact)
+        completed = self.get_tracking_record(record_id)
+        if artifact_record is not None:
+            completed["_artifact"] = artifact_record
+        return completed
 
     def cleanup_scan(self, scan_id: str) -> dict[str, Any]:
         scan = self.get_scan(scan_id)

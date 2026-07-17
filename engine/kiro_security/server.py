@@ -9,7 +9,7 @@ from typing import Any
 
 from .constants import PROTOCOL_VERSION
 from .errors import EngineError
-from .protocol import MAX_MESSAGE_BYTES, reject_non_finite, validate_method, validate_protocol_version
+from .protocol import MAX_MESSAGE_BYTES, reject_non_finite, validate_method, validate_protocol_version, validate_request_envelope, validate_request_id
 from .service import SecurityService
 
 
@@ -33,6 +33,8 @@ class RpcServer:
     def _error_code(error: EngineError) -> int:
         if error.code == "method_not_found":
             return -32601
+        if error.code == "invalid_request":
+            return -32600
         if error.code in {"invalid_params", "invalid_argument", "invalid_path", "invalid_git_ref"}:
             return -32602
         if error.code == "protocol_version_mismatch":
@@ -42,13 +44,12 @@ class RpcServer:
     def handle(self, request: Any) -> bool:
         request_id: Any = None
         try:
-            if not isinstance(request, dict):
-                raise EngineError("invalid_request", "RPC request must be an object.")
-            if request.get("jsonrpc") != "2.0":
-                raise EngineError("invalid_request", "jsonrpc must be '2.0'.")
-            request_id = request.get("id")
-            if request_id is None:
-                raise EngineError("invalid_request", "Requests must include an id.")
+            if isinstance(request, dict):
+                candidate_id = request.get("id")
+                if isinstance(candidate_id, int) and not isinstance(candidate_id, bool):
+                    request_id = candidate_id
+            request = validate_request_envelope(request)
+            request_id = validate_request_id(request.get("id"))
             method = request.get("method")
             if not isinstance(method, str) or not method:
                 raise EngineError("invalid_request", "method must be a non-empty string.")

@@ -16,7 +16,7 @@ Kiro Security Power는 다음 사용자 경험을 제공하는 것을 목적으�
 
 1. 사용자가 Kiro에 VSIX를 설치한다.
 2. 프로젝트 또는 Git 저장소를 연다.
-3. Kiro Security 패널에서 Standard, Deep 또는 Diff Scan을 시작한다.
+3. Kiro Security 패널에서 deterministic Fast Scan을 시작하거나 Kiro Agent로 Standard, Deep 또는 Diff model scan을 시작한다.
 4. 스캔 진행 상황과 phase를 실시간으로 확인한다.
 5. 발견된 finding을 파일과 정확한 line에 연결해 검토한다.
 6. Problems, Code Action, Status Bar 등 IDE 기본 기능에서 finding을 확인한다.
@@ -113,7 +113,7 @@ Extension Host는 versioned RPC를 통해 Python engine과 통신한다.
 
 분석 가능한 파일이 없거나 coverage가 불완전한 경우 scan을 `complete`로 표시하지 않는다.
 
-Deep Scan은 모델 worker가 실행되지 않았는데 Standard Scan 결과로 조용히 대체하지 않는다.
+Model Scan은 worker가 실행되지 않았는데 Fast Scan 결과로 조용히 대체하지 않는다.
 
 ### 3.6 공개 API만 사용
 
@@ -134,7 +134,7 @@ Kiro 확장은 VS Code 호환 공개 API만 사용한다.
 
 ### 4.1 지원 scan mode
 
-#### Standard Scan
+#### Fast Scan
 
 빠른 repository 또는 scoped-path 보안 검사다.
 
@@ -145,6 +145,10 @@ Kiro 확장은 VS Code 호환 공개 API만 사용한다.
 * 인증 및 권한 검사 누락 탐지
 * 빠른 초기 triage
 * IDE 내 반복 사용
+
+#### Standard Scan
+
+Kiro Agent의 단일 six-worker discovery round와 공통 model tail을 사용하는 repository 또는 scoped-path 검사다. Deep과 같은 attestation, semantic merge, validation, attack-path, writeup, hardening, strict finalization 계약을 사용하지만 첫 merge에서 saturated로 닫힌다.
 
 #### Deep Scan
 
@@ -164,7 +168,7 @@ Kiro Agent의 모델 기반 독립 worker를 사용하는 반복적 보안 분�
 
 #### Diff Scan
 
-Git 변경 범위를 대상으로 수행하는 보안 검사다.
+Git 변경 범위를 대상으로 Kiro Agent가 수행하는 단일-round model 검사다. Immutable assignment에는 bounded hunk와 deleted path/line, rename hint, 그리고 security 의미가 확정되지 않은 same-directory supporting sibling path가 포함된다.
 
 대상 예:
 
@@ -445,9 +449,15 @@ security_get_finding
 security_validate_finding
 security_triage_finding
 security_create_remediation
+security_prepare_remediation_patch
+security_apply_remediation_patch
+security_verify_remediation_patch
+security_create_triage_intake
+security_submit_triage_assessment
 security_create_hardening_proposal
 security_create_threat_model
 security_create_tracking_handoff
+security_record_tracking_result
 security_export_report
 ```
 
@@ -455,11 +465,11 @@ Deep orchestration 도구:
 
 ```text
 security_deep_get_status
-security_deep_get_worker_assignment
+security_deep_claim_worker
 security_deep_submit_worker_result
 security_deep_retry_worker
-security_deep_get_merge_assignment
-security_deep_submit_merge_result
+security_deep_claim_merge
+security_deep_submit_merge
 security_deep_get_tail_assignment
 security_deep_submit_tail_result
 security_deep_retry_writeup
@@ -570,9 +580,9 @@ Resume은 새로운 scan을 생성하는 것이 아니라 기존 durable scan을
 
 ---
 
-## 8. Standard Scan 설계
+## 8. Fast Scan 설계
 
-Standard Scan은 빠른 로컬 분석을 목표로 한다.
+Fast Scan은 빠른 로컬 deterministic 분석을 목표로 한다. Engine wire에서는 `mode: standard`, `analysisProfile: fast`를 사용하지만 Standard model workflow와 동일한 보증으로 표현하지 않는다.
 
 Workflow:
 
@@ -589,15 +599,15 @@ Preflight
 → report 및 exports
 ```
 
-Standard Scan은 다음 경우에 적합하다.
+Fast Scan은 다음 경우에 적합하다.
 
 * 개발 중 빠른 검사
 * CI 이전 확인
 * 명확한 위험 API 검사
 * 변경 전 baseline
-* Deep Scan 이전 초기 triage
+* model scan 이전 초기 triage
 
-Standard 결과는 완전한 모델 기반 보안 감사로 표현하지 않는다.
+Fast 결과는 완전한 모델 기반 보안 감사로 표현하지 않는다. Standard와 Diff는 Kiro Agent가 `analysisProfile: model`로 시작하고, Deep과 같은 worker/merge/tail 계약을 한 discovery round에 재사용한다.
 
 ---
 
@@ -831,9 +841,11 @@ Reportable finding마다 전용 writeup assignment를 생성한다.
 출력:
 
 ```text
-findings/<finding-slug>/<finding-slug>.md
-findings/<finding-slug>/poc/
+findings/<kspf-id>/<kspf-id>.md
+findings/<kspf-id>/poc/
 ```
+
+현재 safe slug는 stable `kspf_` finding ID에서 engine이 파생하며 모델이 임의 경로나 slug를 지정하지 않는다.
 
 서로 다른 finding에 동일한 delegation ID를 재사용하지 않는다.
 
@@ -848,9 +860,9 @@ findings/<finding-slug>/poc/
 ```text
 hardening/hardening.md
 hardening/hardening.json
-hardening/diagrams/
-hardening/proposals/
 ```
+
+JSON이 normalized source이고 Markdown은 deterministic projection이다. Diagram source가 제출되면 bounded structured field로 보존되며 별도 디렉터리 suite를 필수 산출물로 주장하지 않는다.
 
 Hardening은 개별 patch만 나열하지 않고 다음을 다룬다.
 
@@ -1308,6 +1320,7 @@ Telemetry는 기본 비활성화한다.
 ### Integration
 
 * command → engine → SQLite → finding → Webview
+* Fast Scan
 * Standard Scan
 * Deep Scan
 * Diff Scan
@@ -1416,7 +1429,7 @@ Kiro Security Power는 권한이 확보된 Codex Security 참조 구현으로부
 * report/export/diagnostics
 * source navigation
 
-단, 0.3.0은 사용자 요청에 따라 전체 테스트 suite를 생략하고 패키징됐다.
+현재 0.3.0 변경은 worktree에서 검증 중이며, 전체 suite와 실제 Kiro Desktop/VSIX 검증 전에는 패키징 완료로 간주하지 않는다.
 
 따라서 다음 사항은 별도 검증 대상이다.
 
@@ -1431,7 +1444,7 @@ Kiro Security Power는 권한이 확보된 Codex Security 참조 구현으로부
 * 전체 regression test
 * Kiro desktop UI smoke test
 
-0.3.0의 Deep 설계는 목표 구조에 맞게 변경됐지만, 모든 runtime 경로가 실제 Kiro에서 검증됐다고 주장하지 않는다.
+0.3.0 구현은 Fast/model profile 분리, Deep 및 공통 model tail, repository context, strict canonical finalization을 포함한다. 저장 regression과 로컬 smoke는 구현 계약을 검증하지만, 실제 Kiro delegated multi-round 실행과 UI 상호작용이 검증됐다고 주장하지 않는다.
 
 ---
 
@@ -1442,7 +1455,7 @@ Kiro Security Power는 권한이 확보된 Codex Security 참조 구현으로부
 * 실제 설치 가능한 VSIX
 * Activity Bar와 Security Webview
 * 실제 engine과 SQLite 연결
-* Standard, Deep, Diff lifecycle
+* Fast, Standard, Deep, Diff lifecycle
 * progress, cancellation, recovery, resume
 * finding source navigation
 * Problems diagnostics
@@ -1467,7 +1480,7 @@ Kiro Security Power는 권한이 확보된 Codex Security 참조 구현으로부
 * fixture 기반 production UI
 * scan 버튼과 engine이 연결되지 않음
 * 모델 worker 없이 Deep 완료
-* Standard 결과를 Deep으로 표시
+* Fast 결과를 Standard, Diff 또는 Deep으로 표시
 * 분석 파일 0개인데 coverage complete 표시
 * 결과가 IDE에 나타나지 않음
 * VSIX 미생성
@@ -1491,7 +1504,9 @@ IDE-native security workflow
 + Agent와 VSIX의 단일 상태 공유
 ```
 
-Standard Scan은 빠른 로컬 피드백을 제공한다.
+Fast Scan은 빠른 deterministic 로컬 피드백을 제공한다.
+
+Standard와 Diff Scan은 Kiro Agent의 단일 six-worker round와 공통 model tail을 사용한다.
 
 Deep Scan은 독립 모델 worker와 coverage 증명을 통해 더 높은 검토 폭과 신뢰도를 목표로 한다.
 

@@ -43,6 +43,10 @@ test("RPC envelope validation rejects version mismatches and malformed notificat
   assert.equal(isRpcEnvelope({ jsonrpc: "2.0", protocolVersion: "0.9", id: 1, result: {} }), false);
   assert.equal(isRpcEnvelope({ jsonrpc: "2.0", protocolVersion: PROTOCOL_VERSION, method: "unknown.event", params: {} }), false);
   assert.equal(isRpcEnvelope({ jsonrpc: "2.0", protocolVersion: PROTOCOL_VERSION, method: "scan.progress", params: [] }), false);
+  assert.equal(isRpcEnvelope({ jsonrpc: "2.0", protocolVersion: PROTOCOL_VERSION, method: "scan.integrityIssue", params: {} }), true);
+  assert.equal(isRpcEnvelope({ jsonrpc: "2.0", protocolVersion: PROTOCOL_VERSION, id: 1, result: {}, error: { code: -32000, message: "bad" } }), false);
+  assert.equal(isRpcEnvelope({ jsonrpc: "2.0", protocolVersion: PROTOCOL_VERSION, method: "scan.progress", params: {}, id: 1 }), false);
+  assert.equal(isRpcEnvelope({ jsonrpc: "2.0", protocolVersion: PROTOCOL_VERSION, id: null, error: { code: -32000, message: "bad" } }), false);
 });
 
 test("webview messages are allowlisted and bounded", () => {

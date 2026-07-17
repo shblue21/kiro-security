@@ -82,20 +82,21 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "security_start_scan",
-        "description": "Start a Standard, Deep, or Git-diff repository security scan. Deep requires the same truthful modelId/runtime host attestation used by worker claims.",
+        "description": "Start a model Standard, Deep, or Git-diff scan. Agent starts require analysisProfile=model and truthful model/runtime host attestation; VSIX Fast is separate.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "workspaceRoot": {"type": "string", "description": "Optional. Defaults to the workspace bound by the VSIX installer."},
                 "mode": {"type": "string", "enum": ["standard", "deep", "diff"]},
+                "analysisProfile": {"type": "string", "const": "model"},
                 "scope": {"type": "string", "default": "."},
                 "diffTargetKind": {"type": "string", "enum": ["working_tree", "commit", "range"]},
                 "diffBaseRevision": {"type": "string"},
                 "diffHeadRevision": {"type": "string"},
-                "modelId": {"type": "string", "description": "Required for Deep host capability preflight."},
-                "runtime": {"type": "object", "description": "Required for Deep; uses the deep-worker/v2 claim runtime contract."},
+                "modelId": {"type": "string", "description": "Selected model identity for model workflow preflight."},
+                "runtime": {"type": "object", "description": "Truthful deep-worker/v2 host attestation reused by model claims."},
             },
-            "required": ["mode"],
+            "required": ["mode", "analysisProfile", "modelId", "runtime"],
             "additionalProperties": False,
         },
     },
@@ -276,8 +277,21 @@ TOOLS: list[dict[str, Any]] = [
     },
     {"name": "security_create_remediation", "description": "Create finding-specific remediation guidance in the shared artifact directory.", "inputSchema": _id_schema("occurrenceId")},
     {
+        "name": "security_prepare_remediation_patch",
+        "description": "Prepare and drift-check one bounded existing-file unified diff without changing the workspace.",
+        "inputSchema": {"type": "object", "properties": {
+            "workspaceRoot": {"type": "string"}, "occurrenceId": {"type": "string"},
+            "patch": {"type": "string", "maxLength": 600000}, "plan": {"type": "string", "maxLength": 12000},
+            "verificationPlan": {"type": "array", "minItems": 1, "maxItems": 50, "items": {"type": "string", "maxLength": 2000}},
+        }, "required": ["occurrenceId", "patch", "plan", "verificationPlan"], "additionalProperties": False},
+    },
+    {"name": "security_apply_remediation_patch", "description": "Apply exactly one prepared patch after digest, revision, touched-file, and state revalidation.", "inputSchema": {"type": "object", "properties": {"workspaceRoot": {"type": "string"}, "remediationId": {"type": "string"}, "expectedVersion": {"type": "integer", "minimum": 1}}, "required": ["remediationId", "expectedVersion"], "additionalProperties": False}},
+    {"name": "security_verify_remediation_patch", "description": "Record a bounded Agent-submitted verification receipt; incomplete proof cannot become verified.", "inputSchema": {"type": "object", "properties": {"workspaceRoot": {"type": "string"}, "remediationId": {"type": "string"}, "expectedVersion": {"type": "integer", "minimum": 1}, "verification": {"type": "object"}}, "required": ["remediationId", "expectedVersion", "verification"], "additionalProperties": False}},
+    {"name": "security_create_triage_intake", "description": "Persist one bounded untrusted external finding intake without inventing scan finding fields.", "inputSchema": {"type": "object", "properties": {"workspaceRoot": {"type": "string"}, "occurrenceId": {"type": "string"}, "sourceType": {"type": "string", "enum": ["sarif", "cve", "advisory", "scanner_ticket", "bug_bounty", "codex_security_finding", "freeform", "unknown"]}, "inputId": {"type": "string", "maxLength": 512}, "input": {"type": "object"}}, "required": ["sourceType", "inputId", "input"], "additionalProperties": False}},
+    {"name": "security_submit_triage_assessment", "description": "Complete one pending intake with a static source/control/sink/boundary proof chain.", "inputSchema": {"type": "object", "properties": {"workspaceRoot": {"type": "string"}, "assessmentId": {"type": "string"}, "result": {"type": "object"}}, "required": ["assessmentId", "result"], "additionalProperties": False}},
+    {
         "name": "security_create_tracking_handoff",
-        "description": "Prepare an approval-ready manual, GitHub, Linear, or Jira tracking payload without writing to an external service.",
+        "description": "Seal an approved connector, destination, duplicate-search, visibility, and audience proof without an external write.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -286,11 +300,13 @@ TOOLS: list[dict[str, Any]] = [
                 "provider": {"type": "string", "enum": ["manual", "github", "linear", "jira"]},
                 "destination": {"type": "string", "maxLength": 512},
                 "stableLink": {"type": "string", "maxLength": 4096},
+                "trackingProof": {"type": "object"},
             },
-            "required": ["occurrenceId", "provider"],
+            "required": ["occurrenceId", "provider", "trackingProof"],
             "additionalProperties": False,
         },
     },
+    {"name": "security_record_tracking_result", "description": "Record sanitized same-connector readback for an approved handoff; this tool performs no provider network write.", "inputSchema": {"type": "object", "properties": {"workspaceRoot": {"type": "string"}, "recordId": {"type": "string"}, "payloadSha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "outcome": {"type": "string", "enum": ["created", "updated", "reused", "blocked", "failed", "uncertain"]}, "externalMutationPerformed": {"type": "boolean"}, "externalId": {"type": "string", "maxLength": 512}, "externalUrl": {"type": "string", "maxLength": 4096}, "reason": {"type": "string", "maxLength": 4000}, "approval": {"type": "object", "properties": {"approved": {"const": True}, "approvedPreviewDigest": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "approvedPayloadSha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "approvedBy": {"type": "string", "maxLength": 512}, "approvedAt": {"type": "string", "maxLength": 128}, "scope": {"type": "string", "maxLength": 2000}}, "required": ["approved", "approvedPreviewDigest", "approvedPayloadSha256", "approvedBy", "approvedAt", "scope"], "additionalProperties": False}, "readback": {"type": "object"}}, "required": ["recordId", "payloadSha256", "outcome", "externalMutationPerformed"], "additionalProperties": False}},
     {"name": "security_create_hardening_proposal", "description": "Create a structural hardening proposal for a scan.", "inputSchema": _id_schema("scanId")},
     {
         "name": "security_create_threat_model",
@@ -318,6 +334,23 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
 ]
+
+_TOOL_STRING_LIMITS = {
+    "workspaceRoot": 8192, "mode": 16, "analysisProfile": 16, "scope": 4096,
+    "diffTargetKind": 32, "diffBaseRevision": 256, "diffHeadRevision": 256,
+    "modelId": 256, "delegationId": 256, "scanId": 256, "workerId": 256,
+    "claimToken": 256, "threatModel": 200000, "summary": 20000,
+    "seedResearch": 200000, "dedupeReport": 200000, "reason": 4000,
+    "assignmentId": 256, "search": 200, "occurrenceId": 256, "findingId": 256,
+    "decision": 32, "sourceType": 64, "inputId": 512, "assessmentId": 256,
+    "patch": 600000, "plan": 12000, "remediationId": 256, "recordId": 256,
+    "payloadSha256": 64, "outcome": 32, "externalId": 512, "externalUrl": 4096,
+    "provider": 32, "destination": 8192, "stableLink": 4096, "format": 16,
+}
+for _tool in TOOLS:
+    for _name, _schema in _tool["inputSchema"].get("properties", {}).items():
+        if _schema.get("type") == "string" and _name in _TOOL_STRING_LIMITS:
+            _schema.setdefault("maxLength", _TOOL_STRING_LIMITS[_name])
 
 
 class McpServer:
@@ -433,15 +466,15 @@ class McpServer:
             if mode not in ("standard", "deep", "diff"):
                 raise ValueError("mode must be standard, deep, or diff.")
             scope = _bounded_string(params.get("scope") or ".", "scope")
-            request = {"mode": mode, "scope": scope}
-            if mode == "deep":
-                runtime = params.get("runtime")
-                if not isinstance(runtime, dict):
-                    raise ValueError("Deep start requires a host-attested runtime object.")
-                request.update({
-                    "modelId": _bounded_string(params.get("modelId"), "modelId", 256),
-                    "runtime": runtime,
-                })
+            if params.get("analysisProfile") != "model":
+                raise ValueError("Agent Standard, Diff, and Deep starts require analysisProfile=model.")
+            runtime = params.get("runtime")
+            if not isinstance(runtime, dict):
+                raise ValueError("Model scan start requires a host-attested runtime object.")
+            request = {
+                "mode": mode, "scope": scope, "analysisProfile": "model",
+                "modelId": _bounded_string(params.get("modelId"), "modelId", 256), "runtime": runtime,
+            }
             if mode == "diff":
                 kind = params.get("diffTargetKind") or "working_tree"
                 if kind not in ("working_tree", "commit", "range"):
@@ -574,6 +607,37 @@ class McpServer:
             )
         if name == "security_create_remediation":
             return service.create_remediation({"occurrenceId": _bounded_string(params.get("occurrenceId"), "occurrenceId", 256)})
+        if name == "security_prepare_remediation_patch":
+            return service.prepare_remediation_patch({
+                "occurrenceId": _bounded_string(params.get("occurrenceId"), "occurrenceId", 256),
+                "patch": _bounded_string(params.get("patch"), "patch", 600000),
+                "plan": _bounded_string(params.get("plan"), "plan", 12000),
+                "verificationPlan": params.get("verificationPlan"),
+            })
+        if name == "security_apply_remediation_patch":
+            return service.apply_remediation_patch({
+                "remediationId": _bounded_string(params.get("remediationId"), "remediationId", 256),
+                "expectedVersion": _integer(params.get("expectedVersion"), "expectedVersion", 0, 1, 2_147_483_647),
+            })
+        if name == "security_verify_remediation_patch":
+            return service.verify_remediation_patch({
+                "remediationId": _bounded_string(params.get("remediationId"), "remediationId", 256),
+                "expectedVersion": _integer(params.get("expectedVersion"), "expectedVersion", 0, 1, 2_147_483_647),
+                "verification": params.get("verification"),
+            })
+        if name == "security_create_triage_intake":
+            occurrence_id = params.get("occurrenceId")
+            return service.create_triage_intake({
+                "occurrenceId": None if occurrence_id is None else _bounded_string(occurrence_id, "occurrenceId", 256),
+                "sourceType": _bounded_string(params.get("sourceType"), "sourceType", 64),
+                "inputId": _bounded_string(params.get("inputId"), "inputId", 512),
+                "input": params.get("input"),
+            })
+        if name == "security_submit_triage_assessment":
+            return service.submit_triage_assessment({
+                "assessmentId": _bounded_string(params.get("assessmentId"), "assessmentId", 256),
+                "result": params.get("result"),
+            })
         if name == "security_create_tracking_handoff":
             provider = _bounded_string(params.get("provider"), "provider", 32)
             if provider not in ("manual", "github", "linear", "jira"):
@@ -588,8 +652,19 @@ class McpServer:
                     "provider": provider,
                     "destination": _bounded_string(destination, "destination", 512),
                     "stableLink": stable_link,
+                    "trackingProof": params.get("trackingProof"),
                 }
             )
+        if name == "security_record_tracking_result":
+            return service.record_tracking_result({
+                "recordId": _bounded_string(params.get("recordId"), "recordId", 256),
+                "payloadSha256": _bounded_string(params.get("payloadSha256"), "payloadSha256", 64),
+                "outcome": _bounded_string(params.get("outcome"), "outcome", 32),
+                "externalMutationPerformed": params.get("externalMutationPerformed"),
+                "externalId": params.get("externalId"), "externalUrl": params.get("externalUrl"),
+                "reason": params.get("reason"), "approval": params.get("approval"),
+                "readback": params.get("readback"),
+            })
         if name == "security_create_hardening_proposal":
             return service.create_hardening_proposal({"scanId": _bounded_string(params.get("scanId"), "scanId", 256)})
         if name == "security_create_threat_model":

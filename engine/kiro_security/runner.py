@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .attack_path import build_attack_path
-from .constants import ARTIFACT_KINDS, PHASES
+from .constants import ARTIFACT_KINDS, PHASES, is_model_scan
 from .coverage import coverage_row_id
 from .db import Workbench
 from .deep import DeepCoordinator
@@ -98,7 +98,15 @@ class ScanRunner:
     def _inventory_path(self, scan: dict[str, Any]) -> Path:
         return Path(scan["artifact_dir"]) / "inventory.json"
 
+    def _scan_limits(self, scan: dict[str, Any]) -> tuple[int, int]:
+        capabilities = scan.get("capabilities") or {}
+        return (
+            int(capabilities.get("maxFiles") or self.max_files),
+            int(capabilities.get("maxFileBytes") or self.max_file_bytes),
+        )
+
     def _build_inventory(self, scan: dict[str, Any], *, require_same_snapshot: bool = False) -> Inventory:
+        max_files, max_file_bytes = self._scan_limits(scan)
         inventory = build_inventory(
             self.workbench.workspace,
             mode=scan["mode"],
@@ -106,8 +114,9 @@ class ScanRunner:
             diff_target_kind=scan.get("diff_target_kind"),
             diff_base_revision=scan.get("diff_base_revision"),
             diff_head_revision=scan.get("diff_head_revision"),
-            max_files=self.max_files,
-            max_file_bytes=self.max_file_bytes,
+            max_files=max_files,
+            max_file_bytes=max_file_bytes,
+            include_security_surfaces=is_model_scan(scan),
         )
         if require_same_snapshot and scan.get("snapshot_digest") and inventory.snapshot_digest != scan["snapshot_digest"]:
             raise EngineError(
@@ -118,10 +127,10 @@ class ScanRunner:
         return inventory
 
     @staticmethod
-    def _inventory_data(inventory: Inventory) -> dict[str, Any]:
+    def _inventory_data(inventory: Inventory, *, include_diff_context_row: bool = False) -> dict[str, Any]:
         files = []
         for source in inventory.files:
-            surface = f"source_review:{source.language}"
+            surface = source.surface or f"source_review:{source.language}"
             product_area = source.relative_path.split("/", 1)[0] if "/" in source.relative_path else "."
             files.append({
                 "rowId": coverage_row_id(source.relative_path, surface),
@@ -129,8 +138,30 @@ class ScanRunner:
                 "language": source.language,
                 "surface": surface,
                 "size": source.size,
-                "runtimeRelevance": "Supported source selected for runtime security review.",
+                "runtimeRelevance": source.runtime_relevance or "Supported source selected for runtime security review.",
                 "productArea": product_area,
+                "deploymentSignificance": source.deployment_significance,
+                "entrypoint": None,
+                "privilegedBoundary": None,
+                "rootControl": None,
+                "seedAdvisoryAnchor": None,
+                "highImpactFamily": None,
+                "workShard": "all-workers",
+                "rankingReason": source.ranking_reason or f"Included in the canonical supported inventory as {source.language} source ({surface}).",
+                "deferredReason": None,
+                "excludedReason": None,
+            })
+        if include_diff_context_row and inventory.diff_context is not None:
+            path = "context/diff-context.json"
+            surface = "diff_review:bounded_patch"
+            files.append({
+                "rowId": coverage_row_id(path, surface),
+                "path": path,
+                "language": "diff",
+                "surface": surface,
+                "size": len(str(inventory.diff_context.get("patch") or "").encode("utf-8", "surrogatepass")),
+                "runtimeRelevance": "Bounded immutable Git patch selected for model Diff review.",
+                "productArea": ".",
                 "deploymentSignificance": None,
                 "entrypoint": None,
                 "privilegedBoundary": None,
@@ -138,7 +169,7 @@ class ScanRunner:
                 "seedAdvisoryAnchor": None,
                 "highImpactFamily": None,
                 "workShard": "all-workers",
-                "rankingReason": f"Included in the canonical supported inventory as {source.language} source ({surface}).",
+                "rankingReason": "The Diff workflow requires an explicit receipt for its immutable changed/deleted-line context.",
                 "deferredReason": None,
                 "excludedReason": None,
             })
@@ -151,7 +182,7 @@ class ScanRunner:
             normalized["surface"] = surface
             normalized["rowId"] = str(normalized.get("rowId") or coverage_row_id(path, surface))
             deferred.append(normalized)
-        return {
+        data = {
             "includePaths": inventory.include_paths,
             "excludePaths": inventory.exclude_paths,
             "deferred": deferred,
@@ -163,6 +194,13 @@ class ScanRunner:
             "supportedFileCount": len(files),
             "files": files,
         }
+        if inventory.diff_context is not None:
+            data["diffContext"] = {
+                "path": "context/diff-context.json",
+                "contextDigest": inventory.diff_context["contextDigest"],
+                "supportingPaths": [item["path"] for item in inventory.diff_context["supportingPaths"]],
+            }
+        return data
 
     def _progress(self, scan_id: str, completed: int, total: int, current: str, *, deep_pass: int | None = None) -> None:
         percent = 100.0 if total == 0 else (completed / total) * 100.0
@@ -269,6 +307,7 @@ class ScanRunner:
 
     def _phase_preflight(self, scan_id: str, *, require_same_snapshot: bool) -> None:
         scan = self.workbench.get_scan(scan_id)
+        max_files, max_file_bytes = self._scan_limits(scan)
         inventory = self._build_inventory(scan, require_same_snapshot=require_same_snapshot)
         self._check(scan_id)
         capabilities = {
@@ -278,17 +317,26 @@ class ScanRunner:
             "mode": scan["mode"],
             "diffReady": scan["mode"] != "diff" or inventory.git_available,
             "supportedFiles": len(inventory.files),
-            "maxFiles": self.max_files,
-            "maxFileBytes": self.max_file_bytes,
+            "maxFiles": max_files,
+            "maxFileBytes": max_file_bytes,
             "workspaceTrustedByHost": None,
         }
-        if scan["mode"] == "deep":
+        if is_model_scan(scan):
             requested = (scan.get("capabilities") or {}).get("deepHost") or {}
             capabilities["deepHost"] = self.deep.preflight_host(requested.get("modelId"), requested.get("runtime"))
+            capabilities["analysisProfile"] = "model"
+        else:
+            capabilities["analysisProfile"] = "fast"
         self.workbench.set_capabilities(scan_id, capabilities)
         self.workbench.set_scan_target(scan_id, revision=inventory.revision, snapshot_digest=inventory.snapshot_digest)
         inventory_path = self._inventory_path(scan)
-        write_json(inventory_path, self._inventory_data(inventory))
+        inventory_data = self._inventory_data(inventory, include_diff_context_row=is_model_scan(scan))
+        if inventory.diff_context is not None:
+            diff_path = Path(scan["artifact_dir"]) / "context" / "diff-context.json"
+            write_json(diff_path, inventory.diff_context)
+            diff_artifact = self.workbench.add_artifact(scan_id, "diffContext", diff_path, "application/json")
+            self._emit("artifact.created", {"scanId": scan_id, "artifact": diff_artifact})
+        write_json(inventory_path, inventory_data)
         artifact = self.workbench.add_artifact(scan_id, "inventory", inventory_path, "application/json")
         self._emit("artifact.created", {"scanId": scan_id, "artifact": artifact})
         self._progress(scan_id, len(inventory.files), len(inventory.files), "preflight inventory")
@@ -298,13 +346,13 @@ class ScanRunner:
     def _phase_threat_model(self, scan_id: str) -> None:
         scan = self.workbench.get_scan(scan_id)
         inventory = self._build_inventory(scan, require_same_snapshot=True)
-        if scan["mode"] == "deep":
+        if is_model_scan(scan):
             context = write_security_context(self.workbench.workspace, scan, inventory)
             inventory_path = self._inventory_path(scan)
             inventory_data = (
                 json.loads(inventory_path.read_text(encoding="utf-8"))
                 if inventory_path.exists()
-                else self._inventory_data(inventory)
+                else self._inventory_data(inventory, include_diff_context_row=is_model_scan(scan))
             )
             row_policy_refs = context.pop("rowPolicyRefs")
             inventory_data["securityContext"] = context
@@ -319,6 +367,13 @@ class ScanRunner:
                     "policyRefs": refs.get("securityPolicies") or [],
                     "guidanceRefs": refs.get("securityGuidance") or [],
                 })
+                diff_context = inventory_data.get("diffContext") or {}
+                if diff_context:
+                    row.update({
+                        "diffContextPath": diff_context.get("path"),
+                        "diffContextDigest": diff_context.get("contextDigest"),
+                        "diffSupportingPaths": diff_context.get("supportingPaths") or [],
+                    })
             write_json(inventory_path, inventory_data)
             artifacts = (
                 ("inventory", inventory_path, "application/json"),
@@ -340,12 +395,12 @@ class ScanRunner:
     def _phase_discovery(self, scan_id: str) -> bool:
         scan = self.workbench.get_scan(scan_id)
         inventory = self._build_inventory(scan, require_same_snapshot=True)
-        if scan["mode"] == "deep":
+        if is_model_scan(scan):
             inventory_path = self._inventory_path(scan)
             inventory_data = (
                 json.loads(inventory_path.read_text(encoding="utf-8"))
                 if inventory_path.exists()
-                else self._inventory_data(inventory)
+                else self._inventory_data(inventory, include_diff_context_row=is_model_scan(scan))
             )
             status = self.deep.ensure(scan, inventory_data)
             canonical = self.deep.canonical_candidates(scan_id)
@@ -363,9 +418,9 @@ class ScanRunner:
                 )
                 self._log(
                     "info",
-                    "Deep discovery is awaiting Agent-orchestrated independent workers; no deterministic Standard fallback was run.",
+                    "Model discovery is awaiting Agent-orchestrated independent workers; no deterministic Fast fallback was run.",
                     scan_id=scan_id,
-                    code="deep_agent_handoff",
+                    code="model_agent_handoff",
                 )
                 return False
             for candidate in canonical:
@@ -380,7 +435,7 @@ class ScanRunner:
                 review_items_completed=len(inventory.files),
                 reportable_findings_count=len(canonical),
                 deep_review_pass=int(status.get("round", 1)),
-                message=f"Deep discovery {terminal_status} with {len(canonical)} canonical candidate(s)",
+                message=f"Model discovery {terminal_status} with {len(canonical)} canonical candidate(s)",
             )
             return True
 
@@ -407,12 +462,12 @@ class ScanRunner:
 
     def _phase_validation(self, scan_id: str) -> bool:
         scan = self.workbench.get_scan(scan_id)
-        if scan["mode"] == "deep":
+        if is_model_scan(scan):
             complete = self.tail.prepare_validation(scan_id)
             tail = self.tail.status(scan_id)
             self.workbench.update_progress(
                 scan_id, phase_percent=95 if complete else 10,
-                message="Deep model validation complete" if complete else f"Awaiting Deep tail {tail['activeKind']} assignment",
+                message="Model validation complete" if complete else f"Awaiting model tail {tail['activeKind']} assignment",
             )
             return complete
         summaries = self.workbench.list_findings(scan_id)
@@ -430,12 +485,12 @@ class ScanRunner:
 
     def _phase_attack_path(self, scan_id: str) -> bool:
         scan = self.workbench.get_scan(scan_id)
-        if scan["mode"] == "deep":
+        if is_model_scan(scan):
             complete = self.tail.prepare_attack_paths_and_writeups(scan_id)
             tail = self.tail.status(scan_id)
             self.workbench.update_progress(
                 scan_id, phase_percent=95 if complete else 10,
-                message="Deep attack paths and writeups complete" if complete else f"Awaiting Deep tail {tail['activeKind']} assignment",
+                message="Model attack paths and writeups complete" if complete else f"Awaiting model tail {tail['activeKind']} assignment",
             )
             return complete
         summaries = self.workbench.list_findings(scan_id)
@@ -457,15 +512,18 @@ class ScanRunner:
         inventory_path = self._inventory_path(scan)
         if not inventory_path.exists():
             inventory = self._build_inventory(scan, require_same_snapshot=True)
-            inventory_data = self._inventory_data(inventory)
+            inventory_data = self._inventory_data(inventory, include_diff_context_row=is_model_scan(scan))
             write_json(inventory_path, inventory_data)
         else:
             inventory_data = json.loads(inventory_path.read_text(encoding="utf-8"))
         inventory = self._build_inventory(scan, require_same_snapshot=True)
-        if scan["mode"] == "deep":
+        if is_model_scan(scan):
+            state = self.workbench.get_deep_scan_state(scan_id)
+            if state is not None:
+                self.deep._validate_security_context(scan, state["worklist"])
             if not self.tail.prepare_hardening(scan_id):
                 tail = self.tail.status(scan_id)
-                self.workbench.update_progress(scan_id, phase_percent=10, message=f"Awaiting Deep tail {tail['activeKind']} assignment")
+                self.workbench.update_progress(scan_id, phase_percent=10, message=f"Awaiting model tail {tail['activeKind']} assignment")
                 return None
             threat_model = self.tail.threat_model(scan_id)
             writeup_paths = self.tail.writeup_paths(scan_id)

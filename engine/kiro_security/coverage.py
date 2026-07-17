@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .errors import EngineError
+from .constants import is_model_scan
 from .security import sha256_bytes, stable_id
 
 COVERAGE_DISPOSITIONS = ("reportable", "suppressed", "not_applicable", "deferred")
@@ -154,7 +155,7 @@ def expected_coverage_frontier(
     """
 
     supported: dict[str, dict[str, Any]] = {}
-    if scan["mode"] == "deep":
+    if is_model_scan(scan):
         state = workbench.get_deep_scan_state(scan["id"])
         if state and state.get("worklist"):
             for item in state["worklist"]:

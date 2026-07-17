@@ -21,6 +21,7 @@ const EVENT_NAMES = new Set<EngineEventName>([
   "scan.completed",
   "scan.cancelled",
   "scan.failed",
+  "scan.integrityIssue",
   "engine.log",
 ]);
 const TRIAGE = new Set<TriageDecision>(["open", "accepted_risk", "false_positive", "already_fixed", "wont_fix"]);
@@ -29,6 +30,11 @@ const TRACKING = new Set<TrackingProvider>(["manual", "github", "linear", "jira"
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+  const names = new Set(allowed);
+  return Object.keys(value).every((name) => names.has(name));
 }
 
 function boundedString(value: unknown, max = 4096): value is string {
@@ -40,12 +46,31 @@ export function isRpcEnvelope(value: unknown): value is RpcEnvelope {
     return false;
   }
   if (typeof value.method === "string") {
-    return EVENT_NAMES.has(value.method as EngineEventName) && isObject(value.params);
+    return hasOnlyKeys(value, ["jsonrpc", "protocolVersion", "method", "params"])
+      && EVENT_NAMES.has(value.method as EngineEventName)
+      && isObject(value.params);
   }
-  if (!(typeof value.id === "number" || value.id === null)) {
+  const integerId = typeof value.id === "number" && Number.isInteger(value.id);
+  if (!(integerId || value.id === null)) {
     return false;
   }
-  return "result" in value || (isObject(value.error) && typeof value.error.code === "number" && typeof value.error.message === "string");
+  if ("result" in value) {
+    return integerId
+      && !("error" in value)
+      && hasOnlyKeys(value, ["jsonrpc", "protocolVersion", "id", "result"]);
+  }
+  if (!isObject(value.error)
+    || typeof value.error.code !== "number"
+    || !Number.isInteger(value.error.code)
+    || typeof value.error.message !== "string"
+    || (value.error.data !== undefined && !isObject(value.error.data))) {
+    return false;
+  }
+  if (value.id === null && value.error.code !== -32700 && value.error.code !== -32600) {
+    return false;
+  }
+  return hasOnlyKeys(value, ["jsonrpc", "protocolVersion", "id", "error"])
+    && hasOnlyKeys(value.error, ["code", "message", "data"]);
 }
 
 export function validateWebviewMessage(value: unknown): WebviewMessage | undefined {
@@ -80,6 +105,10 @@ export function validateWebviewMessage(value: unknown): WebviewMessage | undefin
         mode: value.mode as Extract<WebviewMessage, { type: "startScan" }>["mode"],
         scope: value.scope,
       };
+      if (value.analysisProfile !== undefined) {
+        if (value.analysisProfile !== "fast" && value.analysisProfile !== "model") return undefined;
+        message.analysisProfile = value.analysisProfile;
+      }
       if (value.diffTargetKind !== undefined) {
         if (!(["working_tree", "commit", "range"] as const).includes(value.diffTargetKind as never)) return undefined;
         message.diffTargetKind = value.diffTargetKind as "working_tree" | "commit" | "range";

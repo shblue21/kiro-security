@@ -8,19 +8,31 @@
   "properties": {
     "documentType": { "const": "kiro-security-power.findings" },
     "schemaVersion": { "const": "1.0" },
-    "scanId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "scanId": { "$ref": "#/$defs/scanId" },
     "findings": {
       "type": "array",
       "items": { "$ref": "#/$defs/finding" }
     }
   },
   "$defs": {
+    "scanId": { "type": "string", "pattern": "^scan_[a-f0-9]{24}$" },
+    "findingId": { "type": "string", "pattern": "^kspf_[a-f0-9]{24}$" },
+    "safeRelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)(?!.*\\x00).+$"
+    },
+    "stringList": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
     "location": {
       "type": "object",
       "additionalProperties": false,
       "required": ["path", "startLine"],
       "properties": {
-        "path": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "path": { "$ref": "#/$defs/safeRelativePath" },
         "startLine": { "type": "integer", "minimum": 1 },
         "endLine": { "type": "integer", "minimum": 1 },
         "role": { "type": "string", "maxLength": 128 }
@@ -34,13 +46,244 @@
         "id": { "type": "string" },
         "kind": { "type": "string" },
         "label": { "type": "string" },
-        "path": { "type": "string" },
+        "path": { "$ref": "#/$defs/safeRelativePath" },
         "startLine": { "type": "integer", "minimum": 1 },
         "endLine": { "type": "integer", "minimum": 1 },
         "language": { "type": ["string", "null"] },
         "role": { "type": ["string", "null"] },
         "code": { "type": "string" },
         "explanation": { "type": "string" }
+      }
+    },
+    "proofEvidence": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["path", "result"],
+      "properties": {
+        "path": { "$ref": "#/$defs/safeRelativePath" },
+        "result": { "type": "string", "minLength": 1 }
+      }
+    },
+    "deepProofEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "result"],
+      "properties": {
+        "path": { "$ref": "#/$defs/safeRelativePath" },
+        "result": { "type": "string", "minLength": 1 }
+      }
+    },
+    "standardValidation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "method", "rationale", "evidence"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^val_[a-f0-9]{24}$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "status": { "enum": ["validated", "rejected", "needs_review"] },
+        "method": { "type": "string", "minLength": 1 },
+        "rationale": { "type": "string", "minLength": 1 },
+        "evidence": { "type": "array", "items": { "$ref": "#/$defs/proofEvidence" } }
+      }
+    },
+    "deepValidation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "findingId", "status", "method", "rationale", "evidence", "counterevidence",
+        "crossFileTrace", "frameworkControls", "proofGaps", "tests", "dynamicValidationUnavailableReason"
+      ],
+      "properties": {
+        "id": { "type": "string", "pattern": "^val_[a-f0-9]{24}$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "findingId": { "$ref": "#/$defs/findingId" },
+        "status": { "enum": ["validated", "rejected", "needs_review"] },
+        "method": { "type": "string", "minLength": 1 },
+        "rationale": { "type": "string", "minLength": 1 },
+        "evidence": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/deepProofEvidence" } },
+        "counterevidence": { "$ref": "#/$defs/stringList" },
+        "crossFileTrace": { "$ref": "#/$defs/stringList" },
+        "frameworkControls": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+        "proofGaps": { "$ref": "#/$defs/stringList" },
+        "tests": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "result"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "result": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "dynamicValidationUnavailableReason": { "type": ["string", "null"] }
+      }
+    },
+    "attackStep": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "path": { "$ref": "#/$defs/safeRelativePath" }
+      }
+    },
+    "standardAttackPath": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["narrative", "path", "exploitability", "impact", "severityRationale"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^path_[a-f0-9]{24}$" },
+        "narrative": { "type": "string", "minLength": 1 },
+        "path": { "type": "array", "items": { "$ref": "#/$defs/attackStep" } },
+        "exploitability": { "type": "string", "minLength": 1 },
+        "impact": { "type": "string", "minLength": 1 },
+        "severityRationale": { "type": "string", "minLength": 1 }
+      }
+    },
+    "deepAttackPath": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "findingId", "narrative", "actor", "attackerPrerequisite", "entrypoint",
+        "attackerControlledSource", "rootControl", "controlBypass", "crossFilePath",
+        "privilegedSink", "impact", "exploitPreconditions", "counterevidence",
+        "residualUncertainty", "severity", "exploitability", "confidence"
+      ],
+      "properties": {
+        "id": { "type": "string", "pattern": "^path_[a-f0-9]{24}$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "path": { "type": "array", "items": { "$ref": "#/$defs/attackStep" } },
+        "severityRationale": { "type": "string", "minLength": 1 },
+        "findingId": { "$ref": "#/$defs/findingId" },
+        "narrative": { "type": "string", "minLength": 1 },
+        "actor": { "type": "string", "minLength": 1 },
+        "attackerPrerequisite": { "type": "string", "minLength": 1 },
+        "entrypoint": { "type": "string", "minLength": 1 },
+        "attackerControlledSource": { "type": "string", "minLength": 1 },
+        "rootControl": { "type": "string", "minLength": 1 },
+        "controlBypass": { "type": "string", "minLength": 1 },
+        "crossFilePath": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "step"],
+            "properties": {
+              "path": { "$ref": "#/$defs/safeRelativePath" },
+              "step": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "privilegedSink": { "type": "string", "minLength": 1 },
+        "impact": { "type": "string", "minLength": 1 },
+        "exploitPreconditions": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+        "counterevidence": { "$ref": "#/$defs/stringList" },
+        "residualUncertainty": { "type": "string", "minLength": 1 },
+        "severity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["level", "rationale"],
+          "properties": {
+            "level": { "enum": ["critical", "high", "medium", "low", "informational"] },
+            "rationale": { "type": "string", "minLength": 1 }
+          }
+        },
+        "exploitability": { "type": "string", "minLength": 1 },
+        "confidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["level", "rationale"],
+          "properties": {
+            "level": { "enum": ["high", "medium", "low"] },
+            "rationale": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "workerAttestation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status"],
+          "properties": { "status": { "const": "legacy_unverified" } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "authority", "contractVersion", "freshContext", "coordinatorHistoryInherited", "workerState"],
+          "properties": {
+            "status": { "const": "attested" },
+            "authority": { "const": "host" },
+            "contractVersion": { "const": "deep-worker/v2" },
+            "freshContext": { "const": true },
+            "coordinatorHistoryInherited": { "const": false },
+            "workerState": { "const": "completed_idle" }
+          }
+        }
+      ]
+    },
+    "deepWorkerProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceRef", "workerIndex", "workerId", "modelId", "attestation"],
+      "properties": {
+        "sourceRef": { "type": "string", "minLength": 1 },
+        "workerIndex": { "type": "integer", "minimum": 1, "maximum": 6 },
+        "workerId": { "type": "string", "minLength": 1 },
+        "delegationId": { "type": "string", "minLength": 1 },
+        "modelId": { "type": "string", "minLength": 1 },
+        "attestation": { "$ref": "#/$defs/workerAttestation" }
+      }
+    },
+    "deepProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["canonicalId", "round", "sourceRefs", "workers", "mergeRationale", "identityRationale", "remediationSubsumption"],
+      "properties": {
+        "canonicalId": { "type": "string", "minLength": 1 },
+        "round": { "type": "integer", "minimum": 1 },
+        "sourceRefs": { "$ref": "#/$defs/stringList" },
+        "workers": { "type": "array", "items": { "$ref": "#/$defs/deepWorkerProvenance" } },
+        "mergeRationale": { "type": "string", "minLength": 1 },
+        "identityRationale": { "type": "string", "minLength": 1 },
+        "remediationSubsumption": { "type": "string", "minLength": 1 }
+      }
+    },
+    "modelProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["modelId", "agentType", "reasoningEffort", "hostVersion", "delegationMode", "contractVersion"],
+      "properties": {
+        "modelId": { "type": "string", "minLength": 1 },
+        "agentType": { "type": "string", "minLength": 1 },
+        "reasoningEffort": { "type": "string", "minLength": 1 },
+        "hostVersion": { "type": "string", "minLength": 1 },
+        "delegationMode": { "type": "string", "minLength": 1 },
+        "contractVersion": { "type": "string", "minLength": 1 }
+      }
+    },
+    "tailProvenanceEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["assignmentId", "kind", "attempt", "modelProfile", "receiptDigest"],
+      "properties": {
+        "assignmentId": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["validation", "attack_path", "writeup"] },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "modelProfile": { "$ref": "#/$defs/modelProfile" },
+        "receiptDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    },
+    "deepTailProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "validation": { "$ref": "#/$defs/tailProvenanceEntry" },
+        "attack_path": { "$ref": "#/$defs/tailProvenanceEntry" },
+        "writeup": { "$ref": "#/$defs/tailProvenanceEntry" }
       }
     },
     "finding": {
@@ -51,8 +294,8 @@
         "severity", "confidence", "taxonomy", "locations", "remediation", "provenance"
       ],
       "properties": {
-        "findingId": { "type": "string", "minLength": 1 },
-        "occurrenceId": { "type": "string", "minLength": 1 },
+        "findingId": { "$ref": "#/$defs/findingId" },
+        "occurrenceId": { "type": "string", "pattern": "^occ_[a-f0-9]{24}$" },
         "ruleId": { "type": "string", "minLength": 1 },
         "identity": {
           "type": "object",
@@ -64,13 +307,26 @@
           }
         },
         "fingerprints": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["algorithm", "primary"],
-          "properties": {
-            "algorithm": { "enum": ["kiro-security/v1", "kiro-security/deep-v1"] },
-            "primary": { "type": "string", "pattern": "^kiro-security/(?:deep-)?v1:sha256:[a-f0-9]{64}$" }
-          }
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["algorithm", "primary"],
+              "properties": {
+                "algorithm": { "const": "kiro-security/v1" },
+                "primary": { "type": "string", "pattern": "^kiro-security/v1:sha256:[a-f0-9]{64}$" }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["algorithm", "primary"],
+              "properties": {
+                "algorithm": { "const": "kiro-security/deep-v1" },
+                "primary": { "type": "string", "pattern": "^kiro-security/deep-v1:sha256:[a-f0-9]{64}$" }
+              }
+            }
+          ]
         },
         "title": { "type": "string", "minLength": 1, "maxLength": 512 },
         "summary": { "type": "string", "minLength": 1, "maxLength": 8000 },
@@ -110,22 +366,67 @@
           "type": "object",
           "additionalProperties": false,
           "required": ["reportPath"],
-          "properties": { "reportPath": { "type": "string" } }
+          "properties": {
+            "reportPath": {
+              "type": "string",
+              "pattern": "^(?:writeups/kspf_[a-f0-9]{24}\\.md|findings/kspf_[a-f0-9]{24}/kspf_[a-f0-9]{24}\\.md)$"
+            }
+          }
         },
         "codeEvidence": { "type": "array", "items": { "$ref": "#/$defs/evidence" } },
-        "rootCause": { "type": ["object", "string"], "additionalProperties": true },
+        "rootCause": {
+          "anyOf": [
+            { "type": "string", "minLength": 1 },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["summary"],
+              "properties": {
+                "summary": { "type": "string", "minLength": 1 },
+                "evidenceRefs": { "type": "array", "items": { "type": "string" } }
+              }
+            }
+          ]
+        },
         "remediation": { "type": "string", "minLength": 1 },
-        "validation": { "type": ["object", "null"], "additionalProperties": true },
-        "attackPath": { "type": ["object", "null"], "additionalProperties": true },
+        "validation": {
+          "anyOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/standardValidation" },
+            { "$ref": "#/$defs/deepValidation" }
+          ]
+        },
+        "attackPath": {
+          "anyOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/standardAttackPath" },
+            { "$ref": "#/$defs/deepAttackPath" }
+          ]
+        },
         "remediationTests": { "type": "array", "items": { "type": "string" } },
         "preventiveControls": { "type": "array", "items": { "type": "string" } },
         "provenance": {
           "type": "object",
-          "additionalProperties": true,
+          "additionalProperties": false,
           "required": ["source"],
-          "properties": { "source": { "const": "kiro_security_power" } }
+          "properties": {
+            "source": { "const": "kiro_security_power" },
+            "engineVersion": { "type": "string", "minLength": 1 },
+            "deep": { "$ref": "#/$defs/deepProvenance" },
+            "deepTail": { "$ref": "#/$defs/deepTailProvenance" }
+          }
         },
-        "extensions": { "type": "object", "additionalProperties": true }
+        "extensions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["validationStatus", "triageStatus", "source", "sink"],
+          "properties": {
+            "validationStatus": { "enum": ["unvalidated", "validated", "rejected", "needs_review"] },
+            "triageStatus": { "enum": ["open", "accepted_risk", "false_positive", "already_fixed", "wont_fix"] },
+            "source": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/location" }] },
+            "sink": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/location" }] }
+          }
+        }
       }
     }
   }

@@ -297,17 +297,18 @@ export class SecurityController implements vscode.Disposable {
 
   async startScan(
     mode: ScanMode,
-    options: { scope?: string; diffTargetKind?: "working_tree" | "commit" | "range"; diffBaseRevision?: string; diffHeadRevision?: string } = {},
+    options: { scope?: string; analysisProfile?: "fast" | "model"; diffTargetKind?: "working_tree" | "commit" | "range"; diffBaseRevision?: string; diffHeadRevision?: string } = {},
   ): Promise<ScanRecord | undefined> {
     return this.userAction("Start scan", async () => {
-      if (mode === "deep") {
-        throw new Error("Deep scans must be started from Kiro Agent because the VSIX cannot provide host model/runtime attestation.");
+      if (mode === "deep" || mode === "diff" || options.analysisProfile === "model") {
+        throw new Error("Model Standard, Diff, and Deep scans must be started from Kiro Agent because the VSIX cannot provide host model/runtime attestation. Use Fast Scan for local deterministic pre-screening.");
       }
       const engine = await this.ensureEngine();
       const config = vscode.workspace.getConfiguration("kiroSecurity");
       const scope = this.validateScope(options.scope ?? config.get<string>("defaultScope", "."));
       const scan = await engine.request<ScanRecord>("start_scan", {
         mode,
+        analysisProfile: "fast",
         scope,
         diffTargetKind: mode === "diff" ? options.diffTargetKind ?? "working_tree" : undefined,
         diffBaseRevision: mode === "diff" ? this.validateGitRef(options.diffBaseRevision, "Base revision") : undefined,
@@ -443,35 +444,11 @@ export class SecurityController implements vscode.Disposable {
 
   async createTrackingHandoff(occurrenceId: string, provider?: TrackingProvider): Promise<void> {
     await this.userAction("Create tracking handoff", async () => {
-      const providerChoice = provider ? undefined : await vscode.window.showQuickPick(
-        [
-          { label: "Manual review", value: "manual" as TrackingProvider },
-          { label: "GitHub", value: "github" as TrackingProvider },
-          { label: "Linear", value: "linear" as TrackingProvider },
-          { label: "Jira", value: "jira" as TrackingProvider },
-        ],
-        { title: "Kiro Security: Tracking handoff provider", placeHolder: "No external write will be performed" },
+      const target = provider ? ` for ${provider}` : "";
+      await vscode.window.showInformationMessage(
+        `Start tracking${target} in Kiro Agent for finding ${occurrenceId}. The Agent must supply truthful connector identity, duplicate-search evidence, and approval for the exact generated preview; the VSIX cannot attest those facts.`,
+        { modal: true },
       );
-      const selectedProvider = provider ?? providerChoice?.value;
-      if (!selectedProvider) return;
-      const destination = selectedProvider === "manual"
-        ? "manual-review"
-        : await vscode.window.showInputBox({
-          title: `${selectedProvider} project or destination`,
-          prompt: "Recorded in the handoff payload only; no external service is contacted.",
-          value: "review-required",
-          validateInput: (value) => !value || value.length > 512 || value.includes("\0") ? "Enter a destination of at most 512 characters." : undefined,
-        });
-      if (!destination) return;
-      const record = await (await this.ensureEngine()).request<{ artifact: { path: string } }>("create_tracking_handoff", {
-        occurrenceId,
-        provider: selectedProvider,
-        destination,
-        stableLink: this.findingLink(occurrenceId).toString(true),
-      });
-      this.selectedOccurrenceId = occurrenceId;
-      await this.refresh();
-      await this.openTrustedEnginePath(record.artifact.path);
     });
   }
 

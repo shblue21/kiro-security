@@ -20,13 +20,13 @@ Kiro Security Power is the Agent workflow layer for the installed **Kiro Securit
 
 ## Operating contract
 
-1. Use `security_start_scan` with `standard`, `deep`, or `diff`; preserve the requested scope and target.
+1. Use VSIX Fast Scan only for deterministic heuristic pre-screening. Start model `standard`, `deep`, or `diff` through Kiro Agent with `analysisProfile: "model"`, the selected model identity, and truthful host runtime attestation.
 2. For Deep mode, follow `steering/deep-security-scan.md`: operate six independent model workers per round, submit exhaustive receipts, perform semantic merge, and repeat until a complete zero-novelty round or the explicit round-10 cap. Never substitute Standard output.
-3. For Standard/Diff, poll `security_get_scan` until `completed`, `cancelled`, or `failed`. For Deep, use `security_deep_get_status` until centralized validation resumes, then poll `security_get_scan`. Honor cooperative cancellation and interrupted/resumable state.
+3. Standard/Diff model discovery reuses one six-worker round, semantic merge, and the same durable model tail; Deep repeats six-worker rounds to zero novelty or its cap. Use `security_deep_get_status` and the worker/merge/tail tools for all model profiles, then poll `security_get_scan` for finalization. Honor cooperative cancellation and interrupted/resumable state.
 4. Read findings through `security_list_findings` and full evidence through `security_get_finding`.
-5. Treat discovery output as candidate evidence. Use `security_validate_finding` before representing a finding as verified.
+5. Treat discovery output as candidate evidence. For VSIX Fast findings, use `security_validate_finding` before representing a finding as verified. Model scans already use authoritative tail validation and attack-path proof; read it through `security_get_finding` and do not overwrite it with deterministic validation.
 6. Record user-directed dispositions through `security_triage_finding`; never silently suppress or relabel findings.
-7. Use `security_create_remediation`, `security_create_hardening_proposal`, and `security_create_tracking_handoff` for durable workflow records.
+7. Use remediation and tracking tools for durable workflow records. Use `security_create_hardening_proposal` only for Fast scans; model scans already materialize the immutable tail hardening portfolio.
 8. Use `security_export_report` for Markdown, JSON, CSV, or SARIF deliverables and report the exact returned path.
 9. Scans started by the Agent and VSIX remain mutually visible because both use the same SQLite workbench.
 

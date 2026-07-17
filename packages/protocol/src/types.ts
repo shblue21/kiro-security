@@ -153,6 +153,13 @@ export interface FindingDetail extends FindingSummary {
     rationale: string;
     evidence: unknown[];
     createdAt: string;
+    findingId?: string;
+    counterevidence?: string[];
+    crossFileTrace?: string[];
+    frameworkControls?: string[];
+    proofGaps?: string[];
+    tests?: Array<{ name: string; result: string }>;
+    dynamicValidationUnavailableReason?: string | null;
   };
   attackPath: null | {
     id: string;
@@ -161,8 +168,37 @@ export interface FindingDetail extends FindingSummary {
     exploitability: string;
     impact: string;
     severityRationale: string;
+    findingId?: string;
+    actor?: string;
+    attackerPrerequisite?: string;
+    entrypoint?: string;
+    attackerControlledSource?: string;
+    rootControl?: string;
+    controlBypass?: string;
+    crossFilePath?: Array<{ path: string; step: string }>;
+    privilegedSink?: string;
+    exploitPreconditions?: string[];
+    counterevidence?: string[];
+    residualUncertainty?: string;
+    severity?: { level: Severity; rationale: string };
+    confidence?: { level: Confidence; rationale: string };
   };
   triage: null | { decision: TriageDecision; note?: string | null; updatedAt: string };
+  triageAssessments: Array<{
+    id: string;
+    occurrenceId: string | null;
+    inputId: string;
+    sourceType: string;
+    status: string;
+    intake: Record<string, unknown>;
+    result: Record<string, unknown> | null;
+    resultDigest: string | null;
+    intakeArtifactPath: string;
+    resultArtifactPath: string | null;
+    artifactPath: string;
+    createdAt: string;
+    updatedAt: string;
+  }>;
   remediationRecords: Array<Record<string, unknown>>;
   trackingRecords: Array<Record<string, unknown>>;
   artifactLinks: ArtifactRecord[];
@@ -233,7 +269,7 @@ export interface EngineCapabilities {
   phases: ScanPhase[];
   exports: ExportFormat[];
   triageDecisions: TriageDecision[];
-  supports: Record<string, boolean>;
+  supports: Record<string, boolean | number>;
   workspaceRoot: string;
   stateDirectory: string;
   database: { path: string; schemaVersion: number; journalMode: string; integrity: string };
@@ -259,12 +295,19 @@ export interface RpcSuccess {
   result: unknown;
 }
 
-export interface RpcFailure {
-  jsonrpc: "2.0";
-  protocolVersion: typeof PROTOCOL_VERSION;
-  id: number | null;
-  error: { code: number; message: string; data?: Record<string, unknown> };
-}
+export type RpcFailure =
+  | {
+      jsonrpc: "2.0";
+      protocolVersion: typeof PROTOCOL_VERSION;
+      id: number;
+      error: { code: number; message: string; data?: Record<string, unknown> };
+    }
+  | {
+      jsonrpc: "2.0";
+      protocolVersion: typeof PROTOCOL_VERSION;
+      id: null;
+      error: { code: -32700 | -32600; message: string; data?: Record<string, unknown> };
+    };
 
 export interface RpcNotification {
   jsonrpc: "2.0";
@@ -285,13 +328,14 @@ export type EngineEventName =
   | "scan.completed"
   | "scan.cancelled"
   | "scan.failed"
+  | "scan.integrityIssue"
   | "engine.log";
 
 
 export type WebviewMessage =
   | { type: "ready" }
   | { type: "refresh" }
-  | { type: "startScan"; mode: ScanMode; scope: string; diffTargetKind?: "working_tree" | "commit" | "range"; diffBaseRevision?: string; diffHeadRevision?: string }
+  | { type: "startScan"; mode: ScanMode; scope: string; analysisProfile?: "fast" | "model"; diffTargetKind?: "working_tree" | "commit" | "range"; diffBaseRevision?: string; diffHeadRevision?: string }
   | { type: "resumeScan"; scanId: string }
   | { type: "cancelScan"; scanId: string }
   | { type: "selectScan"; scanId: string }

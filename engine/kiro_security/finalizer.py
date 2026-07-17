@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .constants import ARTIFACT_KINDS
+from .constants import ARTIFACT_KINDS, is_model_scan
 from .coverage import coverage_receipt_digest, expected_coverage_frontier
 from .db import Workbench
 from .errors import EngineError
@@ -251,15 +251,15 @@ def _validate_auxiliary_documents(documents: dict[str, dict[str, Any]], scan_id:
             )
 
 def _validation_mode(scan: dict[str, Any]) -> str:
-    if scan["mode"] == "deep":
-        return "agent-assisted-discovery+deterministic-static-validation"
+    if is_model_scan(scan):
+        return "agent-assisted-discovery+model-validation"
     if scan["mode"] == "diff":
         return "deterministic-diff-static-analysis"
     return "deterministic-static-analysis"
 
 
 def _runtime_status(scan: dict[str, Any]) -> str:
-    return "agent-assisted-static" if scan["mode"] == "deep" else "static-only"
+    return "agent-assisted-static" if is_model_scan(scan) else "static-only"
 
 
 def _canonical_entries(bundle: dict[str, Any]) -> list[dict[str, Any]]:
@@ -395,6 +395,14 @@ def prepare_finalization(workbench: Workbench, bundle: dict[str, Any]) -> dict[s
     validate_against_schema(documents["findings"], schemas / "findings.schema.json", "findings.json")
     if documents["coverage"].get("scanId") != scan_id or documents["findings"].get("scanId") != scan_id:
         raise EngineError("canonical_scan_mismatch", "Canonical document scanId does not match the active scan.")
+    for finding in documents["findings"].get("findings") or []:
+        for proof_name in ("validation", "attackPath"):
+            proof = finding.get(proof_name)
+            if isinstance(proof, dict) and proof.get("findingId") not in (None, finding.get("findingId")):
+                raise EngineError(
+                    "canonical_finding_identity_mismatch",
+                    f"{proof_name}.findingId does not match its canonical finding.",
+                )
     _validate_coverage_semantics(workbench, scan, documents["coverage"], inventory_document)
     _validate_auxiliary_documents(documents, scan_id)
 

@@ -2,7 +2,7 @@
 
 Deep mode is an Agent-orchestrated repeated discovery workflow. It is not the Standard deterministic scanner with extra passes.
 
-1. Start with `security_start_scan` using `mode: "deep"`, the exact requested scope, the selected `modelId`, and the same truthful `deep-worker/v2` host-attested `runtime` profile that every worker claim will use. If the host cannot attest the required delegation capabilities, report the preflight error instead of starting Deep.
+1. Start with `security_start_scan` using `mode: "deep"`, `analysisProfile: "model"`, the exact requested scope, the selected `modelId`, and the same truthful `deep-worker/v2` host-attested `runtime` profile that every worker claim will use. If the host cannot attest the required delegation capabilities, report the preflight error instead of starting Deep.
 2. Poll `security_deep_get_status`. When `nextAction` is `claim_worker`, claim all six independent discovery workers for the current round before any worker submits its first result.
 3. For each worker, call `security_deep_claim_worker` with:
    - the same selected model identity for all six workers in a round;
