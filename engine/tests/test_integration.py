@@ -8,6 +8,7 @@ from pathlib import Path
 
 import jsonschema
 import pytest
+import kiro_security.service as service_module
 
 from kiro_security.errors import EngineError
 from kiro_security.remediation import parse_remediation_patch
@@ -813,10 +814,47 @@ def test_h_workflow_artifacts_state_and_proof_are_immutable(workspace: Path, mon
             )["state"] == "generated"
         finally:
             peer.shutdown({})
+        original_run_process = service_module.run_process
+        original_source = (workspace / "src" / "app.py").read_text(encoding="utf-8")
+
+        def replace_source_after_check(executable: str, args: list[str], **kwargs: object):
+            result = original_run_process(executable, args, **kwargs)
+            if executable == "git" and args[:2] == ["apply", "--check"]:
+                (workspace / "src" / "app.py").write_text("# changed after check\n", encoding="utf-8")
+            return result
+
+        monkeypatch.setattr(service_module, "run_process", replace_source_after_check)
+        with pytest.raises(EngineError) as changed_after_check:
+            service.apply_remediation_patch({
+                "remediationId": prepared_two["id"], "expectedVersion": prepared_two["version"],
+            })
+        assert changed_after_check.value.code == "remediation_code_drift"
+        assert service.workbench.get_remediation_record(prepared_two["id"])["state"] == "generated"
+        (workspace / "src" / "app.py").write_text(original_source, encoding="utf-8")
+
+        alternate_patch = (
+            "--- a/src/safe.py\n+++ b/src/safe.py\n@@ -1 +1 @@\n"
+            "-from pathlib import Path\n+raise RuntimeError('unapproved replacement')\n"
+        )
+        replaced = False
+
+        def replace_patch_after_check(executable: str, args: list[str], **kwargs: object):
+            nonlocal replaced
+            result = original_run_process(executable, args, **kwargs)
+            if executable == "git" and args[:2] == ["apply", "--check"] and not replaced:
+                Path(prepared_two["artifact_path"]).write_text(alternate_patch, encoding="utf-8")
+                replaced = True
+            return result
+
+        monkeypatch.setattr(service_module, "run_process", replace_patch_after_check)
         applied = service.apply_remediation_patch({
             "remediationId": prepared_two["id"], "expectedVersion": prepared_two["version"],
         })
+        monkeypatch.setattr(service_module, "run_process", original_run_process)
         assert applied["state"] == "applied"
+        assert replaced
+        assert "os.system('echo safe')" in (workspace / "src" / "app.py").read_text(encoding="utf-8")
+        assert (workspace / "src" / "safe.py").read_text(encoding="utf-8").startswith("from pathlib import Path")
         with pytest.raises(EngineError) as busy:
             service.prepare_remediation_patch({
                 "occurrenceId": finding["occurrenceId"], "patch": patch, "plan": "Do not supersede applied work.",
@@ -848,7 +886,21 @@ def test_h_workflow_artifacts_state_and_proof_are_immutable(workspace: Path, mon
 
         assert redact("Authorization: Bearer secret-value-hidden") == "Authorization: <redacted>"
         assert redact("Authorization=Basic dXNlcjpwYXNz") == "Authorization=<redacted>"
+        assert redact("Authorization: Custom first second third") == "Authorization: <redacted>"
+        assert redact('Authorization: "first\r\nsecond"') == 'Authorization: "<redacted>"'
+        assert redact('Authorization: "first\r\nsecond') == 'Authorization: "<redacted>'
+        assert redact('Authorization: "first\r\nsecond\\') == 'Authorization: "<redacted>'
         assert "secret-value-hidden" not in redact('{"Authorization": "Bearer secret-value-hidden"}')
+        aws = redact(
+            "Authorization: AWS4-HMAC-SHA256 Credential=AKIAEXAMPLE/20260718/us-east-1/service/aws4_request, "
+            "SignedHeaders=host;x-amz-date, Signature=deadbeef requestId=keep-me"
+        )
+        assert "AKIAEXAMPLE" not in aws and "deadbeef" not in aws and "requestId=keep-me" in aws
+        digest = redact(
+            'Authorization: Digest username="alice", realm="private", nonce="secret-nonce", '
+            'uri="/admin", response="secret-response" requestId=keep-me'
+        )
+        assert "alice" not in digest and "secret-response" not in digest and "requestId=keep-me" in digest
         intake = service.create_triage_intake({
             "occurrenceId": finding["occurrenceId"], "sourceType": "scanner_ticket", "inputId": "external-1",
             "input": {"summary": "authorization: Bearer secret-value-hidden"},
@@ -925,6 +977,8 @@ def test_h_workflow_artifacts_state_and_proof_are_immutable(workspace: Path, mon
         readback_proof = {
             "bindingFindingId": payload["finding"]["findingId"],
             "bindingFingerprint": payload["finding"]["fingerprint"],
+            "externalId": "issue-1",
+            "externalUrl": "https://github.com/owner/repository/issues/1",
             "titleDigest": payload["writePreview"]["titleDigest"], "bodyDigest": payload["writePreview"]["bodyDigest"],
             "previewDigest": payload["writePreview"]["previewDigest"],
             "connectorHost": "github.com",
@@ -965,6 +1019,12 @@ def test_h_workflow_artifacts_state_and_proof_are_immutable(workspace: Path, mon
                 {**tracking_result, "outcome": "reused", "externalMutationPerformed": False}, payload,
             )
         assert missing_duplicate.value.code == "tracking_readback_mismatch"
+        with pytest.raises(EngineError) as mismatched_external_item:
+            normalize_tracking_readback({
+                **tracking_result,
+                "readback": {**readback_proof, "externalUrl": "https://github.com/owner/repository/issues/2"},
+            }, payload)
+        assert mismatched_external_item.value.code == "tracking_readback_mismatch"
         register_artifact = service.workbench._register_artifact
         monkeypatch.setattr(service.workbench, "_register_artifact", lambda *_args: (_ for _ in ()).throw(OSError("injected registry failure")))
         with pytest.raises(OSError):

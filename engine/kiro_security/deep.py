@@ -12,7 +12,7 @@ from .db import Workbench
 from .errors import EngineError
 from .security import atomic_write, random_id, stable_id, utc_now, write_json
 from .security_context import validate_security_context
-from .scanner import _diff_supporting_paths
+from .scanner import _diff_dirty_paths, _diff_supporting_exclusions, _diff_supporting_paths
 
 WORKERS_PER_ROUND = 6
 MAX_ROUNDS = 10
@@ -163,15 +163,27 @@ class DeepCoordinator:
             raise EngineError("diff_context_changed", "The immutable Diff context artifact changed after preflight.")
         changed = document.get("changedPaths")
         deleted = document.get("deletedPaths")
+        excluded = document.get("excludedSupportingPaths", [])
         supporting = document.get("supportingPaths")
+        target = document.get("target")
         if (
             not isinstance(changed, list) or not all(isinstance(item, str) for item in changed)
             or not isinstance(deleted, list) or not all(isinstance(item, str) for item in deleted)
+            or not isinstance(excluded, list) or not all(isinstance(item, str) for item in excluded)
             or not isinstance(supporting, list) or len(supporting) > 200
+            or not isinstance(target, dict) or target.get("kind") not in ("working_tree", "commit", "range")
         ):
             raise EngineError("diff_context_invalid", "The Diff context source references are invalid.")
+        current_dirty = _diff_dirty_paths(self.workbench.workspace, target["kind"])
+        if current_dirty & (set(changed) | set(deleted)):
+            raise EngineError("diff_context_changed", "A Diff source changed after preflight.")
+        current_excluded = _diff_supporting_exclusions(self.workbench.workspace, current_dirty, changed)
+        if current_excluded != set(excluded):
+            raise EngineError("diff_context_changed", "The Diff supporting-source exclusions changed after preflight.")
         max_file_bytes = int((scan.get("capabilities") or {}).get("maxFileBytes") or 1_048_576)
-        current = _diff_supporting_paths(self.workbench.workspace, changed, deleted, max_file_bytes)
+        current = _diff_supporting_paths(
+            self.workbench.workspace, changed, deleted, max_file_bytes, set(excluded)
+        )
         if current != supporting:
             raise EngineError("diff_context_changed", "A Diff supporting source changed after preflight.")
 

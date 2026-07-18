@@ -13,7 +13,24 @@ from typing import Any, Iterable
 from .errors import EngineError
 
 _SECRET_PATTERNS = [
-    re.compile(r"(?i)([\"']?authorization[\"']?)(\s*[=:]\s*[\"']?)(?:(?:bearer|basic)\s+)?([^\s,;\"']+)"),
+    re.compile(r'(?i)(["\']?authorization["\']?)(\s*[=:]\s*")((?:\\[\s\S]?|[^"\\])*)(?="|\Z)'),
+    re.compile(r"(?i)([\"']?authorization[\"']?)(\s*[=:]\s*')((?:\\[\s\S]?|[^'\\])*)(?='|\Z)"),
+    re.compile(
+        r"(?i)([\"']?authorization[\"']?)(\s*[=:]\s*)"
+        r"(AWS4-HMAC-SHA256\s+Credential=[^,\s\r\n]+,\s*SignedHeaders=[^,\s\r\n]+,\s*Signature=[^,;\s\r\n]+)"
+    ),
+    re.compile(
+        r"(?i)([\"']?authorization[\"']?)(\s*[=:]\s*)"
+        r"(Digest\s+(?:username|realm|nonce|uri|response|algorithm|cnonce|opaque|qop|nc|userhash|charset)\s*=\s*"
+        r"(?:\"(?:\\.|[^\"\\\r\n])*\"|[^,;\s\r\n]+)"
+        r"(?:\s*,\s*(?:username|realm|nonce|uri|response|algorithm|cnonce|opaque|qop|nc|userhash|charset)\s*=\s*"
+        r"(?:\"(?:\\.|[^\"\\\r\n])*\"|[^,;\s\r\n]+))*)"
+    ),
+    re.compile(r"(?i)([\"']?authorization[\"']?)(\s*[=:]\s*)((?:bearer|basic)\s+[^\s,;\"']+)"),
+    re.compile(
+        r"(?i)([\"']?authorization[\"']?)(\s*[=:]\s*)"
+        r"(?!\s*(?:[\"']|<redacted>(?:\s|$)))([^\r\n]+)"
+    ),
     re.compile(r"(?i)(api[_-]?key|token|secret|password)(\s*[=:]\s*)([^\s,;]+)"),
     re.compile(r"\b(?:sk|ghp|github_pat|xox[baprs])-?[A-Za-z0-9_\-]{12,}\b"),
 ]
@@ -147,11 +164,34 @@ def run_process(
     cwd: Path,
     timeout: float = 30,
     check: bool = True,
+    input_bytes: bytes | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env_keys = ("PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "WINDIR", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL")
     env = {key: os.environ[key] for key in env_keys if key in os.environ}
     env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0", "LC_ALL": env.get("LC_ALL", "C.UTF-8")})
     try:
+        if input_bytes is not None:
+            completed = subprocess.run(
+                [executable, *list(args)],
+                cwd=cwd,
+                env=env,
+                input=input_bytes,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout,
+                check=False,
+            )
+            result = subprocess.CompletedProcess(
+                completed.args,
+                completed.returncode,
+                completed.stdout.decode("utf-8", errors="replace"),
+                completed.stderr.decode("utf-8", errors="replace"),
+            )
+            if check and result.returncode != 0:
+                raise subprocess.CalledProcessError(
+                    result.returncode, result.args, output=result.stdout, stderr=result.stderr
+                )
+            return result
         return subprocess.run(
             [executable, *list(args)],
             cwd=cwd,

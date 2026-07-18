@@ -16,8 +16,9 @@ from .errors import EngineError
 from .exports import export_report
 from .hardening import create_hardening_proposal
 from .remediation import (
-    create_remediation_artifact, current_git_revision, load_patch_artifact, normalize_verification_receipt,
-    prepare_patch_artifact, reconcile_patch_application, touched_file_digests, verify_patch_inputs,
+    MAX_PATCH_BYTES, create_remediation_artifact, current_git_revision, load_patch_artifact,
+    normalize_verification_receipt, parse_remediation_patch, prepare_patch_artifact,
+    reconcile_patch_application, touched_file_digests, verify_patch_inputs,
 )
 from .runner import ScanRunner
 from .scanner import build_inventory
@@ -431,7 +432,23 @@ class SecurityService:
             raise EngineError("remediation_state_conflict", "Only the expected generated remediation can be applied.")
         scan = self.workbench.get_scan(record["scan_id"])
         metadata, path = verify_patch_inputs(self.workspace, Path(scan["artifact_dir"]), record)
-        run_process("git", ["apply", "--check", "--whitespace=nowarn", str(path)], cwd=self.workspace)
+        try:
+            with path.open("rb") as handle:
+                patch_bytes = handle.read(MAX_PATCH_BYTES + 1)
+        except OSError as exc:
+            raise EngineError("remediation_patch_changed", "The prepared remediation patch is unreadable.") from exc
+        if len(patch_bytes) > MAX_PATCH_BYTES or sha256_bytes(patch_bytes) != record["patch_digest"]:
+            raise EngineError("remediation_patch_changed", "The prepared remediation patch is missing or changed.")
+        try:
+            parse_remediation_patch(patch_bytes.decode("utf-8"))
+        except UnicodeDecodeError as exc:
+            raise EngineError("remediation_patch_changed", "The prepared remediation patch is not UTF-8 text.") from exc
+        run_process(
+            "git", ["apply", "--check", "--whitespace=nowarn", "-"],
+            cwd=self.workspace, input_bytes=patch_bytes,
+        )
+        if touched_file_digests(self.workspace, metadata) != (metadata.get("touchedFiles") or []):
+            raise EngineError("remediation_code_drift", "A touched file changed after patch validation.")
         applying = json.dumps({
             "phase": "applying", "patchDigest": record["patch_digest"],
             "preApplyDigests": metadata.get("touchedFiles") or [],
@@ -441,7 +458,12 @@ class SecurityService:
             record["id"], params["expectedVersion"], "generated", "verifying", verification_summary=applying
         )
         try:
-            run_process("git", ["apply", "--whitespace=nowarn", str(path)], cwd=self.workspace)
+            if touched_file_digests(self.workspace, metadata) != (metadata.get("touchedFiles") or []):
+                raise EngineError("remediation_code_drift", "A touched file changed before patch application.")
+            run_process(
+                "git", ["apply", "--whitespace=nowarn", "-"],
+                cwd=self.workspace, input_bytes=patch_bytes,
+            )
             applied = json.dumps({
                 "phase": "applied", "patchDigest": record["patch_digest"],
                 "preApplyDigests": metadata.get("touchedFiles") or [],

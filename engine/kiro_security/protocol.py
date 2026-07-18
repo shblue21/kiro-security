@@ -37,7 +37,8 @@ _METHOD_PARAMS = {
     "verify_remediation_patch": {"remediationId", "expectedVersion", "verification"},
     "record_tracking_result": {"recordId", "payloadSha256", "outcome", "externalMutationPerformed", "externalId", "externalUrl", "reason", "approval", "readback"},
     "export_report": {"scanId", "format", "destination", "allowedRoot", "occurrenceId"},
-    **{method: set() for method in ("get_capabilities", "get_dashboard", "database_info", "shutdown")},
+    **{method: set() for method in ("get_capabilities", "database_info", "shutdown")},
+    "get_dashboard": {"limit"},
     "poll_events": {"afterSequence", "limit"},
     "refresh_threat_model": {"scope"},
 }
@@ -260,6 +261,8 @@ def validate_method(method: str, raw_params: Any) -> dict[str, Any]:
         optional_string(params, "allowedRoot", max_length=8192)
         optional_string(params, "occurrenceId", max_length=256)
     elif method in {"get_capabilities", "get_dashboard", "database_info", "poll_events", "refresh_threat_model", "shutdown"}:
+        if method == "get_dashboard":
+            optional_int(params, "limit", minimum=1, maximum=200)
         if method == "poll_events":
             optional_int(params, "afterSequence", minimum=0, maximum=2_147_483_647)
             optional_int(params, "limit", minimum=1, maximum=1000)

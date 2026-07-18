@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from kiro_security import __version__
 from kiro_security.mcp_server import McpServer, TOOLS
 
@@ -41,6 +43,8 @@ def test_python_mcp_contract_exposes_full_shared_workbench_surface() -> None:
     assert tracking["inputSchema"]["properties"]["destination"]["maxLength"] == 512
     tail = next(tool for tool in TOOLS if tool["name"] == "security_deep_submit_tail_result")
     assert tail["inputSchema"]["properties"]["claimToken"]["maxLength"] == 256
+    findings = next(tool for tool in TOOLS if tool["name"] == "security_list_findings")
+    assert findings["inputSchema"]["properties"]["search"]["maxLength"] == 200
 
 
 def test_python_mcp_capabilities_use_workspace_engine_and_current_version(tmp_path: Path) -> None:
@@ -53,5 +57,9 @@ def test_python_mcp_capabilities_use_workspace_engine_and_current_version(tmp_pa
         assert capabilities["modes"] == ["diff", "standard", "deep"]
         assert capabilities["database"]["schemaVersion"] >= 1
         assert Path(capabilities["workspaceRoot"]) == workspace.resolve()
+        with pytest.raises(ValueError, match="search.*200"):
+            server.call_tool("security_list_findings", {
+                "workspaceRoot": str(workspace), "scanId": "scan_missing", "search": "x" * 201,
+            })
     finally:
         server.shutdown()

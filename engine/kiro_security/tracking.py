@@ -364,6 +364,8 @@ def normalize_tracking_readback(raw: Any, handoff: dict[str, Any]) -> dict[str, 
         expected = {
             "bindingFindingId": handoff["finding"]["findingId"],
             "bindingFingerprint": handoff["finding"]["fingerprint"],
+            "externalId": external_id,
+            "externalUrl": external_url,
             "titleDigest": preview["titleDigest"],
             "bodyDigest": preview["bodyDigest"],
             "previewDigest": preview["previewDigest"],

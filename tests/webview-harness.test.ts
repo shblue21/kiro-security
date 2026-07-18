@@ -114,6 +114,18 @@ test("webview harness renders loading, dashboard, empty/error, filtering, and de
   assert.match(harness.document.body.textContent ?? "", /Selected scan/);
   assert.match(harness.document.body.textContent ?? "", /1\s*findings/);
   assert.ok(harness.document.querySelector('[aria-label="Security panel sections"]'));
+  assert.equal((harness.document.getElementById("scan-mode") as HTMLSelectElement).value, "standard");
+
+  const labeled = snapshot();
+  const modelScan = { ...labeled.dashboard.selectedScan, capabilities: { analysisProfile: "model" } };
+  const fastScan = { ...modelScan, id: "scan_fast", status: "running", capabilities: { analysisProfile: "fast" } };
+  labeled.dashboard.activeScan = fastScan;
+  labeled.dashboard.selectedScan = modelScan;
+  labeled.dashboard.scans = [fastScan, modelScan];
+  harness.window.dispatchEvent(new harness.window.MessageEvent("message", { data: { type: "snapshot", snapshot: labeled } }));
+  assert.match(harness.document.querySelector(".active-scan")?.textContent ?? "", /Fast \(deterministic\)/);
+  (harness.document.querySelector('[data-tab="history"]') as HTMLElement).click();
+  assert.match(harness.document.querySelector(".history-list")?.textContent ?? "", /Fast \(deterministic\).*Standard \(Kiro Agent\)/s);
 
   (harness.document.querySelector('[data-tab="findings"]') as HTMLElement).click();
   assert.match(harness.document.body.textContent ?? "", /Command injection reaches shell/);

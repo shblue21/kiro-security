@@ -292,18 +292,42 @@ def _require_checked_out_diff_head(workspace: Path, kind: str, head: str | None,
         )
 
 
-def _require_clean_diff_paths(workspace: Path, scope: str, kind: str, changed: DiffPaths) -> None:
+def _diff_dirty_paths(workspace: Path, kind: str) -> set[str]:
     if kind not in ("commit", "range"):
-        return
-    dirty = _diff_name_only(workspace, ["diff", "--name-only", "-z", "HEAD", "--", scope])
-    dirty |= _diff_name_only(workspace, ["ls-files", "--others", "--exclude-standard", "-z", "--", scope])
-    overlap = sorted(dirty & changed.existing)
+        return set()
+    dirty = _diff_name_only(workspace, ["diff", "--name-only", "-z", "--no-renames", "HEAD", "--"])
+    dirty |= _diff_name_only(workspace, ["ls-files", "--others", "--exclude-standard", "-z", "--"])
+    return dirty
+
+
+def _diff_supporting_exclusions(workspace: Path, dirty: set[str], changed_paths: Iterable[str]) -> set[str]:
+    workspace = workspace.resolve()
+    parents = {PurePosixPath(path).parent for path in changed_paths}
+    excluded = set()
+    for path in dirty:
+        candidate = workspace / path
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        if (
+            PurePosixPath(path).parent in parents and PurePosixPath(path).suffix.lower() in SOURCE_EXTENSIONS
+            and not candidate.is_symlink() and candidate.is_file() and workspace in resolved.parents
+        ):
+            excluded.add(path)
+    return excluded
+
+
+def _require_clean_diff_paths(workspace: Path, kind: str, changed: DiffPaths) -> set[str]:
+    dirty = _diff_dirty_paths(workspace, kind)
+    overlap = sorted(dirty & (changed.existing | changed.deleted))
     if overlap:
         raise EngineError(
             "diff_target_worktree_changed",
             "Commit and range Diff source files must match the checked-out target revision.",
             {"paths": overlap[:20]},
         )
+    return _diff_supporting_exclusions(workspace, dirty, changed.existing)
 
 
 def _parse_nul_paths(output: str) -> list[str]:
@@ -392,6 +416,7 @@ def _diff_context(
     head: str | None,
     changed: DiffPaths,
     max_file_bytes: int,
+    excluded_supporting_paths: set[str],
 ) -> dict[str, Any]:
     patch = _diff_patch(workspace, scope, kind, base, head)
     if kind == "working_tree":
@@ -412,7 +437,7 @@ def _diff_context(
         if len(patch.encode("utf-8", "surrogatepass")) > 600_000:
             raise EngineError("diff_context_too_large", "The bounded Git patch exceeds 600000 bytes; narrow the Diff scope.")
     siblings = _diff_supporting_paths(
-        workspace, changed.existing, changed.deleted, max_file_bytes,
+        workspace, changed.existing, changed.deleted, max_file_bytes, excluded_supporting_paths,
     )
     rename_hints = []
     for line in patch.splitlines():
@@ -426,6 +451,7 @@ def _diff_context(
         "target": {"kind": kind, "baseRevision": base, "headRevision": head, "scope": scope},
         "changedPaths": sorted(changed.existing),
         "deletedPaths": sorted(changed.deleted),
+        "excludedSupportingPaths": sorted(excluded_supporting_paths),
         "renameHints": rename_hints[:200],
         "supportingPaths": siblings,
         "patch": patch,
@@ -440,6 +466,7 @@ def _diff_supporting_paths(
     changed_paths: Iterable[str],
     deleted_paths: Iterable[str],
     max_file_bytes: int,
+    excluded_paths: set[str],
 ) -> list[dict[str, Any]]:
     workspace = workspace.resolve()
     siblings: list[dict[str, Any]] = []
@@ -462,7 +489,7 @@ def _diff_supporting_paths(
             except OSError:
                 continue
             if (
-                sibling in seen or candidate.is_symlink() or workspace.resolve() not in resolved.parents
+                sibling in seen or sibling in excluded_paths or candidate.is_symlink() or workspace.resolve() not in resolved.parents
                 or not candidate.is_file() or candidate.suffix.lower() not in SOURCE_EXTENSIONS
             ):
                 continue
@@ -498,6 +525,7 @@ def build_inventory(
     scope_path = resolve_within(workspace, scope, must_exist=True)
     git_available, revision = _git_revision(workspace)
     changed_paths: DiffPaths | None = None
+    excluded_supporting_paths: set[str] = set()
     diff_summary: str | None = None
     if mode == "diff":
         if not git_available:
@@ -512,7 +540,9 @@ def build_inventory(
             diff_base_revision,
             diff_head_revision,
         )
-        _require_clean_diff_paths(workspace, scope, diff_target_kind or "working_tree", changed_paths)
+        excluded_supporting_paths = _require_clean_diff_paths(
+            workspace, diff_target_kind or "working_tree", changed_paths
+        )
     include_surfaces = mode == "deep" if include_security_surfaces is None else include_security_surfaces
 
     candidates: Iterable[Path]
@@ -699,7 +729,7 @@ def build_inventory(
     diff_context = (
         _diff_context(
             workspace, scope, diff_target_kind or "working_tree", diff_base_revision,
-            diff_head_revision, changed_paths, max_file_bytes,
+            diff_head_revision, changed_paths, max_file_bytes, excluded_supporting_paths,
         )
         if changed_paths is not None else None
     )

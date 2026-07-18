@@ -54,6 +54,9 @@ def test_initialize_and_start_scan_validation() -> None:
         validate_method("start_scan", {"mode": "arbitrary"})
     with pytest.raises(EngineError, match="maxFiles"):
         validate_method("start_scan", {"mode": "standard", "maxFiles": 0})
+    assert validate_method("get_dashboard", {"limit": 30})["limit"] == 30
+    with pytest.raises(EngineError, match="limit"):
+        validate_method("get_dashboard", {"limit": 201})
 
 
 def test_protocol_mismatch_and_malformed_messages_are_rejected() -> None:

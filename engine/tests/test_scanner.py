@@ -235,6 +235,10 @@ def test_diff_commit_deletion_is_reported(workspace: Path) -> None:
     assert [(item["path"], item["surface"]) for item in model_inventory["files"]] == [
         ("context/diff-context.json", "diff_review:bounded_patch")
     ]
+    (workspace / "src" / "app.py").write_text("# resurrected deleted source\n", encoding="utf-8")
+    with pytest.raises(EngineError) as error:
+        inventory(workspace, mode="diff", diff_target_kind="commit", diff_head_revision=head)
+    assert error.value.code == "diff_target_worktree_changed"
 
 
 def test_diff_commit_rejects_content_from_a_different_checkout(workspace: Path) -> None:
@@ -248,10 +252,29 @@ def test_diff_commit_rejects_content_from_a_different_checkout(workspace: Path) 
     assert error.value.code == "diff_target_not_checked_out"
 
     target = run_git(workspace, "rev-parse", "HEAD")
+    run_git(workspace, "mv", "src/safe.py", "src/renamed.py")
+    with pytest.raises(EngineError) as error:
+        inventory(workspace, mode="diff", diff_target_kind="commit", diff_head_revision=target)
+    assert error.value.code == "diff_target_worktree_changed"
+    run_git(workspace, "mv", "src/renamed.py", "src/safe.py")
+
     (workspace / "src" / "safe.py").write_text('print("dirty worktree")\n', encoding="utf-8")
     with pytest.raises(EngineError) as error:
         inventory(workspace, mode="diff", diff_target_kind="commit", diff_head_revision=target)
     assert error.value.code == "diff_target_worktree_changed"
+
+    run_git(workspace, "restore", "src/safe.py")
+    clean = inventory(workspace, mode="diff", scope="src/safe.py", diff_target_kind="commit", diff_head_revision=target)
+    assert "src/app.py" in {item["path"] for item in clean.diff_context["supportingPaths"]}
+
+    (workspace / "src" / "app.py").write_text("# dirty supporting sibling\n", encoding="utf-8")
+    (workspace / "src" / "untracked.py").write_text("# untracked supporting sibling\n", encoding="utf-8")
+    filtered = inventory(workspace, mode="diff", scope="src/safe.py", diff_target_kind="commit", diff_head_revision=target)
+    supporting = {item["path"] for item in filtered.diff_context["supportingPaths"]}
+    assert {"src/app.py", "src/untracked.py"} <= set(filtered.diff_context["excludedSupportingPaths"])
+    assert "src/app.py" not in supporting
+    assert "src/untracked.py" not in supporting
+    assert "src/server.js" in supporting
 
 
 def test_symlink_outside_workspace_is_excluded(workspace: Path, tmp_path: Path) -> None:

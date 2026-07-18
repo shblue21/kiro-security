@@ -579,7 +579,7 @@ class McpServer:
         if name == "security_list_findings":
             search = params.get("search")
             if search is not None:
-                search = _bounded_string(search, "search", 512)
+                search = _bounded_string(search, "search", 200)
             return service.list_findings(
                 {
                     "scanId": _bounded_string(params.get("scanId"), "scanId", 256),

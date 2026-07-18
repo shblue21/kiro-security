@@ -64,6 +64,12 @@ function statusBadge(status: string): string {
 function severityBadge(level: string): string {
   return badge(level, ["critical", "high"].includes(level) ? "danger" : level === "medium" ? "warning" : "neutral");
 }
+function scanLabel(scan: any): string {
+  const model = scan?.mode === "deep" || scan?.capabilities?.analysisProfile === "model";
+  if (!model) return "Fast (deterministic)";
+  if (scan?.mode === "diff") return "Git changes (Kiro Agent)";
+  return `${scan?.mode === "deep" ? "Deep" : "Standard"} (Kiro Agent)`;
+}
 
 function nav(): string {
   return `<nav class="tabs" aria-label="Security panel sections">
@@ -148,7 +154,7 @@ function dashboardView(): string {
   const coverage = selected?.coverage;
   return `<div class="stack">
     <section class="card scan-form"><h2>Start a scan</h2>
-      <label>Mode<select id="scan-mode"><option value="fast" ${dashboard.workspace.default_mode === "standard" ? "selected" : ""}>Fast (deterministic)</option><option value="standard">Standard (Kiro Agent)</option><option value="deep" ${dashboard.workspace.default_mode === "deep" ? "selected" : ""}>Deep (Kiro Agent)</option><option value="diff" ${dashboard.workspace.default_mode === "diff" ? "selected" : ""}>Git changes (Kiro Agent)</option></select></label>
+      <label>Mode<select id="scan-mode"><option value="fast">Fast (deterministic)</option><option value="standard" ${dashboard.workspace.default_mode === "standard" ? "selected" : ""}>Standard (Kiro Agent)</option><option value="deep" ${dashboard.workspace.default_mode === "deep" ? "selected" : ""}>Deep (Kiro Agent)</option><option value="diff" ${dashboard.workspace.default_mode === "diff" ? "selected" : ""}>Git changes (Kiro Agent)</option></select></label>
       <label>Scope<input id="scan-scope" value="${attr(dashboard.workspace.default_scope || ".")}" maxlength="4096" autocomplete="off"></label>
       <div id="diff-options" class="diff-options hidden">
         <label>Diff target<select id="diff-kind"><option value="working_tree">Working tree</option><option value="commit">Commit</option><option value="range">Range</option></select></label>
@@ -157,7 +163,7 @@ function dashboardView(): string {
       </div>
       <div class="button-row"><button class="primary" data-action="start" ${active ? "disabled" : ""}>Start scan</button>${dashboard.latestResumableScan ? `<button data-action="resume" data-scan-id="${attr(dashboard.latestResumableScan.id)}" ${active ? "disabled" : ""}>Resume interrupted</button>` : ""}</div>
     </section>
-    ${active ? `<section class="card active-scan"><div class="card-title"><div><h2>Active scan</h2><p>${h(active.mode)} · ${h(active.scope)}</p></div>${statusBadge(active.status)}</div>
+    ${active ? `<section class="card active-scan"><div class="card-title"><div><h2>Active scan</h2><p>${h(scanLabel(active))} · ${h(active.scope)}</p></div>${statusBadge(active.status)}</div>
       ${phaseStepper(active)}<div class="progress-label"><strong>${h(progressLabel(active.phase, progress))}</strong><span>${h(active.progress?.message ?? "Working…")}</span></div>
       <progress max="100" value="${attr(progress)}">${h(progress)}%</progress>
       <div class="metrics"><div><strong>${h(active.files_completed)}/${h(active.files_total)}</strong><span>files</span></div><div><strong>${h(active.progress?.reportable_findings_count ?? 0)}</strong><span>findings</span></div><div><strong>${h(elapsed(active))}</strong><span>elapsed</span></div></div>
@@ -226,7 +232,7 @@ function historyView(): string {
   const dashboard = snapshot?.dashboard;
   const scans = dashboard?.scans ?? [];
   return `<div class="stack"><section class="card"><h2>History and recovery</h2><p>Completed and interrupted scans are persisted in the shared SQLite workbench. Power and MCP scans appear here after reconciliation.</p></section>
-    <section class="history-list">${scans.map((scan: any) => `<article class="card history-item"><div class="card-title"><div><h3>${h(scan.mode)} scan</h3><p class="mono">${h(scan.id)}</p></div>${statusBadge(scan.status)}</div>
+    <section class="history-list">${scans.map((scan: any) => `<article class="card history-item"><div class="card-title"><div><h3>${h(scanLabel(scan))}</h3><p class="mono">${h(scan.id)}</p></div>${statusBadge(scan.status)}</div>
       <dl class="history-grid"><dt>Scope</dt><dd>${h(scan.scope)}</dd><dt>Phase</dt><dd>${h(scan.phase.replaceAll("_", " "))}</dd><dt>Created</dt><dd>${h(date(scan.created_at))}</dd><dt>Elapsed</dt><dd>${h(elapsed(scan))}</dd><dt>Files</dt><dd>${h(scan.files_completed)}/${h(scan.files_total)}</dd><dt>Error</dt><dd>${h(scan.failure_message ?? "—")}</dd></dl>
       <div class="button-row"><button data-action="select-scan" data-scan-id="${attr(scan.id)}">Open</button>${["interrupted","failed"].includes(scan.status) ? `<button data-action="resume" data-scan-id="${attr(scan.id)}" ${dashboard?.activeScan ? "disabled" : ""}>Resume</button>` : ""}${scan.status === "running" ? `<button class="danger" data-action="cancel" data-scan-id="${attr(scan.id)}">Cancel</button>` : `<button class="danger" data-action="cleanup" data-scan-id="${attr(scan.id)}">Cleanup</button>`}</div></article>`).join("") || `<div class="empty"><h2>No scans yet</h2></div>`}</section><section class="card"><button data-action="logs">Open structured logs</button></section></div>`;
 }
