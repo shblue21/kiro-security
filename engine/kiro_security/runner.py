@@ -124,6 +124,12 @@ class ScanRunner:
                 "The workspace snapshot changed after the scan was interrupted. Start a new scan instead of resuming.",
                 {"expected": scan["snapshot_digest"], "actual": inventory.snapshot_digest},
             )
+        if require_same_snapshot and scan.get("target_revision") and inventory.revision != scan["target_revision"]:
+            raise EngineError(
+                "target_changed",
+                "The workspace Git revision changed after preflight. Start a new scan instead of resuming.",
+                {"expected": scan["target_revision"], "actual": inventory.revision},
+            )
         return inventory
 
     @staticmethod
@@ -328,7 +334,12 @@ class ScanRunner:
         else:
             capabilities["analysisProfile"] = "fast"
         self.workbench.set_capabilities(scan_id, capabilities)
-        self.workbench.set_scan_target(scan_id, revision=inventory.revision, snapshot_digest=inventory.snapshot_digest)
+        diff_target = (inventory.diff_context or {}).get("target") or {}
+        self.workbench.set_scan_target(
+            scan_id, revision=inventory.revision, snapshot_digest=inventory.snapshot_digest,
+            diff_base_revision=diff_target.get("resolvedBaseRevision"),
+            diff_head_revision=diff_target.get("resolvedHeadRevision"),
+        )
         inventory_path = self._inventory_path(scan)
         inventory_data = self._inventory_data(inventory, include_diff_context_row=is_model_scan(scan))
         if inventory.diff_context is not None:

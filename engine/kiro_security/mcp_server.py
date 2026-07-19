@@ -51,8 +51,18 @@ def _integer(value: Any, name: str, default: int, minimum: int, maximum: int) ->
     return value
 
 
+def _request_id(value: Any) -> str | int:
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise ValueError("JSON-RPC requests require a string or integer id.")
+    return value
+
+
 def _workspace_from(params: dict[str, Any]) -> Path:
-    requested = params.get("workspaceRoot") or os.environ.get("KIRO_SECURITY_WORKSPACE") or os.getcwd()
+    requested = (
+        params["workspaceRoot"]
+        if "workspaceRoot" in params
+        else os.environ.get("KIRO_SECURITY_WORKSPACE") or os.getcwd()
+    )
     if not isinstance(requested, str) or not requested or len(requested) > 8192 or "\x00" in requested:
         raise ValueError("workspaceRoot must identify a bounded local directory path.")
     return canonical_workspace(requested)
@@ -89,7 +99,7 @@ TOOLS: list[dict[str, Any]] = [
                 "workspaceRoot": {"type": "string", "description": "Optional. Defaults to the workspace bound by the VSIX installer."},
                 "mode": {"type": "string", "enum": ["standard", "deep", "diff"]},
                 "analysisProfile": {"type": "string", "const": "model"},
-                "scope": {"type": "string", "default": "."},
+                "scope": {"type": "string", "minLength": 1, "default": "."},
                 "diffTargetKind": {"type": "string", "enum": ["working_tree", "commit", "range"]},
                 "diffBaseRevision": {"type": "string"},
                 "diffHeadRevision": {"type": "string"},
@@ -251,7 +261,7 @@ TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "workspaceRoot": {"type": "string"},
                 "scanId": {"type": "string"},
-                "search": {"type": "string"},
+                "search": {"type": "string", "minLength": 1, "maxLength": 200},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 2000},
             },
             "required": ["scanId"],
@@ -313,7 +323,7 @@ TOOLS: list[dict[str, Any]] = [
         "description": "Create or refresh a workspace threat model.",
         "inputSchema": {
             "type": "object",
-            "properties": {"workspaceRoot": {"type": "string"}, "scope": {"type": "string", "default": "."}},
+            "properties": {"workspaceRoot": {"type": "string"}, "scope": {"type": "string", "minLength": 1, "default": "."}},
             "additionalProperties": False,
         },
     },
@@ -351,6 +361,8 @@ for _tool in TOOLS:
     for _name, _schema in _tool["inputSchema"].get("properties", {}).items():
         if _schema.get("type") == "string" and _name in _TOOL_STRING_LIMITS:
             _schema.setdefault("maxLength", _TOOL_STRING_LIMITS[_name])
+        if _name == "workspaceRoot":
+            _schema.setdefault("minLength", 1)
 
 
 class McpServer:
@@ -392,17 +404,20 @@ class McpServer:
         self.write({"jsonrpc": "2.0", "id": request_id, "error": error})
 
     def handle(self, request: Any) -> None:
-        request_id = request.get("id") if isinstance(request, dict) else None
+        request_id: str | int | None = None
         try:
             if not isinstance(request, dict) or request.get("jsonrpc") != "2.0":
                 raise ValueError("Invalid JSON-RPC request.")
             method = _bounded_string(request.get("method"), "method", 256)
             assert method is not None
-            params = request.get("params") or {}
+            params = request["params"] if "params" in request else {}
             if not isinstance(params, dict):
                 raise ValueError("params must be a JSON object.")
             if method in ("notifications/initialized", "notifications/cancelled"):
+                if "id" in request:
+                    raise ValueError("JSON-RPC notifications must not include an id.")
                 return
+            request_id = _request_id(request.get("id"))
             if method == "initialize":
                 requested = params.get("protocolVersion")
                 self.protocol_version = requested if isinstance(requested, str) and requested in SUPPORTED_PROTOCOLS else DEFAULT_PROTOCOL
@@ -430,7 +445,7 @@ class McpServer:
                 name = _bounded_string(params.get("name"), "tool name", 128)
                 assert name is not None
                 try:
-                    result = self.call_tool(name, params.get("arguments") or {})
+                    result = self.call_tool(name, params["arguments"] if "arguments" in params else {})
                     text = json.dumps(result, indent=2, ensure_ascii=False)
                     self.success(
                         request_id,
@@ -458,6 +473,12 @@ class McpServer:
 
     def call_tool(self, name: str, raw_arguments: Any) -> Any:
         params = _object(raw_arguments)
+        tool = next((item for item in TOOLS if item["name"] == name), None)
+        if tool is None:
+            raise ValueError(f"Unknown security tool: {name}")
+        unexpected = sorted(set(params) - set(tool["inputSchema"].get("properties", {})))
+        if unexpected:
+            raise ValueError(f"Unexpected tool argument(s): {', '.join(unexpected)}.")
         service = self.service_for(params)
         if name == "security_get_capabilities":
             return service.capabilities()
@@ -465,7 +486,7 @@ class McpServer:
             mode = _bounded_string(params.get("mode"), "mode", 16)
             if mode not in ("standard", "deep", "diff"):
                 raise ValueError("mode must be standard, deep, or diff.")
-            scope = _bounded_string(params.get("scope") or ".", "scope")
+            scope = _bounded_string(params["scope"], "scope") if "scope" in params else "."
             if params.get("analysisProfile") != "model":
                 raise ValueError("Agent Standard, Diff, and Deep starts require analysisProfile=model.")
             runtime = params.get("runtime")
@@ -577,9 +598,7 @@ class McpServer:
                 "reason": _bounded_string(params.get("reason"), "reason", 4000, required=False) or "Incomplete writeup retry requested.",
             })
         if name == "security_list_findings":
-            search = params.get("search")
-            if search is not None:
-                search = _bounded_string(search, "search", 200)
+            search = _bounded_string(params["search"], "search", 200) if "search" in params else None
             return service.list_findings(
                 {
                     "scanId": _bounded_string(params.get("scanId"), "scanId", 256),
@@ -596,8 +615,10 @@ class McpServer:
             if decision not in ("open", "accepted_risk", "false_positive", "already_fixed", "wont_fix"):
                 raise ValueError("Invalid triage decision.")
             note = params.get("note")
-            if note is not None:
-                note = _bounded_string(note, "note", 4000)
+            if note is not None and (
+                not isinstance(note, str) or len(note) > 4000 or "\x00" in note
+            ):
+                raise ValueError("note must be a string of at most 4000 characters.")
             return service.triage_finding(
                 {
                     "occurrenceId": _bounded_string(params.get("occurrenceId"), "occurrenceId", 256),
@@ -668,7 +689,8 @@ class McpServer:
         if name == "security_create_hardening_proposal":
             return service.create_hardening_proposal({"scanId": _bounded_string(params.get("scanId"), "scanId", 256)})
         if name == "security_create_threat_model":
-            return service.refresh_threat_model({"scope": _bounded_string(params.get("scope") or ".", "scope")})
+            scope = _bounded_string(params["scope"], "scope") if "scope" in params else "."
+            return service.refresh_threat_model({"scope": scope})
         if name == "security_export_report":
             export_format = _bounded_string(params.get("format"), "format", 16)
             if export_format not in ("markdown", "json", "csv", "sarif"):

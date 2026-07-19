@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import shutil
+import stat
+import tempfile
 from pathlib import Path
 from typing import Any
 
 from .errors import EngineError
+from .scanner import _git_filter_overrides
 from .security import atomic_write, redact, resolve_within, run_process, sha256_file
 
 MAX_PATCH_BYTES = 512 * 1024
@@ -120,6 +125,205 @@ def current_git_revision(workspace: Path) -> str | None:
     return result.stdout.strip() if result.returncode == 0 and re.fullmatch(r"[a-f0-9]{40,64}", result.stdout.strip()) else None
 
 
+def _file_mode(path: Path) -> str:
+    return "100755" if path.stat().st_mode & stat.S_IXUSR else "100644"
+
+
+def _digest_field(digest: Any, label: bytes, value: bytes) -> None:
+    digest.update(len(label).to_bytes(4, "big"))
+    digest.update(label)
+    digest.update(len(value).to_bytes(8, "big"))
+    digest.update(value)
+
+
+def _directory_content_digest(root: Path, scope: str, excluded_relative: list[Path]) -> str:
+    target = resolve_within(root, scope, must_exist=True)
+    paths = [target] if not target.is_dir() else sorted(target.rglob("*"))
+    digest = hashlib.sha256()
+    _digest_field(digest, b"format", b"kiro-security-remediation-directory/v1")
+    for path in paths:
+        relative_path = path.relative_to(root)
+        if any(
+            relative_path == excluded_path or excluded_path in relative_path.parents
+            for excluded_path in excluded_relative
+        ):
+            continue
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            raise EngineError("remediation_code_drift", f"Unable to read worktree path: {relative_path}") from exc
+        _digest_field(digest, b"path", relative_path.as_posix().encode("utf-8", "surrogatepass"))
+        _digest_field(digest, b"mode", str(stat.S_IMODE(metadata.st_mode)).encode("ascii"))
+        if stat.S_ISLNK(metadata.st_mode):
+            _digest_field(digest, b"kind", b"symlink")
+            _digest_field(digest, b"content", os.fsencode(os.readlink(path)))
+        elif stat.S_ISDIR(metadata.st_mode):
+            _digest_field(digest, b"kind", b"directory")
+        elif stat.S_ISREG(metadata.st_mode):
+            content_digest = hashlib.sha256()
+            size = 0
+            try:
+                with path.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        content_digest.update(chunk)
+                        size += len(chunk)
+            except OSError as exc:
+                raise EngineError("remediation_code_drift", f"Unable to read worktree file: {relative_path}") from exc
+            _digest_field(digest, b"kind", b"file")
+            _digest_field(digest, b"size", str(size).encode("ascii"))
+            _digest_field(digest, b"content-sha256", content_digest.digest())
+        else:
+            raise EngineError("remediation_code_drift", f"Unsupported worktree file type: {relative_path}")
+    return f"kiro-security-remediation-snapshot/v1:sha256:{digest.hexdigest()}"
+
+
+def _gitlink_entries(workspace: Path, scope: str) -> dict[str, str]:
+    staged = run_process(
+        "git", ["ls-files", "--stage", "-z", "--", scope], cwd=workspace, check=False,
+    )
+    if staged.returncode != 0:
+        raise EngineError("remediation_code_drift", "Unable to inspect Git submodules in the worktree.")
+    entries = {}
+    for record in (item for item in staged.stdout.split("\x00") if item):
+        metadata, separator, relative = record.partition("\t")
+        fields = metadata.split()
+        if not separator or len(fields) != 3:
+            raise EngineError("remediation_code_drift", "Unable to inspect Git submodules in the worktree.")
+        mode, object_id, stage = fields
+        if mode != "160000":
+            continue
+        if stage != "0" or not re.fullmatch(r"[a-f0-9]{40,64}", object_id):
+            raise EngineError("remediation_code_drift", "Unable to inspect Git submodules in the worktree.")
+        entries[relative] = object_id
+    return entries
+
+
+def _digest_gitlink(digest: Any, path: Path, relative: str, expected_revision: str) -> None:
+    _digest_field(digest, b"kind", b"gitlink")
+    _digest_field(digest, b"expected-revision", expected_revision.encode("ascii"))
+    try:
+        (path / ".git").lstat()
+    except FileNotFoundError:
+        _digest_field(digest, b"state", b"uninitialized")
+        return
+    root = run_process("git", ["rev-parse", "--show-toplevel"], cwd=path, check=False)
+    revision = run_process("git", ["rev-parse", "HEAD"], cwd=path, check=False)
+    status = run_process(
+        "git", [*_git_filter_overrides(path), "status", "--porcelain=v1", "-z", "--untracked-files=all",
+                "--ignore-submodules=none"],
+        cwd=path, check=False,
+    )
+    try:
+        initialized = root.returncode == 0 and Path(root.stdout.strip()).resolve() == path.resolve()
+    except OSError:
+        initialized = False
+    if (
+        not initialized or revision.returncode != 0 or revision.stdout.strip() != expected_revision
+        or status.returncode != 0 or status.stdout
+    ):
+        raise EngineError(
+            "remediation_code_drift",
+            f"Git submodule must be clean and match the revision recorded by its parent: {relative}",
+        )
+    _digest_field(digest, b"state", b"initialized")
+    _digest_field(digest, b"revision", expected_revision.encode("ascii"))
+    for nested_relative, nested_revision in sorted(_gitlink_entries(path, ".").items()):
+        _digest_field(digest, b"nested-path", nested_relative.encode("utf-8", "surrogatepass"))
+        _digest_gitlink(digest, path / nested_relative, f"{relative}/{nested_relative}", nested_revision)
+
+
+def worktree_content_digest(
+    workspace: Path, scope: str, *, excluded: tuple[Path, ...] = (),
+) -> str:
+    """Digest tracked and untracked worktree content without invoking Git filters."""
+    root = workspace.resolve(strict=True)
+    excluded_relative = []
+    for path in excluded:
+        try:
+            excluded_relative.append(path.resolve().relative_to(root))
+        except (OSError, ValueError):
+            continue
+    if current_git_revision(root) is None:
+        return _directory_content_digest(root, scope, excluded_relative)
+    listed = run_process(
+        "git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", scope],
+        cwd=root,
+    )
+    gitlinks = _gitlink_entries(root, scope)
+    digest = hashlib.sha256()
+    _digest_field(digest, b"format", b"kiro-security-remediation-snapshot/v1")
+    for relative in sorted(item for item in listed.stdout.split("\x00") if item):
+        relative_path = Path(relative)
+        if any(
+            relative_path == excluded_path or excluded_path in relative_path.parents
+            for excluded_path in excluded_relative
+        ):
+            continue
+        path = root / relative_path
+        _digest_field(digest, b"path", relative.encode("utf-8", "surrogatepass"))
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            if relative in gitlinks:
+                _digest_gitlink(digest, path, relative, gitlinks[relative])
+            else:
+                _digest_field(digest, b"kind", b"missing")
+            continue
+        _digest_field(digest, b"mode", str(stat.S_IMODE(metadata.st_mode)).encode("ascii"))
+        if stat.S_ISLNK(metadata.st_mode):
+            _digest_field(digest, b"kind", b"symlink")
+            _digest_field(digest, b"content", os.fsencode(os.readlink(path)))
+        elif stat.S_ISREG(metadata.st_mode):
+            content_digest = hashlib.sha256()
+            size = 0
+            try:
+                with path.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        content_digest.update(chunk)
+                        size += len(chunk)
+            except OSError as exc:
+                raise EngineError("remediation_code_drift", f"Unable to read worktree file: {relative}") from exc
+            _digest_field(digest, b"kind", b"file")
+            _digest_field(digest, b"size", str(size).encode("ascii"))
+            _digest_field(digest, b"content-sha256", content_digest.digest())
+        elif stat.S_ISDIR(metadata.st_mode):
+            expected_revision = gitlinks.get(relative)
+            if expected_revision is None:
+                revision = run_process("git", ["rev-parse", "HEAD"], cwd=path, check=False)
+                status = run_process(
+                    "git", [*_git_filter_overrides(path), "status", "--porcelain=v1", "-z",
+                            "--untracked-files=all", "--ignore-submodules=none"],
+                    cwd=path, check=False,
+                )
+                if revision.returncode != 0 or status.returncode != 0 or status.stdout:
+                    raise EngineError(
+                        "remediation_code_drift", f"Worktree directory must be a clean Git checkout: {relative}",
+                    )
+                _digest_field(digest, b"kind", b"gitlink")
+                _digest_field(digest, b"revision", revision.stdout.strip().encode("ascii"))
+                _digest_field(digest, b"status", status.stdout.encode("utf-8", "surrogatepass"))
+            else:
+                _digest_gitlink(digest, path, relative, expected_revision)
+        else:
+            raise EngineError("remediation_code_drift", f"Unsupported worktree file type: {relative}")
+    return f"kiro-security-remediation-snapshot/v1:sha256:{digest.hexdigest()}"
+
+
+def verify_unmodified_files(workspace: Path, artifact_dir: Path, metadata: dict[str, Any]) -> None:
+    expected = metadata.get("unmodifiedContentDigest")
+    if not isinstance(expected, str) or not re.fullmatch(
+        r"kiro-security-remediation-snapshot/v1:sha256:[a-f0-9]{64}", expected,
+    ):
+        raise EngineError("remediation_record_invalid", "Regenerate remediation metadata with a worktree snapshot.")
+    touched = tuple(workspace / item["path"] for item in metadata.get("touchedFiles") or [])
+    actual = worktree_content_digest(
+        workspace, metadata.get("snapshotScope") or metadata.get("scope") or ".",
+        excluded=(workspace / ".kiro" / "security-power", artifact_dir, *touched),
+    )
+    if actual != expected:
+        raise EngineError("remediation_code_drift", "Files outside the approved remediation changed.")
+
+
 def prepare_patch_artifact(
     workspace: Path,
     artifact_dir: Path,
@@ -134,12 +338,16 @@ def prepare_patch_artifact(
     paths = parse_remediation_patch(patch)
     revision = current_git_revision(workspace)
     scan_revision = scan.get("target_revision")
-    if scan_revision and revision != scan_revision:
+    if revision != scan_revision:
         raise EngineError("remediation_code_drift", "The checkout revision no longer matches the finding scan revision.")
     touched = []
     for relative in paths:
         path = _safe_regular_file(workspace, relative)
-        touched.append({"path": relative, "sha256": sha256_file(path)})
+        touched.append({"path": relative, "sha256": sha256_file(path), "mode": _file_mode(path)})
+    unmodified_digest = worktree_content_digest(
+        workspace, ".",
+        excluded=(workspace / ".kiro" / "security-power", artifact_dir, *(workspace / item["path"] for item in touched)),
+    )
     for evidence in finding.get("codeEvidence") or []:
         relative = evidence.get("path")
         code = evidence.get("code")
@@ -158,14 +366,21 @@ def prepare_patch_artifact(
         "occurrenceId": finding["occurrenceId"],
         "baseRevision": revision,
         "scanRevision": scan_revision,
+        "scope": str(scan.get("scope") or "."),
+        "snapshotScope": ".",
         "patchPlan": _bounded_text(plan, "plan", 12000),
         "verificationPlan": checks,
         "touchedFiles": touched,
+        "unmodifiedContentDigest": unmodified_digest,
         "patchDigest": patch_digest,
     }
     path = resolve_within(artifact_dir, f"remediations/{record_id}/patch-{patch_digest}.patch")
     atomic_write(path, patch)
-    run_process("git", ["apply", "--check", "--whitespace=nowarn", str(path)], cwd=workspace)
+    run_process(
+        "git", [*_git_filter_overrides(workspace), "apply", *(["--no-index"] if revision is None else []),
+                "--check", "--whitespace=nowarn", str(path)],
+        cwd=workspace,
+    )
     return metadata, path, patch_digest
 
 
@@ -190,36 +405,86 @@ def verify_patch_inputs(workspace: Path, artifact_dir: Path, record: dict[str, A
     metadata, path = load_patch_artifact(artifact_dir, record)
     if current_git_revision(workspace) != metadata.get("baseRevision"):
         raise EngineError("remediation_code_drift", "The checkout revision changed after patch preparation.")
+    verify_unmodified_files(workspace, artifact_dir, metadata)
     for item in metadata.get("touchedFiles") or []:
         source = _safe_regular_file(workspace, item["path"])
-        if sha256_file(source) != item["sha256"]:
+        if sha256_file(source) != item["sha256"] or (
+            item.get("mode") is not None and _file_mode(source) != item["mode"]
+        ):
             raise EngineError("remediation_code_drift", f"A touched file changed after patch preparation: {item['path']}")
     return metadata, path
 
 
 def touched_file_digests(workspace: Path, metadata: dict[str, Any]) -> list[dict[str, str]]:
-    return [
-        {"path": item["path"], "sha256": sha256_file(_safe_regular_file(workspace, item["path"]))}
-        for item in metadata.get("touchedFiles") or []
-    ]
+    digests = []
+    for item in metadata.get("touchedFiles") or []:
+        source = _safe_regular_file(workspace, item["path"])
+        digest = {"path": item["path"], "sha256": sha256_file(source)}
+        if item.get("mode") is not None:
+            digest["mode"] = _file_mode(source)
+        digests.append(digest)
+    return digests
+
+
+def _materialized_patch_digests(
+    workspace: Path, metadata: dict[str, Any], patch_bytes: bytes, *, reverse: bool = False,
+) -> list[dict[str, str]]:
+    with tempfile.TemporaryDirectory(prefix="kiro-remediation-") as temporary:
+        root = Path(temporary).resolve()
+        for item in metadata.get("touchedFiles") or []:
+            destination = root / item["path"]
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(_safe_regular_file(workspace, item["path"]), destination)
+        if not reverse and touched_file_digests(root, metadata) != (metadata.get("touchedFiles") or []):
+            raise EngineError("remediation_code_drift", "A touched file changed while the approved postimage was prepared.")
+        attribute_paths = {Path(".gitattributes")}
+        for item in metadata.get("touchedFiles") or []:
+            parent = Path(item["path"]).parent
+            while parent != Path("."):
+                attribute_paths.add(parent / ".gitattributes")
+                parent = parent.parent
+        for relative in sorted(attribute_paths):
+            source = workspace / relative
+            if not source.exists() and not source.is_symlink():
+                continue
+            destination = root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(_safe_regular_file(workspace, relative.as_posix()), destination)
+        if metadata.get("baseRevision") is None:
+            args = [*_git_filter_overrides(workspace), "apply", "--no-index"]
+        else:
+            git_dir = run_process("git", ["rev-parse", "--absolute-git-dir"], cwd=workspace).stdout.strip()
+            args = [*_git_filter_overrides(workspace), f"--git-dir={git_dir}", f"--work-tree={root}", "apply"]
+        if reverse:
+            args.append("--reverse")
+        run_process("git", [*args, "--whitespace=nowarn", "-"], cwd=root, input_bytes=patch_bytes)
+        return touched_file_digests(root, metadata)
+
+
+def expected_post_apply_digests(
+    workspace: Path, metadata: dict[str, Any], patch_bytes: bytes
+) -> list[dict[str, str]]:
+    """Materialize the approved postimage away from the live workspace."""
+    return _materialized_patch_digests(workspace, metadata, patch_bytes)
 
 
 def reconcile_patch_application(
-    workspace: Path, patch_path: Path, metadata: dict[str, Any]
+    workspace: Path, patch_path: Path, metadata: dict[str, Any], expected_patch_digest: str,
 ) -> tuple[str, list[dict[str, str]]]:
     """Classify a journaled apply without trusting process-local completion state."""
     current = touched_file_digests(workspace, metadata)
     before = metadata.get("touchedFiles") or []
-    forward = run_process(
-        "git", ["apply", "--check", "--whitespace=nowarn", str(patch_path)], cwd=workspace, check=False
-    ).returncode == 0
-    reverse = run_process(
-        "git", ["apply", "--reverse", "--check", "--whitespace=nowarn", str(patch_path)],
-        cwd=workspace, check=False,
-    ).returncode == 0
-    if current == before and forward and not reverse:
+    if current == before:
         return "not_applied", current
-    if reverse and not forward:
+    try:
+        with patch_path.open("rb") as handle:
+            patch_bytes = handle.read(MAX_PATCH_BYTES + 1)
+        if len(patch_bytes) > MAX_PATCH_BYTES or hashlib.sha256(patch_bytes).hexdigest() != expected_patch_digest:
+            return "ambiguous", current
+        recovered = _materialized_patch_digests(workspace, metadata, patch_bytes, reverse=True)
+    except (EngineError, OSError):
+        return "ambiguous", current
+    if recovered == before:
         return "applied", current
     return "ambiguous", current
 

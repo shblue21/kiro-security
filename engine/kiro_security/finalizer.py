@@ -305,6 +305,21 @@ def _derived_descriptors(bundle: dict[str, Any]) -> list[dict[str, Any]]:
     return result
 
 
+def _validate_writeup_artifacts(bundle: dict[str, Any], findings: dict[str, Any]) -> None:
+    artifact_dir = Path(bundle["artifactDir"])
+    paths = set((bundle.get("writeupPaths") or {}).values())
+    paths.update(
+        writeup["reportPath"]
+        for finding in findings.get("findings") or []
+        for writeup in [finding.get("writeup")]
+        if isinstance(writeup, dict) and isinstance(writeup.get("reportPath"), str)
+    )
+    for relative in sorted(paths):
+        path = artifact_dir / relative
+        if _safe_relative(artifact_dir, path) != Path(relative).as_posix() or not path.is_file():
+            raise EngineError("unsafe_artifact_path", f"Writeup must be a scan-local regular file: {relative}")
+
+
 def _manifest_document(
     workbench: Workbench,
     scan: dict[str, Any],
@@ -403,6 +418,7 @@ def prepare_finalization(workbench: Workbench, bundle: dict[str, Any]) -> dict[s
                     "canonical_finding_identity_mismatch",
                     f"{proof_name}.findingId does not match its canonical finding.",
                 )
+    _validate_writeup_artifacts(bundle, documents["findings"])
     _validate_coverage_semantics(workbench, scan, documents["coverage"], inventory_document)
     _validate_auxiliary_documents(documents, scan_id)
 
@@ -600,10 +616,10 @@ def finalize_scan(workbench: Workbench, bundle: dict[str, Any]) -> list[dict[str
         _artifact_record_payload("markdownReport", report_path, _MEDIA_TYPES["markdownReport"], sealed_at, report_payload),
         _artifact_record_payload("hardening", hardening_path, _MEDIA_TYPES["hardening"], sealed_at, hardening_payload),
     ]
+    _validate_writeup_artifacts(bundle, findings_document)
     for finding_id, relative in sorted((bundle.get("writeupPaths") or {}).items()):
         path = artifact_dir / relative
-        if path.exists():
-            derived_records.append(_artifact_record(f"writeup:{finding_id}", path, "text/markdown", sealed_at))
+        derived_records.append(_artifact_record(f"writeup:{finding_id}", path, "text/markdown", sealed_at))
 
     def verify_sealed_snapshots() -> None:
         # Integrity gate: every sealed file on disk must still be byte-identical

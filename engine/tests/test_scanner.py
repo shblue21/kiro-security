@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from kiro_security.errors import EngineError
-from kiro_security.scanner import Inventory, SourceFile, build_inventory, scan_inventory, scan_source_file
+from kiro_security.scanner import (
+    _diff_context_patch, _git_filter_overrides, _legacy_diff_patch_projection, _tracked_content_matches_index,
+    Inventory, SourceFile, build_inventory, scan_inventory, scan_source_file,
+)
 from kiro_security.runner import ScanRunner
-from kiro_security.security import stable_id
+from kiro_security.security import run_process, stable_id
 
 from .conftest import run_git
 
@@ -207,8 +211,89 @@ def test_diff_inventory_only_reads_changed_source(workspace: Path) -> None:
     safe.write_text(safe.read_text(encoding="utf-8") + "\nuser = input()\nsubprocess.run(user, shell=True)\n", encoding="utf-8")
     result = inventory(workspace, mode="diff", diff_target_kind="working_tree")
     assert [item.relative_path for item in result.files] == ["src/safe.py"]
+    assert result.diff_context["target"]["resolvedBaseRevision"] == result.revision
+    assert result.diff_context["target"]["resolvedHeadRevision"] == result.revision
     findings = scan_inventory(result, pass_name="all", progress=lambda *_: None, cancelled=lambda: False, interrupted=lambda: False)
     assert any(item["ruleId"] == "command-injection.shell-execution" for item in findings)
+
+    original_mode = safe.stat().st_mode
+    run_git(workspace, "config", "core.fileMode", "false")
+    safe.chmod(original_mode ^ 0o100)
+    assert "old mode" not in _diff_context_patch(workspace, ".", "working_tree", None, None, 1_048_576, legacy=True)
+    assert "old mode" in _diff_context_patch(workspace, ".", "working_tree", None, None, 1_048_576)
+    safe.chmod(original_mode)
+    run_git(workspace, "config", "--unset", "core.fileMode")
+
+    note = workspace / "diff-base-note.txt"
+    note.write_text("base advanced\n", encoding="utf-8")
+    run_git(workspace, "add", "diff-base-note.txt")
+    run_git(workspace, "commit", "-m", "advance diff base")
+    for revisions in (
+        {"diff_base_revision": result.revision}, {"diff_head_revision": result.revision},
+    ):
+        with pytest.raises(EngineError) as mismatched_target:
+            inventory(workspace, mode="diff", diff_target_kind="working_tree", **revisions)
+        assert mismatched_target.value.code == "invalid_diff_target"
+    runner = ScanRunner(SimpleNamespace(workspace=workspace), "test", lambda *_: None)
+    with pytest.raises(EngineError) as error:
+        runner._build_inventory({
+            "mode": "diff", "scope": ".", "diff_target_kind": "working_tree",
+            "diff_base_revision": None, "diff_head_revision": None,
+            "target_revision": result.revision, "snapshot_digest": result.snapshot_digest,
+            "capabilities": {"maxFiles": 10_000, "maxFileBytes": 1_048_576},
+        }, require_same_snapshot=True)
+    assert error.value.code == "target_changed"
+
+    standard = inventory(workspace)
+    run_git(workspace, "commit", "--allow-empty", "-m", "advance standard target")
+    with pytest.raises(EngineError) as standard_target:
+        runner._build_inventory({
+            "mode": "standard", "scope": ".", "diff_target_kind": None,
+            "diff_base_revision": None, "diff_head_revision": None,
+            "target_revision": standard.revision, "snapshot_digest": standard.snapshot_digest,
+            "capabilities": {"maxFiles": 10_000, "maxFileBytes": 1_048_576},
+        }, require_same_snapshot=True)
+    assert standard_target.value.code == "target_changed"
+
+    unusual = workspace / "odd\nname.txt"
+    unusual.write_bytes(b"line")
+    no_newline = inventory(workspace, mode="diff", diff_target_kind="working_tree").diff_context
+    assert 'diff --git "a/odd\\nname.txt" "b/odd\\nname.txt"' in no_newline["patch"]
+    assert "\\ No newline at end of file" in no_newline["patch"]
+    legacy_patch = _diff_context_patch(workspace, ".", "working_tree", None, None, 1_048_576, legacy=True)
+    assert "\\ No newline at end of file" not in legacy_patch
+    unusual.write_bytes(b"line\n")
+    with_newline = inventory(workspace, mode="diff", diff_target_kind="working_tree").diff_context
+    assert "\\ No newline at end of file" not in with_newline["patch"]
+    assert no_newline["contextDigest"] != with_newline["contextDigest"]
+
+    ignored = workspace / "node_modules" / "ignored.js"
+    ignored.parent.mkdir(exist_ok=True)
+    ignored.write_text("console.log('ignored')\n", encoding="utf-8")
+    legacy_with_ignored = _diff_context_patch(workspace, ".", "working_tree", None, None, 1_048_576, legacy=True)
+    assert "node_modules/ignored.js" in legacy_with_ignored
+    assert "node_modules/ignored.js" not in _legacy_diff_patch_projection(legacy_with_ignored)
+    mixed_rename = "diff --git a/node_modules/old.js b/src/reviewed.js\n"
+    assert _legacy_diff_patch_projection(mixed_rename) == mixed_rename
+    malformed = "diff --git x/node_modules/old.js y/node_modules/old.js\n"
+    assert _legacy_diff_patch_projection(malformed) == malformed
+
+    marker = workspace.parent / "fsmonitor-ran"
+    hook = workspace.parent / "fsmonitor-hook.sh"
+    hook.write_text(f"#!/bin/sh\necho ran >> '{marker}'\necho\n", encoding="utf-8")
+    hook.chmod(0o755)
+    run_git(workspace, "config", "core.fsmonitor", str(hook))
+    inventory(workspace, mode="diff", diff_target_kind="working_tree")
+    assert not marker.exists()
+    run_git(workspace, "config", "--unset", "core.fsmonitor")
+
+    (workspace / "scope*").mkdir()
+    (workspace / "scope-secret").mkdir()
+    (workspace / "scope*" / "inside.py").write_text("print('inside')\n", encoding="utf-8")
+    (workspace / "scope-secret" / "outside.py").write_text("print('outside secret')\n", encoding="utf-8")
+    literal = inventory(workspace, mode="diff", scope="scope*", diff_target_kind="working_tree")
+    assert literal.diff_context["changedPaths"] == ["scope*/inside.py"]
+    assert "outside secret" not in literal.diff_context["patch"]
 
 
 def test_diff_deleted_path_stays_on_coverage_frontier(workspace: Path) -> None:
@@ -241,6 +326,48 @@ def test_diff_commit_deletion_is_reported(workspace: Path) -> None:
     assert error.value.code == "diff_target_worktree_changed"
 
 
+def test_commit_diff_uses_the_first_parent_for_merge_commits(workspace: Path, tmp_path: Path) -> None:
+    root_commit = tmp_path / "root-commit"
+    root_commit.mkdir()
+    run_git(root_commit, "init")
+    run_git(root_commit, "config", "user.email", "security-test@example.invalid")
+    run_git(root_commit, "config", "user.name", "Kiro Security Test")
+    (root_commit / "root.py").write_text("eval(input())\n", encoding="utf-8")
+    run_git(root_commit, "add", "root.py")
+    run_git(root_commit, "commit", "-m", "root")
+    root_head = run_git(root_commit, "rev-parse", "HEAD")
+    root_result = inventory(
+        root_commit.resolve(), mode="diff", diff_target_kind="commit", diff_head_revision=root_head,
+    )
+    assert [item.relative_path for item in root_result.files] == ["root.py"]
+
+    branch = run_git(workspace, "branch", "--show-current")
+    run_git(workspace, "checkout", "-b", "diff-side")
+    (workspace / "src" / "side.py").write_text("eval(input())\n", encoding="utf-8")
+    run_git(workspace, "add", "src/side.py")
+    run_git(workspace, "commit", "-m", "add side")
+    run_git(workspace, "checkout", branch)
+    (workspace / "src" / "main.py").write_text("print('main')\n", encoding="utf-8")
+    run_git(workspace, "add", "src/main.py")
+    run_git(workspace, "commit", "-m", "add main")
+    run_git(workspace, "merge", "--no-ff", "diff-side", "-m", "merge side")
+    head = run_git(workspace, "rev-parse", "HEAD")
+    first_parent = run_git(workspace, "rev-parse", "HEAD^1")
+    second_parent = run_git(workspace, "rev-parse", "HEAD^2")
+    result = inventory(
+        workspace, mode="diff", diff_target_kind="commit",
+        diff_base_revision=first_parent, diff_head_revision=head,
+    )
+    assert [item.relative_path for item in result.files] == ["src/side.py"]
+    assert result.diff_context["target"]["resolvedBaseRevision"] == first_parent
+    with pytest.raises(EngineError) as wrong_base:
+        inventory(
+            workspace, mode="diff", diff_target_kind="commit",
+            diff_base_revision=second_parent, diff_head_revision=head,
+        )
+    assert wrong_base.value.code == "invalid_diff_target"
+
+
 def test_diff_commit_rejects_content_from_a_different_checkout(workspace: Path) -> None:
     target = run_git(workspace, "rev-parse", "HEAD")
     (workspace / "src" / "safe.py").write_text('print("new checkout")\n', encoding="utf-8")
@@ -250,6 +377,18 @@ def test_diff_commit_rejects_content_from_a_different_checkout(workspace: Path) 
     with pytest.raises(EngineError) as error:
         inventory(workspace, mode="diff", diff_target_kind="commit", diff_head_revision=target)
     assert error.value.code == "diff_target_not_checked_out"
+
+    attributes = workspace / ".gitattributes"
+    attributes.write_text("src/safe.py text eol=crlf\n", encoding="utf-8")
+    (workspace / "src" / "safe.py").write_text('print("crlf checkout")\n', encoding="utf-8")
+    run_git(workspace, "add", ".gitattributes", "src/safe.py")
+    run_git(workspace, "commit", "-m", "add crlf target")
+    target = run_git(workspace, "rev-parse", "HEAD")
+    (workspace / "src" / "safe.py").unlink()
+    run_git(workspace, "checkout-index", "src/safe.py")
+    crlf = inventory(workspace, mode="diff", scope="src/safe.py", diff_target_kind="commit", diff_head_revision=target)
+    assert [item.relative_path for item in crlf.files] == ["src/safe.py"]
+    assert b"\r\n" in (workspace / "src" / "safe.py").read_bytes()
 
     target = run_git(workspace, "rev-parse", "HEAD")
     run_git(workspace, "mv", "src/safe.py", "src/renamed.py")
@@ -266,15 +405,96 @@ def test_diff_commit_rejects_content_from_a_different_checkout(workspace: Path) 
     run_git(workspace, "restore", "src/safe.py")
     clean = inventory(workspace, mode="diff", scope="src/safe.py", diff_target_kind="commit", diff_head_revision=target)
     assert "src/app.py" in {item["path"] for item in clean.diff_context["supportingPaths"]}
+    assert [item["path"] for item in clean.diff_context["sourceDigests"]] == ["src/safe.py"]
+    assert clean.diff_context["target"]["resolvedHeadRevision"] == target
+
+    filter_marker = workspace.parent / "clean-filter-ran"
+    filter_hook = workspace.parent / "clean-filter.sh"
+    filter_hook.write_text(f"#!/bin/sh\necho ran >> '{filter_marker}'\ncat\n", encoding="utf-8")
+    filter_hook.chmod(0o755)
+    attributes.write_text("src/safe.py text eol=crlf filter=review-test\n", encoding="utf-8")
+    run_git(workspace, "config", "filter.review-test.clean", str(filter_hook))
+    assert _tracked_content_matches_index(workspace, "src/safe.py")
+    assert not filter_marker.exists()
+    (workspace / "src" / "safe.py").write_text("# filter execution probe\n", encoding="utf-8")
+    with pytest.raises(EngineError) as error:
+        inventory(workspace, mode="diff", scope="src/safe.py", diff_target_kind="commit", diff_head_revision=target)
+    assert error.value.code == "diff_target_worktree_changed"
+    assert not filter_marker.exists()
+    run_git(workspace, "restore", "src/safe.py")
+
+    apply_repository = workspace.parent / "filter-apply"
+    apply_repository.mkdir()
+    run_git(apply_repository, "init")
+    run_git(apply_repository, "config", "user.email", "security-test@example.invalid")
+    run_git(apply_repository, "config", "user.name", "Kiro Security Test")
+    (apply_repository / ".gitattributes").write_text("probe.txt filter=review-test\n", encoding="utf-8")
+    (apply_repository / "probe.txt").write_text("before\n", encoding="utf-8")
+    run_git(apply_repository, "add", ".")
+    run_git(apply_repository, "commit", "-m", "filter probe")
+    run_git(apply_repository, "config", "filter.review-test.clean", str(filter_hook))
+    run_git(apply_repository, "config", "filter.review-test.smudge", str(filter_hook))
+    run_process(
+        "git", [*_git_filter_overrides(apply_repository), "apply", "--whitespace=nowarn", "-"],
+        cwd=apply_repository,
+        input_bytes=b"--- a/probe.txt\n+++ b/probe.txt\n@@ -1 +1 @@\n-before\n+after\n",
+    )
+    assert (apply_repository / "probe.txt").read_text(encoding="utf-8") == "after\n"
+    assert not filter_marker.exists()
+
+    run_git(workspace, "config", "--unset", "filter.review-test.clean")
+    included_config = workspace / ".git" / "review-filter.inc"
+    included_config.write_text(
+        f"[filter \"review-test\"]\n\tclean = {filter_hook}\n\tsmudge = {filter_hook}\n", encoding="utf-8",
+    )
+    run_git(workspace, "config", "include.path", str(included_config))
+    assert "filter.review-test.smudge=" in _git_filter_overrides(workspace)
+    (workspace / "src" / "safe.py").write_text("# included filter execution probe\n", encoding="utf-8")
+    with pytest.raises(EngineError) as error:
+        inventory(workspace, mode="diff", scope="src/safe.py", diff_target_kind="commit", diff_head_revision=target)
+    assert error.value.code == "diff_target_worktree_changed"
+    assert not filter_marker.exists()
+    run_git(workspace, "restore", "src/safe.py")
+    run_git(workspace, "config", "--unset", "include.path")
+    attributes.unlink()
+
+    long_driver = "x" * 510
+    attributes.write_text(f"src/safe.py text eol=crlf filter={long_driver}\n", encoding="utf-8")
+    run_git(workspace, "config", f"filter.{long_driver}.clean", str(filter_hook))
+    with pytest.raises(EngineError) as oversized_filter:
+        inventory(workspace, mode="diff", scope="src/safe.py", diff_target_kind="commit", diff_head_revision=target)
+    assert oversized_filter.value.code == "unsafe_git_config"
+    assert not filter_marker.exists()
+    run_git(workspace, "config", "--unset", f"filter.{long_driver}.clean")
+    attributes.unlink()
+
+    source = workspace / "src" / "safe.py"
+    original_mode = source.stat().st_mode
+    source.chmod(original_mode ^ 0o100)
+    try:
+        with pytest.raises(EngineError) as error:
+            inventory(workspace, mode="diff", scope="src/safe.py", diff_target_kind="commit", diff_head_revision=target)
+        assert error.value.code == "diff_target_worktree_changed"
+    finally:
+        source.chmod(original_mode)
 
     (workspace / "src" / "app.py").write_text("# dirty supporting sibling\n", encoding="utf-8")
     (workspace / "src" / "untracked.py").write_text("# untracked supporting sibling\n", encoding="utf-8")
+    (workspace / ".gitignore").write_text("src/ignored.py\n", encoding="utf-8")
+    (workspace / "src" / "ignored.py").write_text("# ignored supporting sibling\n", encoding="utf-8")
     filtered = inventory(workspace, mode="diff", scope="src/safe.py", diff_target_kind="commit", diff_head_revision=target)
     supporting = {item["path"] for item in filtered.diff_context["supportingPaths"]}
     assert {"src/app.py", "src/untracked.py"} <= set(filtered.diff_context["excludedSupportingPaths"])
     assert "src/app.py" not in supporting
     assert "src/untracked.py" not in supporting
+    assert "src/ignored.py" not in supporting
     assert "src/server.js" in supporting
+
+    run_git(workspace, "update-index", "--assume-unchanged", "src/safe.py")
+    (workspace / "src" / "safe.py").write_text("# hidden target drift\n", encoding="utf-8")
+    with pytest.raises(EngineError) as error:
+        inventory(workspace, mode="diff", scope="src/safe.py", diff_target_kind="commit", diff_head_revision=target)
+    assert error.value.code == "diff_target_worktree_changed"
 
 
 def test_symlink_outside_workspace_is_excluded(workspace: Path, tmp_path: Path) -> None:
@@ -288,6 +508,9 @@ def test_symlink_outside_workspace_is_excluded(workspace: Path, tmp_path: Path) 
     result = inventory(workspace)
     assert "src/outside-link.py" not in {item.relative_path for item in result.files}
     assert "src/outside-link.py" in result.exclude_paths
+    diff = inventory(workspace, mode="diff", diff_target_kind="working_tree")
+    assert "src/outside-link.py" in diff.diff_context["changedPaths"]
+    assert "abcdefghijklmnopqrstuvwxyz123456" not in diff.diff_context["patch"]
 
 
 def test_file_and_size_limits_are_reported(workspace: Path) -> None:

@@ -10,9 +10,13 @@ from .constants import is_model_scan
 from .coverage import COVERAGE_DISPOSITIONS, coverage_row_id, make_coverage_row
 from .db import Workbench
 from .errors import EngineError
-from .security import atomic_write, random_id, stable_id, utc_now, write_json
+from .security import atomic_write, random_id, resolve_within, sha256_bytes, stable_id, utc_now, write_json
 from .security_context import validate_security_context
-from .scanner import _diff_dirty_paths, _diff_supporting_exclusions, _diff_supporting_paths
+from .scanner import (
+    _diff_context_patch, _diff_dirty_paths, _diff_paths, _diff_supporting_exclusions,
+    _diff_supporting_paths, _git_file_mode, _git_revision, _legacy_diff_patch_projection,
+    _default_ignored, _tracked_content_matches_index,
+)
 
 WORKERS_PER_ROUND = 6
 MAX_ROUNDS = 10
@@ -163,28 +167,118 @@ class DeepCoordinator:
             raise EngineError("diff_context_changed", "The immutable Diff context artifact changed after preflight.")
         changed = document.get("changedPaths")
         deleted = document.get("deletedPaths")
+        source_digests = document.get("sourceDigests")
+        schema_version = document.get("schemaVersion")
         excluded = document.get("excludedSupportingPaths", [])
         supporting = document.get("supportingPaths")
         target = document.get("target")
+        source_digest_rows = source_digests if isinstance(source_digests, list) else []
+        strict_context = schema_version == "1.1"
         if (
-            not isinstance(changed, list) or not all(isinstance(item, str) for item in changed)
+            document.get("documentType") != "kiro-security-power.diff-context"
+            or schema_version not in ("1.0", "1.1")
+            or not isinstance(changed, list) or not all(isinstance(item, str) for item in changed)
             or not isinstance(deleted, list) or not all(isinstance(item, str) for item in deleted)
+            or (strict_context and not isinstance(source_digests, list))
+            or (source_digests is not None and not isinstance(source_digests, list))
+            or not all(
+                isinstance(item, dict) and isinstance(item.get("path"), str)
+                and isinstance(item.get("contentDigest"), str)
+                and (not strict_context or item.get("mode") in ("100644", "100755"))
+                for item in source_digest_rows
+            )
             or not isinstance(excluded, list) or not all(isinstance(item, str) for item in excluded)
             or not isinstance(supporting, list) or len(supporting) > 200
             or not isinstance(target, dict) or target.get("kind") not in ("working_tree", "commit", "range")
+            or not isinstance(document.get("patch"), str)
         ):
             raise EngineError("diff_context_invalid", "The Diff context source references are invalid.")
-        current_dirty = _diff_dirty_paths(self.workbench.workspace, target["kind"])
-        if current_dirty & (set(changed) | set(deleted)):
-            raise EngineError("diff_context_changed", "A Diff source changed after preflight.")
-        current_excluded = _diff_supporting_exclusions(self.workbench.workspace, current_dirty, changed)
-        if current_excluded != set(excluded):
-            raise EngineError("diff_context_changed", "The Diff supporting-source exclusions changed after preflight.")
-        max_file_bytes = int((scan.get("capabilities") or {}).get("maxFileBytes") or 1_048_576)
-        current = _diff_supporting_paths(
-            self.workbench.workspace, changed, deleted, max_file_bytes, set(excluded)
+        git_available, revision = _git_revision(self.workbench.workspace)
+        if not git_available or revision != scan.get("target_revision"):
+            raise EngineError("diff_context_changed", "The checked-out Diff base revision changed after preflight.")
+        resolved_base = target.get("resolvedBaseRevision") if strict_context else target.get("baseRevision")
+        resolved_head = target.get("resolvedHeadRevision") if strict_context else target.get("headRevision")
+        if strict_context and (
+            not isinstance(resolved_head, str) or not re.fullmatch(r"[a-f0-9]{40,64}", resolved_head)
+            or (target["kind"] == "range" and (
+                not isinstance(resolved_base, str) or not re.fullmatch(r"[a-f0-9]{40,64}", resolved_base)
+            ))
+            or resolved_head != revision
+        ):
+            raise EngineError("diff_context_invalid", "The Diff target revision seal is invalid.")
+        comparison_changed = {item for item in changed if strict_context or not _default_ignored(item)}
+        comparison_deleted = {item for item in deleted if strict_context or not _default_ignored(item)}
+        comparison_excluded = {item for item in excluded if strict_context or not _default_ignored(item)}
+        comparison_supporting = [
+            item for item in supporting
+            if strict_context or not (
+                isinstance(item, dict) and _default_ignored(str(item.get("path") or ""))
+            )
+        ]
+        current_paths, _ = _diff_paths(
+            self.workbench.workspace, str(target.get("scope") or "."), target["kind"],
+            resolved_base, resolved_head,
         )
-        if current != supporting:
+        if current_paths.existing != comparison_changed or current_paths.deleted != comparison_deleted:
+            raise EngineError("diff_context_changed", "The Diff source path set changed after preflight.")
+        for relative_path in comparison_deleted:
+            try:
+                resolve_within(self.workbench.workspace, relative_path)
+            except EngineError as exc:
+                raise EngineError("diff_context_invalid", "A deleted Diff source path is invalid.") from exc
+            candidate = self.workbench.workspace / relative_path
+            if candidate.exists() or candidate.is_symlink():
+                raise EngineError("diff_context_changed", "A deleted Diff source reappeared after preflight.")
+        max_file_bytes = int((scan.get("capabilities") or {}).get("maxFileBytes") or 1_048_576)
+        try:
+            current_patch = _diff_context_patch(
+                self.workbench.workspace, str(target.get("scope") or "."), target["kind"],
+                resolved_base, resolved_head, max_file_bytes, legacy=not strict_context,
+                include_ignored=False,
+            )
+        except EngineError as exc:
+            raise EngineError("diff_context_changed", "The bounded Diff patch changed after preflight.") from exc
+        stored_patch = document["patch"]
+        if not strict_context:
+            current_patch = _legacy_diff_patch_projection(current_patch)
+            stored_patch = _legacy_diff_patch_projection(stored_patch)
+        if current_patch != stored_patch:
+            raise EngineError("diff_context_changed", "The bounded Diff patch changed after preflight.")
+        expected_paths = {
+            str(row.get("path")) for row in worklist
+            if row.get("path") != relative and row.get("surface") != "diff_review:bounded_patch"
+        }
+        if source_digests is not None and {item["path"] for item in source_digest_rows} != expected_paths:
+            raise EngineError("diff_context_changed", "The Diff source digest set changed after preflight.")
+        if source_digests is None and target["kind"] in ("commit", "range") and any(
+            not _tracked_content_matches_index(self.workbench.workspace, item) for item in expected_paths
+        ):
+            raise EngineError("diff_context_changed", "A legacy Diff source changed after preflight.")
+        for item in source_digest_rows:
+            original = self.workbench.workspace / item["path"]
+            try:
+                source = resolve_within(self.workbench.workspace, item["path"], must_exist=True)
+                with source.open("rb") as handle:
+                    data = handle.read(max_file_bytes + 1)
+            except (EngineError, OSError) as exc:
+                raise EngineError("diff_context_changed", "A Diff source is missing or unreadable after preflight.") from exc
+            if original.is_symlink() or not source.is_file():
+                raise EngineError("diff_context_changed", "A Diff source path changed after preflight.")
+            if (
+                len(data) > max_file_bytes or "sha256:" + sha256_bytes(data) != item["contentDigest"]
+                or (item.get("mode") is not None and _git_file_mode(source) != item["mode"])
+            ):
+                raise EngineError("diff_context_changed", "A Diff source changed after preflight.")
+        current_dirty = _diff_dirty_paths(self.workbench.workspace, target["kind"])
+        if current_dirty & (comparison_changed | comparison_deleted):
+            raise EngineError("diff_context_changed", "A Diff source changed after preflight.")
+        current_excluded = _diff_supporting_exclusions(self.workbench.workspace, current_dirty, comparison_changed)
+        if current_excluded != comparison_excluded:
+            raise EngineError("diff_context_changed", "The Diff supporting-source exclusions changed after preflight.")
+        current = _diff_supporting_paths(
+            self.workbench.workspace, comparison_changed, comparison_deleted, max_file_bytes, comparison_excluded
+        )
+        if current != comparison_supporting:
             raise EngineError("diff_context_changed", "A Diff supporting source changed after preflight.")
 
     @staticmethod

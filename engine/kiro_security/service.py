@@ -17,11 +17,11 @@ from .exports import export_report
 from .hardening import create_hardening_proposal
 from .remediation import (
     MAX_PATCH_BYTES, create_remediation_artifact, current_git_revision, load_patch_artifact,
-    normalize_verification_receipt, parse_remediation_patch, prepare_patch_artifact,
-    reconcile_patch_application, touched_file_digests, verify_patch_inputs,
+    expected_post_apply_digests, normalize_verification_receipt, parse_remediation_patch, prepare_patch_artifact,
+    reconcile_patch_application, touched_file_digests, verify_patch_inputs, verify_unmodified_files,
 )
 from .runner import ScanRunner
-from .scanner import build_inventory
+from .scanner import _git_filter_overrides, build_inventory
 from .security import (
     atomic_write, canonical_workspace, random_id, redact, resolve_within, run_process,
     sha256_bytes, sha256_file, write_json,
@@ -107,8 +107,11 @@ class SecurityService:
         if record["state"] != "verifying":
             return record
         try:
-            owner_session_id = json.loads(record.get("verification_summary") or "{}").get("ownerSessionId")
+            parsed_journal = json.loads(record.get("verification_summary") or "{}")
+            applying_journal = parsed_journal if isinstance(parsed_journal, dict) else {}
+            owner_session_id = applying_journal.get("ownerSessionId")
         except (TypeError, json.JSONDecodeError):
+            applying_journal = {}
             owner_session_id = None
         if not force and owner_session_id and self.workbench.session_is_live(owner_session_id):
             raise EngineError(
@@ -118,7 +121,9 @@ class SecurityService:
         try:
             scan = self.workbench.get_scan(record["scan_id"])
             metadata, path = load_patch_artifact(Path(scan["artifact_dir"]), record)
-            state, current = reconcile_patch_application(self.workspace, path, metadata)
+            state, current = reconcile_patch_application(
+                self.workspace, path, metadata, record["patch_digest"]
+            )
         except Exception as exc:
             journal = {
                 "phase": "reconciliation_failed", "patchDigest": record.get("patch_digest"),
@@ -444,30 +449,63 @@ class SecurityService:
         except UnicodeDecodeError as exc:
             raise EngineError("remediation_patch_changed", "The prepared remediation patch is not UTF-8 text.") from exc
         run_process(
-            "git", ["apply", "--check", "--whitespace=nowarn", "-"],
+            "git", [*_git_filter_overrides(self.workspace), "apply",
+                    *(["--no-index"] if metadata.get("baseRevision") is None else []),
+                    "--check", "--whitespace=nowarn", "-"],
             cwd=self.workspace, input_bytes=patch_bytes,
         )
+        verify_unmodified_files(self.workspace, Path(scan["artifact_dir"]), metadata)
         if touched_file_digests(self.workspace, metadata) != (metadata.get("touchedFiles") or []):
             raise EngineError("remediation_code_drift", "A touched file changed after patch validation.")
+        expected_post_apply = expected_post_apply_digests(self.workspace, metadata, patch_bytes)
         applying = json.dumps({
             "phase": "applying", "patchDigest": record["patch_digest"],
             "preApplyDigests": metadata.get("touchedFiles") or [],
+            "expectedPostApplyDigests": expected_post_apply,
             "ownerSessionId": self.session_id,
         }, separators=(",", ":"))
         self.workbench.transition_remediation(
             record["id"], params["expectedVersion"], "generated", "verifying", verification_summary=applying
         )
         try:
+            verify_unmodified_files(self.workspace, Path(scan["artifact_dir"]), metadata)
             if touched_file_digests(self.workspace, metadata) != (metadata.get("touchedFiles") or []):
                 raise EngineError("remediation_code_drift", "A touched file changed before patch application.")
             run_process(
-                "git", ["apply", "--whitespace=nowarn", "-"],
+                "git", [*_git_filter_overrides(self.workspace), "apply",
+                        *(["--no-index"] if metadata.get("baseRevision") is None else []),
+                        "--whitespace=nowarn", "-"],
                 cwd=self.workspace, input_bytes=patch_bytes,
             )
+            observed_post_apply = touched_file_digests(self.workspace, metadata)
+            try:
+                verify_unmodified_files(self.workspace, Path(scan["artifact_dir"]), metadata)
+            except EngineError:
+                drift = json.dumps({
+                    "phase": "apply_content_drift", "patchDigest": record["patch_digest"],
+                    "expectedPostApplyDigests": expected_post_apply,
+                    "observedPostApplyDigests": observed_post_apply,
+                }, separators=(",", ":"))
+                self.workbench.transition_remediation(
+                    record["id"], params["expectedVersion"], "verifying", "failed",
+                    verification_summary=drift,
+                )
+                raise
+            if observed_post_apply != expected_post_apply:
+                drift = json.dumps({
+                    "phase": "apply_content_drift", "patchDigest": record["patch_digest"],
+                    "expectedPostApplyDigests": expected_post_apply,
+                    "observedPostApplyDigests": observed_post_apply,
+                }, separators=(",", ":"))
+                self.workbench.transition_remediation(
+                    record["id"], params["expectedVersion"], "verifying", "failed",
+                    verification_summary=drift,
+                )
+                raise EngineError("remediation_code_drift", "A touched file changed during patch application.")
             applied = json.dumps({
                 "phase": "applied", "patchDigest": record["patch_digest"],
                 "preApplyDigests": metadata.get("touchedFiles") or [],
-                "postApplyDigests": touched_file_digests(self.workspace, metadata),
+                "postApplyDigests": observed_post_apply,
             }, separators=(",", ":"))
             result = self.workbench.transition_remediation(
                 record["id"], params["expectedVersion"], "verifying", "applied", verification_summary=applied
@@ -487,11 +525,13 @@ class SecurityService:
         record = self.workbench.get_remediation_record(params["remediationId"])
         if record["state"] != "applied" or record["version"] != params["expectedVersion"]:
             raise EngineError("remediation_state_conflict", "Only the expected applied remediation can be verified.")
+        scan = self.workbench.get_scan(record["scan_id"])
+        metadata, _ = load_patch_artifact(Path(scan["artifact_dir"]), record)
         try:
             application = json.loads(record["verification_summary"])
-            metadata = json.loads(record["summary"])
         except (TypeError, json.JSONDecodeError) as exc:
             raise EngineError("remediation_record_invalid", "Remediation application metadata is invalid.") from exc
+        verify_unmodified_files(self.workspace, Path(scan["artifact_dir"]), metadata)
         if application.get("postApplyDigests") != touched_file_digests(self.workspace, metadata):
             raise EngineError("remediation_code_drift", "Touched files changed after the remediation was applied.")
         receipt = normalize_verification_receipt(params["verification"])
@@ -500,7 +540,6 @@ class SecurityService:
             "occurrenceId": record["occurrence_id"], "patchDigest": record["patch_digest"],
             "postApplyDigests": application["postApplyDigests"],
         })
-        scan = self.workbench.get_scan(record["scan_id"])
         receipt_digest = sha256_bytes(
             (json.dumps(receipt, indent=2, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
         )

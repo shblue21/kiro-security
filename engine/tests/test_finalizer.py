@@ -422,12 +422,24 @@ def test_canonical_schema_contract_rejects_malformed_mutations(workspace: Path) 
         "residualUncertainty": "None observed.", "severity": {"level": "high", "rationale": "Code execution."},
         "exploitability": "high", "confidence": {"level": "high", "rationale": "Focused test passed."},
     }
-    deep_item = {**item, "fingerprint": "kiro-security/deep-v1:sha256:" + "d" * 64}
+    explicit_root_cause = "The reviewed request value reaches the shell sink without command validation."
+    deep_item = {
+        **item,
+        "fingerprint": "kiro-security/deep-v1:sha256:" + "d" * 64,
+        "details": {"rootCause": explicit_root_cause},
+    }
     deep = build_findings_document(
         scan["id"], [deep_item], {finding_id: f"findings/{finding_id}/{finding_id}.md"},
         {"validation": {occurrence_id: deep_validation}, "attack_path": {occurrence_id: deep_attack}},
     )
+    assert deep["findings"][0]["rootCause"] == explicit_root_cause
     valid(deep, "findings.schema.json")
+    structured_root_cause = {"summary": explicit_root_cause, "evidenceRefs": ["evidence-1"]}
+    structured = build_findings_document(
+        scan["id"], [{**deep_item, "details": {"rootCause": structured_root_cause}}]
+    )
+    assert structured["findings"][0]["rootCause"] == structured_root_cause
+    valid(structured, "findings.schema.json")
     findings_path = Path(prepared["paths"]["findings"])
     original_findings = findings_path.read_bytes()
     identity_mismatch = deepcopy(deep)
@@ -448,6 +460,18 @@ def test_canonical_schema_contract_rejects_malformed_mutations(workspace: Path) 
     legacy = build_findings_document(scan["id"], [legacy_item])
     assert "rootCause" not in legacy["findings"][0]
     valid(legacy, "findings.schema.json")
+
+    writeup_relative = f"findings/{finding_id}/{finding_id}.md"
+    writeup_path = Path(prepared["artifactDir"]) / writeup_relative
+    writeup_path.parent.mkdir(parents=True, exist_ok=True)
+    writeup_path.write_text("# Dedicated writeup\n", encoding="utf-8")
+    prepared["writeupPaths"] = {finding_id: writeup_relative}
+    prepared_with_writeup = prepare_finalization(workbench, prepared)
+    writeup_path.unlink()
+    with pytest.raises(EngineError) as missing_writeup:
+        finalize_scan(workbench, prepared_with_writeup)
+    assert missing_writeup.value.code == "artifact_missing"
+    prepared.pop("writeupPaths")
 
     for name, value in (("findingId", "bad"), ("occurrenceId", "bad")):
         mutation = deepcopy(standard)

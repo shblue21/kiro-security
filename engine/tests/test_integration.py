@@ -8,6 +8,7 @@ from pathlib import Path
 
 import jsonschema
 import pytest
+import kiro_security.remediation as remediation_module
 import kiro_security.service as service_module
 
 from kiro_security.errors import EngineError
@@ -561,6 +562,22 @@ def test_deep_and_diff_modes_use_real_repository_state(workspace: Path) -> None:
         diff_findings = service.list_findings({"scanId": diff["id"]})
         assert diff_findings
         assert all(item["locations"][0]["path"] == "src/safe.py" for item in diff_findings)
+
+        model_diff = service.start_scan({
+            "mode": "diff", "analysisProfile": "model", "scope": ".",
+            "diffTargetKind": "working_tree", "modelId": "integration-model", "runtime": DEEP_WORKER_RUNTIME,
+        })
+        deadline = time.monotonic() + 10
+        while service.deep_get_status({"scanId": model_diff["id"]}).get("nextAction") != "claim_worker":
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+        changed.write_text(changed.read_text(encoding="utf-8") + "\n# changed after Diff preflight\n", encoding="utf-8")
+        with pytest.raises(EngineError) as drift:
+            service.deep_claim_worker({
+                "scanId": model_diff["id"], "modelId": "integration-model",
+                "delegationId": "diff-drift", "runtime": DEEP_WORKER_RUNTIME,
+            })
+        assert drift.value.code == "diff_context_changed"
     finally:
         service.shutdown({})
 
@@ -699,6 +716,47 @@ def test_shutdown_handoff_and_resume_after_restart(workspace: Path) -> None:
         second.shutdown({})
 
 
+def test_range_diff_resume_uses_resolved_revisions(workspace: Path) -> None:
+    base = run_git(workspace, "rev-parse", "HEAD")
+    run_git(workspace, "tag", "resume-base", base)
+    source = workspace / "src" / "safe.py"
+    source.write_text(source.read_text(encoding="utf-8") + "\nprint('range head')\n", encoding="utf-8")
+    run_git(workspace, "add", "src/safe.py")
+    run_git(workspace, "commit", "-m", "range head")
+    head = run_git(workspace, "rev-parse", "HEAD")
+
+    first = service_for(workspace)
+    scan = first.start_scan({
+        "mode": "diff", "analysisProfile": "model", "scope": ".", "diffTargetKind": "range",
+        "diffBaseRevision": "resume-base", "diffHeadRevision": head,
+        "modelId": "integration-model", "runtime": DEEP_WORKER_RUNTIME,
+    })
+    deadline = time.monotonic() + 10
+    while first.deep_get_status({"scanId": scan["id"]}).get("nextAction") != "claim_worker":
+        assert time.monotonic() < deadline
+        time.sleep(0.02)
+    sealed = first.get_scan({"scanId": scan["id"]})
+    assert sealed["diff_base_revision"] == base
+    assert sealed["diff_head_revision"] == head
+    first.shutdown({})
+    run_git(workspace, "tag", "-d", "resume-base")
+
+    second = service_for(workspace)
+    try:
+        second.resume_scan({"scanId": scan["id"]})
+        deadline = time.monotonic() + 10
+        while (
+            scan["id"] in second.runner.active_scan_ids()
+            or second.deep_get_status({"scanId": scan["id"]}).get("nextAction") != "claim_worker"
+        ):
+            assert time.monotonic() < deadline
+            assert second.get_scan({"scanId": scan["id"]})["status"] == "running"
+            time.sleep(0.02)
+        assert second.get_scan({"scanId": scan["id"]})["status"] == "running"
+    finally:
+        second.shutdown({})
+
+
 def test_source_locations_are_workspace_relative_and_existing(workspace: Path) -> None:
     service = service_for(workspace)
     try:
@@ -769,6 +827,96 @@ def test_tracking_handoff_related_artifacts_and_cleanup(workspace: Path, tmp_pat
         service.shutdown({})
 
 
+def test_unversioned_standard_remediation_uses_directory_snapshot(tmp_path: Path) -> None:
+    workspace = tmp_path / "unversioned"
+    (workspace / "src").mkdir(parents=True)
+    (workspace / "config").mkdir()
+    source = workspace / "src" / "app.py"
+    unrelated = workspace / "config" / "security.py"
+    source.write_text("import os\nuser = input()\nos.system(user)\n", encoding="utf-8")
+    unrelated.write_text("POLICY = 'AAAA'\n", encoding="utf-8")
+    service = service_for(workspace)
+    try:
+        scan = wait_for_scan(service, service.start_scan({"mode": "standard", "scope": "src"})["id"])
+        assert scan["status"] == "completed" and scan["target_revision"] is None
+        finding = next(
+            item for item in service.list_findings({"scanId": scan["id"]})
+            if item["ruleId"] == "command-injection.shell-execution"
+        )
+        patch = (
+            "--- a/src/app.py\n+++ b/src/app.py\n@@ -1,3 +1,3 @@\n import os\n user = input()\n"
+            "-os.system(user)\n+os.system('echo safe')\n"
+        )
+        prepared = service.prepare_remediation_patch({
+            "occurrenceId": finding["occurrenceId"], "patch": patch, "plan": "Use a fixed value.",
+            "verificationPlan": ["Run the focused source check."],
+        })
+        metadata = json.loads(service.workbench.get_remediation_record(prepared["id"])["summary"])
+        assert metadata["scope"] == "src" and metadata["snapshotScope"] == "."
+        unrelated.write_text("POLICY = 'BBBB'\n", encoding="utf-8")
+        with pytest.raises(EngineError) as outside_scope_drift:
+            service.apply_remediation_patch({
+                "remediationId": prepared["id"], "expectedVersion": prepared["version"],
+            })
+        assert outside_scope_drift.value.code == "remediation_code_drift"
+        unrelated.write_text("POLICY = 'AAAA'\n", encoding="utf-8")
+        applied = service.apply_remediation_patch({
+            "remediationId": prepared["id"], "expectedVersion": prepared["version"],
+        })
+        verified = service.verify_remediation_patch({
+            "remediationId": applied["id"], "expectedVersion": applied["version"],
+            "verification": {
+                "outcome": "verified", "originalIssueNoLongerReproduces": True, "preservedBehavior": True,
+                "securityValidation": {
+                    "status": "passed", "method": "focused source review",
+                    "rationale": "Attacker input no longer reaches the sink.", "evidence": ["The sink uses a fixed value."],
+                },
+                "tests": [{"command": "python focused smoke", "status": "passed", "summary": "passed"}],
+                "proofGaps": [],
+            },
+        })
+        assert verified["state"] == "verified" and "echo safe" in source.read_text(encoding="utf-8")
+    finally:
+        service.shutdown({})
+
+
+def test_remediation_snapshot_rejects_nested_submodule_drift(tmp_path: Path) -> None:
+    def initialize(repository: Path) -> None:
+        repository.mkdir()
+        run_git(repository, "init")
+        run_git(repository, "config", "user.email", "security-test@example.invalid")
+        run_git(repository, "config", "user.name", "Kiro Security Test")
+
+    leaf = tmp_path / "leaf"
+    initialize(leaf)
+    (leaf / "value.txt").write_text("one\n", encoding="utf-8")
+    run_git(leaf, "add", ".")
+    run_git(leaf, "commit", "-m", "leaf one")
+    leaf_one = run_git(leaf, "rev-parse", "HEAD")
+    (leaf / "value.txt").write_text("two\n", encoding="utf-8")
+    run_git(leaf, "commit", "-am", "leaf two")
+    leaf_two = run_git(leaf, "rev-parse", "HEAD")
+    run_git(leaf, "checkout", leaf_one)
+
+    middle = tmp_path / "middle"
+    initialize(middle)
+    run_git(middle, "-c", "protocol.file.allow=always", "submodule", "add", str(leaf), "leaf")
+    run_git(middle, "config", "-f", ".gitmodules", "submodule.leaf.ignore", "all")
+    run_git(middle, "add", ".")
+    run_git(middle, "commit", "-m", "nested leaf")
+
+    workspace = tmp_path / "workspace-with-submodule"
+    initialize(workspace)
+    run_git(workspace, "-c", "protocol.file.allow=always", "submodule", "add", str(middle), "vendor/middle")
+    run_git(workspace, "commit", "-am", "middle submodule")
+    run_git(workspace, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive")
+    remediation_module.worktree_content_digest(workspace, ".")
+    run_git(workspace / "vendor" / "middle" / "leaf", "checkout", leaf_two)
+    with pytest.raises(EngineError) as nested_drift:
+        remediation_module.worktree_content_digest(workspace, ".")
+    assert nested_drift.value.code == "remediation_code_drift"
+
+
 def test_h_workflow_artifacts_state_and_proof_are_immutable(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     service = service_for(workspace)
     try:
@@ -817,6 +965,28 @@ def test_h_workflow_artifacts_state_and_proof_are_immutable(workspace: Path, mon
         original_run_process = service_module.run_process
         original_source = (workspace / "src" / "app.py").read_text(encoding="utf-8")
 
+        record = service.workbench.get_remediation_record(prepared_two["id"])
+        metadata, patch_path = remediation_module.load_patch_artifact(Path(completed["artifact_dir"]), record)
+        legacy_metadata = {key: value for key, value in metadata.items() if key != "unmodifiedContentDigest"}
+        with pytest.raises(EngineError) as legacy_snapshot:
+            remediation_module.verify_unmodified_files(service.workspace, Path(completed["artifact_dir"]), legacy_metadata)
+        assert legacy_snapshot.value.code == "remediation_record_invalid"
+        approved_patch = patch_path.read_bytes()
+        swapped_patch = approved_patch.replace(b"+    os.system('echo safe')", b"+    os.system('echo swapped')")
+        assert swapped_patch != approved_patch
+        try:
+            patch_path.write_bytes(swapped_patch)
+            (workspace / "src" / "app.py").write_text(
+                original_source.replace("os.system(command)", "os.system('echo swapped')"), encoding="utf-8",
+            )
+            reconciled, _ = remediation_module.reconcile_patch_application(
+                service.workspace, patch_path, metadata, record["patch_digest"],
+            )
+            assert reconciled == "ambiguous"
+        finally:
+            patch_path.write_bytes(approved_patch)
+            (workspace / "src" / "app.py").write_text(original_source, encoding="utf-8")
+
         def replace_source_after_check(executable: str, args: list[str], **kwargs: object):
             result = original_run_process(executable, args, **kwargs)
             if executable == "git" and args[:2] == ["apply", "--check"]:
@@ -832,6 +1002,58 @@ def test_h_workflow_artifacts_state_and_proof_are_immutable(workspace: Path, mon
         assert service.workbench.get_remediation_record(prepared_two["id"])["state"] == "generated"
         (workspace / "src" / "app.py").write_text(original_source, encoding="utf-8")
 
+        race_prepared = service.prepare_remediation_patch({
+            "occurrenceId": finding["occurrenceId"], "patch": patch, "plan": "Reject concurrent source drift.",
+            "verificationPlan": ["Run the focused command route test."],
+        })
+        original_copy2 = remediation_module.shutil.copy2
+        changed_during_copy = False
+
+        def change_before_copy(source: str, destination: str, *args: object, **kwargs: object):
+            nonlocal changed_during_copy
+            if Path(source).resolve() == (workspace / "src" / "app.py").resolve() and not changed_during_copy:
+                with Path(source).open("a", encoding="utf-8") as handle:
+                    handle.write("\n# raced expected preimage\n")
+                changed_during_copy = True
+            return original_copy2(source, destination, *args, **kwargs)
+
+        monkeypatch.setattr(remediation_module.shutil, "copy2", change_before_copy)
+        with pytest.raises(EngineError) as raced_preimage:
+            service.apply_remediation_patch({
+                "remediationId": race_prepared["id"], "expectedVersion": race_prepared["version"],
+            })
+        assert raced_preimage.value.code == "remediation_code_drift"
+        assert service.workbench.get_remediation_record(race_prepared["id"])["state"] == "generated"
+        monkeypatch.setattr(remediation_module.shutil, "copy2", original_copy2)
+        (workspace / "src" / "app.py").write_text(original_source, encoding="utf-8")
+
+        changed_during_apply = False
+
+        def change_during_apply(executable: str, args: list[str], **kwargs: object):
+            nonlocal changed_during_apply
+            result = original_run_process(executable, args, **kwargs)
+            if executable == "git" and args[:2] == ["apply", "--whitespace=nowarn"] and not changed_during_apply:
+                with (workspace / "src" / "app.py").open("a", encoding="utf-8") as handle:
+                    handle.write("\n# concurrent writer\n")
+                changed_during_apply = True
+            return result
+
+        monkeypatch.setattr(service_module, "run_process", change_during_apply)
+        with pytest.raises(EngineError) as concurrent_drift:
+            service.apply_remediation_patch({
+                "remediationId": race_prepared["id"], "expectedVersion": race_prepared["version"],
+            })
+        assert concurrent_drift.value.code == "remediation_code_drift"
+        failed_race = service.workbench.get_remediation_record(race_prepared["id"])
+        assert failed_race["state"] == "failed"
+        assert json.loads(failed_race["verification_summary"])["phase"] == "apply_content_drift"
+        (workspace / "src" / "app.py").write_text(original_source, encoding="utf-8")
+
+        final_prepared = service.prepare_remediation_patch({
+            "occurrenceId": finding["occurrenceId"], "patch": patch, "plan": "Apply the captured approved patch.",
+            "verificationPlan": ["Run the focused command route test."],
+        })
+
         alternate_patch = (
             "--- a/src/safe.py\n+++ b/src/safe.py\n@@ -1 +1 @@\n"
             "-from pathlib import Path\n+raise RuntimeError('unapproved replacement')\n"
@@ -842,13 +1064,13 @@ def test_h_workflow_artifacts_state_and_proof_are_immutable(workspace: Path, mon
             nonlocal replaced
             result = original_run_process(executable, args, **kwargs)
             if executable == "git" and args[:2] == ["apply", "--check"] and not replaced:
-                Path(prepared_two["artifact_path"]).write_text(alternate_patch, encoding="utf-8")
+                Path(final_prepared["artifact_path"]).write_text(alternate_patch, encoding="utf-8")
                 replaced = True
             return result
 
         monkeypatch.setattr(service_module, "run_process", replace_patch_after_check)
         applied = service.apply_remediation_patch({
-            "remediationId": prepared_two["id"], "expectedVersion": prepared_two["version"],
+            "remediationId": final_prepared["id"], "expectedVersion": final_prepared["version"],
         })
         monkeypatch.setattr(service_module, "run_process", original_run_process)
         assert applied["state"] == "applied"
@@ -861,26 +1083,59 @@ def test_h_workflow_artifacts_state_and_proof_are_immutable(workspace: Path, mon
                 "verificationPlan": ["No-op"],
             })
         assert busy.value.code == "remediation_busy"
+        verification = {
+            "outcome": "verified", "originalIssueNoLongerReproduces": True, "preservedBehavior": True,
+            "securityValidation": {"status": "passed", "method": "focused", "rationale": "token=secret-value-hidden", "evidence": ["route rejects attacker control"]},
+            "tests": [{"command": "TOKEN=secret-value-hidden pytest focused", "status": "passed", "summary": "passed"}],
+            "proofGaps": [],
+        }
+        with pytest.raises(EngineError) as changed_artifact:
+            service.verify_remediation_patch({
+                "remediationId": applied["id"], "expectedVersion": applied["version"],
+                "verification": verification,
+            })
+        assert changed_artifact.value.code == "remediation_patch_changed"
+        Path(final_prepared["artifact_path"]).write_text(patch, encoding="utf-8")
+
+        source = workspace / "src" / "app.py"
+        original_mode = source.stat().st_mode
+        source.chmod(original_mode ^ 0o100)
+        try:
+            with pytest.raises(EngineError) as mode_drift:
+                service.verify_remediation_patch({
+                    "remediationId": applied["id"], "expectedVersion": applied["version"],
+                    "verification": verification,
+                })
+            assert mode_drift.value.code == "remediation_code_drift"
+        finally:
+            source.chmod(original_mode)
+        unrelated = workspace / "src" / "safe.py"
+        unrelated_source = unrelated.read_text(encoding="utf-8")
+        unrelated.write_text(unrelated_source + "\n# unrelated drift\n", encoding="utf-8")
+        try:
+            with pytest.raises(EngineError) as unrelated_drift:
+                service.verify_remediation_patch({
+                    "remediationId": applied["id"], "expectedVersion": applied["version"],
+                    "verification": verification,
+                })
+            assert unrelated_drift.value.code == "remediation_code_drift"
+        finally:
+            unrelated.write_text(unrelated_source, encoding="utf-8")
         verified = service.verify_remediation_patch({
             "remediationId": applied["id"], "expectedVersion": applied["version"],
-            "verification": {
-                "outcome": "verified", "originalIssueNoLongerReproduces": True, "preservedBehavior": True,
-                "securityValidation": {"status": "passed", "method": "focused", "rationale": "token=secret-value-hidden", "evidence": ["route rejects attacker control"]},
-                "tests": [{"command": "TOKEN=secret-value-hidden pytest focused", "status": "passed", "summary": "passed"}],
-                "proofGaps": [],
-            },
+            "verification": verification,
         })
         verification_path = Path(verified["verificationArtifact"]["path"])
-        assert verified["state"] == "verified" and prepared_two["id"] in str(verification_path)
+        assert verified["state"] == "verified" and final_prepared["id"] in str(verification_path)
         assert "secret-value-hidden" not in verification_path.read_text(encoding="utf-8")
-        assert all(part not in (".git", ".kiro") for part in Path(prepared_two["artifact_path"]).parts[-3:])
+        assert all(part not in (".git", ".kiro") for part in Path(final_prepared["artifact_path"]).parts[-3:])
         service.workbench.transition_remediation(
-            prepared_two["id"], prepared_two["version"], "verified", "verifying",
-            verification_summary=json.dumps({"phase": "applying", "patchDigest": prepared_two["patch_digest"]}),
+            final_prepared["id"], final_prepared["version"], "verified", "verifying",
+            verification_summary=json.dumps({"phase": "applying", "patchDigest": final_prepared["patch_digest"]}),
         )
-        Path(prepared_two["artifact_path"]).unlink()
+        Path(final_prepared["artifact_path"]).unlink()
         orphaned = service._reconcile_remediation_record(
-            service.workbench.get_remediation_record(prepared_two["id"])
+            service.workbench.get_remediation_record(final_prepared["id"])
         )
         assert orphaned["state"] == "failed" and "reconciliation_failed" in orphaned["verification_summary"]
 
@@ -890,6 +1145,7 @@ def test_h_workflow_artifacts_state_and_proof_are_immutable(workspace: Path, mon
         assert redact('Authorization: "first\r\nsecond"') == 'Authorization: "<redacted>"'
         assert redact('Authorization: "first\r\nsecond') == 'Authorization: "<redacted>'
         assert redact('Authorization: "first\r\nsecond\\') == 'Authorization: "<redacted>'
+        assert redact("Authorization: Custom\r\n LEAKME123\r\nrequestId=keep") == "Authorization: <redacted>\r\nrequestId=keep"
         assert "secret-value-hidden" not in redact('{"Authorization": "Bearer secret-value-hidden"}')
         aws = redact(
             "Authorization: AWS4-HMAC-SHA256 Credential=AKIAEXAMPLE/20260718/us-east-1/service/aws4_request, "

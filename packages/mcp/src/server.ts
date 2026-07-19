@@ -9,7 +9,8 @@ const SERVER_VERSION = "0.3.0";
 const MCP_PROTOCOLS = new Set(["2024-11-05", "2025-03-26", "2025-06-18"]);
 const extensionRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-interface JsonRpcRequest { jsonrpc: "2.0"; id?: string | number | null; method: string; params?: Record<string, unknown>; }
+type JsonRpcId = string | number;
+interface JsonRpcRequest { jsonrpc: "2.0"; id: JsonRpcId; method: string; params?: Record<string, unknown>; }
 interface Pending { resolve(value: unknown): void; reject(error: Error): void; timer: NodeJS.Timeout; }
 
 class EngineRpcError extends Error {
@@ -21,11 +22,15 @@ class EngineRpcError extends Error {
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+function isRequestId(value: unknown): value is JsonRpcId {
+  return typeof value === "string" || (typeof value === "number" && Number.isInteger(value));
+}
 function boundedString(value: unknown, max = 8192): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= max && !value.includes("\0");
 }
 function canonicalWorkspace(value: unknown): string {
-  const requested = boundedString(value) ? value : process.env.KIRO_SECURITY_WORKSPACE || process.cwd();
+  if (!boundedString(value)) throw new Error("workspaceRoot must identify a bounded local directory path.");
+  const requested = value;
   const resolved = fs.realpathSync(path.resolve(requested));
   if (!fs.statSync(resolved).isDirectory()) throw new Error("workspaceRoot must identify a local directory.");
   return resolved;
@@ -236,7 +241,7 @@ const toolDefinitions = [
   {
     name: "security_start_scan",
     description: "Start a model Standard, Deep, or Git-diff scan with explicit analysisProfile=model and truthful model/runtime host attestation. VSIX Fast is separate.",
-    inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, mode: { type: "string", enum: ["standard", "deep", "diff"] }, analysisProfile: { type: "string", const: "model" }, scope: { type: "string", default: "." }, diffTargetKind: { type: "string", enum: ["working_tree", "commit", "range"] }, diffBaseRevision: { type: "string" }, diffHeadRevision: { type: "string" }, modelId: { type: "string" }, runtime: { type: "object" } }, required: ["workspaceRoot", "mode", "analysisProfile", "modelId", "runtime"], additionalProperties: false },
+    inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, mode: { type: "string", enum: ["standard", "deep", "diff"] }, analysisProfile: { type: "string", const: "model" }, scope: { type: "string", minLength: 1, default: "." }, diffTargetKind: { type: "string", enum: ["working_tree", "commit", "range"] }, diffBaseRevision: { type: "string" }, diffHeadRevision: { type: "string" }, modelId: { type: "string" }, runtime: { type: "object" } }, required: ["workspaceRoot", "mode", "analysisProfile", "modelId", "runtime"], additionalProperties: false },
   },
   { name: "security_list_scans", description: "List recent scans, including scans started by the VSIX or another MCP session.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 200 } }, required: ["workspaceRoot"], additionalProperties: false } },
   { name: "security_resume_scan", description: "Resume an interrupted or failed scan using durable handoff state.", inputSchema: idSchema("scanId") },
@@ -321,7 +326,7 @@ const toolDefinitions = [
   { name: "security_deep_get_tail_assignment", description: "Claim the next eligible fresh-context Deep tail assignment after canonical discovery.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, scanId: { type: "string" }, modelId: { type: "string" }, delegationId: { type: "string" }, runtime: { type: "object" } }, required: ["workspaceRoot", "scanId", "modelId", "delegationId", "runtime"], additionalProperties: false } },
   { name: "security_deep_submit_tail_result", description: "Submit one kind-checked Deep tail result with the same claim profile and a truthful completion attestation.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, scanId: { type: "string" }, assignmentId: { type: "string" }, claimToken: { type: "string" }, modelId: { type: "string" }, delegationId: { type: "string" }, runtime: { type: "object" }, completionAttestation: { type: "object" }, result: { type: "object" } }, required: ["workspaceRoot", "scanId", "assignmentId", "claimToken", "modelId", "delegationId", "runtime", "completionAttestation", "result"], additionalProperties: false } },
   { name: "security_deep_retry_writeup", description: "Retry only the latest incomplete or failed Deep writeup attempt; completed writeups are immutable.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, scanId: { type: "string" }, assignmentId: { type: "string" }, reason: { type: "string", maxLength: 4000 } }, required: ["workspaceRoot", "scanId", "assignmentId"], additionalProperties: false } },
-  { name: "security_list_findings", description: "List normalized findings for a scan.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, scanId: { type: "string" }, search: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 2000 } }, required: ["workspaceRoot", "scanId"], additionalProperties: false } },
+  { name: "security_list_findings", description: "List normalized findings for a scan.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, scanId: { type: "string" }, search: { type: "string", minLength: 1, maxLength: 200 }, limit: { type: "integer", minimum: 1, maximum: 2000 } }, required: ["workspaceRoot", "scanId"], additionalProperties: false } },
   { name: "security_get_finding", description: "Get one finding with evidence, validation, attack path, triage, and remediation records.", inputSchema: idSchema("occurrenceId") },
   { name: "security_validate_finding", description: "Validate a finding and produce an attack-path record where applicable.", inputSchema: idSchema("occurrenceId") },
   { name: "security_triage_finding", description: "Record an auditable triage decision for a finding.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, occurrenceId: { type: "string" }, decision: { type: "string", enum: ["open", "accepted_risk", "false_positive", "already_fixed", "wont_fix"] }, note: { type: "string", maxLength: 4000 } }, required: ["workspaceRoot", "occurrenceId", "decision"], additionalProperties: false } },
@@ -334,7 +339,7 @@ const toolDefinitions = [
   { name: "security_create_tracking_handoff", description: "Seal an approved connector/destination/duplicate-search proof without an external write.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, occurrenceId: { type: "string" }, provider: { type: "string", enum: ["manual", "github", "linear", "jira"] }, destination: { type: "string", maxLength: 512 }, stableLink: { type: "string", maxLength: 4096 }, trackingProof: { type: "object" } }, required: ["workspaceRoot", "occurrenceId", "provider", "trackingProof"], additionalProperties: false } },
   { name: "security_record_tracking_result", description: "Record sanitized connector readback for an approved handoff; performs no provider network write.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, recordId: { type: "string" }, payloadSha256: { type: "string", pattern: "^[a-f0-9]{64}$" }, outcome: { type: "string", enum: ["created", "updated", "reused", "blocked", "failed", "uncertain"] }, externalMutationPerformed: { type: "boolean" }, externalId: { type: "string", maxLength: 512 }, externalUrl: { type: "string", maxLength: 4096 }, reason: { type: "string", maxLength: 4000 }, approval: { type: "object", properties: { approved: { const: true }, approvedPreviewDigest: { type: "string", pattern: "^[a-f0-9]{64}$" }, approvedPayloadSha256: { type: "string", pattern: "^[a-f0-9]{64}$" }, approvedBy: { type: "string", maxLength: 512 }, approvedAt: { type: "string", maxLength: 128 }, scope: { type: "string", maxLength: 2000 } }, required: ["approved", "approvedPreviewDigest", "approvedPayloadSha256", "approvedBy", "approvedAt", "scope"], additionalProperties: false }, readback: { type: "object" } }, required: ["workspaceRoot", "recordId", "payloadSha256", "outcome", "externalMutationPerformed"], additionalProperties: false } },
   { name: "security_create_hardening_proposal", description: "Create a structural hardening proposal for a scan.", inputSchema: idSchema("scanId") },
-  { name: "security_create_threat_model", description: "Create or refresh a workspace threat model.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, scope: { type: "string", default: "." } }, required: ["workspaceRoot"], additionalProperties: false } },
+  { name: "security_create_threat_model", description: "Create or refresh a workspace threat model.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, scope: { type: "string", minLength: 1, default: "." } }, required: ["workspaceRoot"], additionalProperties: false } },
   { name: "security_export_report", description: "Export a scan or one finding as Markdown, JSON, CSV, or SARIF.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, scanId: { type: "string" }, occurrenceId: { type: "string" }, format: { type: "string", enum: ["markdown", "json", "csv", "sarif"] }, destination: { type: "string" } }, required: ["workspaceRoot", "scanId", "format"], additionalProperties: false } },
 ];
 
@@ -354,6 +359,7 @@ for (const tool of toolDefinitions) {
   const properties = tool.inputSchema.properties as Record<string, Record<string, unknown>>;
   for (const [name, schema] of Object.entries(properties)) {
     if (schema.type === "string" && schema.maxLength === undefined && TOOL_STRING_LIMITS[name] !== undefined) schema.maxLength = TOOL_STRING_LIMITS[name];
+    if (name === "workspaceRoot" && schema.minLength === undefined) schema.minLength = 1;
   }
 }
 
@@ -364,6 +370,11 @@ function idSchema(name: string): Record<string, unknown> {
 async function callTool(name: string, rawArguments: unknown): Promise<unknown> {
   if (!isObject(rawArguments)) throw new Error("Tool arguments must be an object.");
   const params = rawArguments;
+  const tool = toolDefinitions.find((item) => item.name === name);
+  if (!tool) throw new Error(`Unknown security tool: ${name}`);
+  const allowed = new Set(Object.keys(tool.inputSchema.properties as Record<string, unknown>));
+  const unexpected = Object.keys(params).filter((key) => !allowed.has(key)).sort();
+  if (unexpected.length) throw new Error(`Unexpected tool argument(s): ${unexpected.join(", ")}.`);
   const engine = engineFor(params);
   switch (name) {
     case "security_get_capabilities": return engine.request("get_capabilities", {});
@@ -398,7 +409,7 @@ async function callTool(name: string, rawArguments: unknown): Promise<unknown> {
     case "security_deep_get_tail_assignment": return engine.request("deep_get_tail_assignment", { scanId: requiredString(params, "scanId", 256), modelId: requiredString(params, "modelId", 256), delegationId: requiredString(params, "delegationId", 256), runtime: params.runtime });
     case "security_deep_submit_tail_result": return engine.request("deep_submit_tail_result", { scanId: requiredString(params, "scanId", 256), assignmentId: requiredString(params, "assignmentId", 256), claimToken: requiredString(params, "claimToken", 256), modelId: requiredString(params, "modelId", 256), delegationId: requiredString(params, "delegationId", 256), runtime: params.runtime, completionAttestation: params.completionAttestation, result: params.result }, 120_000);
     case "security_deep_retry_writeup": return engine.request("deep_retry_writeup", { scanId: requiredString(params, "scanId", 256), assignmentId: requiredString(params, "assignmentId", 256), reason: params.reason });
-    case "security_list_findings": return engine.request("list_findings", { scanId: requiredString(params, "scanId", 256), search: params.search, limit: params.limit });
+    case "security_list_findings": return engine.request("list_findings", { scanId: requiredString(params, "scanId", 256), search: params.search === undefined ? undefined : requiredString(params, "search", 200), limit: params.limit });
     case "security_get_finding": return engine.request("get_finding", { occurrenceId: requiredString(params, "occurrenceId", 256) });
     case "security_validate_finding": return engine.request("validate_finding", { occurrenceId: requiredString(params, "occurrenceId", 256) });
     case "security_triage_finding": {
@@ -443,28 +454,36 @@ let negotiatedProtocol = "2024-11-05";
 function write(payload: Record<string, unknown>): void {
   process.stdout.write(JSON.stringify(payload) + "\n");
 }
-function success(id: JsonRpcRequest["id"], result: unknown): void { write({ jsonrpc: "2.0", id: id ?? null, result }); }
-function failure(id: JsonRpcRequest["id"], code: number, message: string, data?: unknown): void { write({ jsonrpc: "2.0", id: id ?? null, error: { code, message, ...(data === undefined ? {} : { data }) } }); }
+function success(id: JsonRpcId, result: unknown): void { write({ jsonrpc: "2.0", id, result }); }
+function failure(id: JsonRpcId | null, code: number, message: string, data?: unknown): void { write({ jsonrpc: "2.0", id, error: { code, message, ...(data === undefined ? {} : { data }) } }); }
 
-async function handle(request: JsonRpcRequest): Promise<void> {
-  const id = request.id;
+async function handle(request: unknown): Promise<void> {
+  let id: JsonRpcId | null = null;
   try {
-    if (request.jsonrpc !== "2.0" || !boundedString(request.method, 256)) throw new Error("Invalid JSON-RPC request.");
-    if (request.method === "notifications/initialized" || request.method === "notifications/cancelled") return;
-    if (request.method === "initialize") {
-      const requested = isObject(request.params) && typeof request.params.protocolVersion === "string" ? request.params.protocolVersion : "2024-11-05";
+    if (!isObject(request) || request.jsonrpc !== "2.0" || !boundedString(request.method, 256)) throw new Error("Invalid JSON-RPC request.");
+    const method = request.method;
+    const params = request.params === undefined ? {} : request.params;
+    if (!isObject(params)) throw new Error("params must be a JSON object.");
+    if (method === "notifications/initialized" || method === "notifications/cancelled") {
+      if ("id" in request) throw new Error("JSON-RPC notifications must not include an id.");
+      return;
+    }
+    if (!isRequestId(request.id)) throw new Error("JSON-RPC requests require a string or integer id.");
+    id = request.id;
+    if (method === "initialize") {
+      const requested = typeof params.protocolVersion === "string" ? params.protocolVersion : "2024-11-05";
       negotiatedProtocol = MCP_PROTOCOLS.has(requested) ? requested : "2024-11-05";
       initialized = true;
       success(id, { protocolVersion: negotiatedProtocol, capabilities: { tools: { listChanged: false } }, serverInfo: { name: "kiro-security-power", version: SERVER_VERSION }, instructions: "Use the security_* tools to operate the same durable workbench shown by the Kiro Security Power VSIX." });
       return;
     }
     if (!initialized) { failure(id, -32002, "MCP server has not been initialized."); return; }
-    if (request.method === "ping") { success(id, {}); return; }
-    if (request.method === "tools/list") { success(id, { tools: toolDefinitions }); return; }
-    if (request.method === "tools/call") {
-      if (!isObject(request.params) || !boundedString(request.params.name, 128)) throw new Error("tools/call requires a tool name.");
+    if (method === "ping") { success(id, {}); return; }
+    if (method === "tools/list") { success(id, { tools: toolDefinitions }); return; }
+    if (method === "tools/call") {
+      if (!boundedString(params.name, 128)) throw new Error("tools/call requires a tool name.");
       try {
-        const result = await callTool(request.params.name, request.params.arguments);
+        const result = await callTool(params.name, params.arguments);
         const text = JSON.stringify(result, null, 2);
         success(id, { content: [{ type: "text", text }], structuredContent: { result }, isError: false });
       } catch (error) {
@@ -473,8 +492,8 @@ async function handle(request: JsonRpcRequest): Promise<void> {
       }
       return;
     }
-    if (request.method === "resources/list" || request.method === "prompts/list") { success(id, { [request.method.startsWith("resources") ? "resources" : "prompts"]: [] }); return; }
-    failure(id, -32601, `Method not found: ${request.method}`);
+    if (method === "resources/list" || method === "prompts/list") { success(id, { [method.startsWith("resources") ? "resources" : "prompts"]: [] }); return; }
+    failure(id, -32601, `Method not found: ${method}`);
   } catch (error) {
     failure(id, -32602, error instanceof Error ? error.message : String(error));
   }
@@ -496,8 +515,10 @@ process.stdin.on("data", (chunk: string) => {
     if (!line) continue;
     if (Buffer.byteLength(line, "utf8") > MAX_LINE_BYTES) { failure(null, -32600, "Message exceeds 2 MiB limit."); continue; }
     try {
-      const request = JSON.parse(line) as JsonRpcRequest;
-      void handle(request);
+      const request: unknown = JSON.parse(line);
+      void handle(request).catch((error) => {
+        failure(null, -32603, error instanceof Error ? error.message : String(error));
+      });
     } catch (error) {
       failure(null, -32700, `Invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
     }

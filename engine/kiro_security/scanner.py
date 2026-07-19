@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 import re
+import shlex
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable
@@ -280,16 +282,37 @@ def _git_revision(workspace: Path) -> tuple[bool, str | None]:
 def _require_checked_out_diff_head(workspace: Path, kind: str, head: str | None, revision: str | None) -> None:
     if kind not in ("commit", "range") or not head:
         return
-    target = run_process(
-        "git", ["rev-parse", "--verify", f"{require_git_ref(head, 'diffHeadRevision')}^{{commit}}"],
-        cwd=workspace, timeout=10,
-    ).stdout.strip()
+    target = _resolved_git_commit(workspace, head, "diffHeadRevision")
     if not revision or target != revision:
         raise EngineError(
             "diff_target_not_checked_out",
             "Commit and range Diff scans require diffHeadRevision to match the checked-out HEAD.",
             {"checkedOutRevision": revision, "diffHeadRevision": target},
         )
+
+
+def _resolved_git_commit(workspace: Path, value: str, field: str) -> str:
+    return run_process(
+        "git", ["rev-parse", "--verify", f"{require_git_ref(value, field)}^{{commit}}"],
+        cwd=workspace, timeout=10,
+    ).stdout.strip()
+
+
+def _resolved_commit_target(
+    workspace: Path, head: str, base: str | None,
+) -> tuple[str, str]:
+    resolved_head = _resolved_git_commit(workspace, head, "diffHeadRevision")
+    parents = run_process(
+        "git", ["show", "-s", "--format=%P", resolved_head], cwd=workspace, timeout=10,
+    ).stdout.split()
+    resolved_base = parents[0] if parents else run_process(
+        "git", ["hash-object", "-t", "tree", "--stdin"], cwd=workspace, input_bytes=b"",
+    ).stdout.strip()
+    if base:
+        supplied = base if base == resolved_base else _resolved_git_commit(workspace, base, "diffBaseRevision")
+        if supplied != resolved_base:
+            raise EngineError("invalid_diff_target", "Commit base revision must match the selected commit's first parent.")
+    return resolved_base, resolved_head
 
 
 def _diff_dirty_paths(workspace: Path, kind: str) -> set[str]:
@@ -320,12 +343,15 @@ def _diff_supporting_exclusions(workspace: Path, dirty: set[str], changed_paths:
 
 def _require_clean_diff_paths(workspace: Path, kind: str, changed: DiffPaths) -> set[str]:
     dirty = _diff_dirty_paths(workspace, kind)
-    overlap = sorted(dirty & (changed.existing | changed.deleted))
+    overlap = dirty & (changed.existing | changed.deleted)
+    if kind in ("commit", "range"):
+        overlap |= {path for path in changed.existing if not _tracked_content_matches_index(workspace, path)}
+        overlap |= {path for path in changed.deleted if (workspace / path).exists() or (workspace / path).is_symlink()}
     if overlap:
         raise EngineError(
             "diff_target_worktree_changed",
             "Commit and range Diff source files must match the checked-out target revision.",
-            {"paths": overlap[:20]},
+            {"paths": sorted(overlap)[:20]},
         )
     return _diff_supporting_exclusions(workspace, dirty, changed.existing)
 
@@ -343,8 +369,32 @@ class DiffPaths:
 def _diff_name_only(workspace: Path, args: list[str]) -> set[str]:
     # --no-renames keeps a rename as an explicit add + delete pair so the
     # rename source is never silently dropped from the coverage frontier.
-    result = run_process("git", args, cwd=workspace)
+    result = run_process("git", [*_git_filter_overrides(workspace), *args], cwd=workspace)
     return set(_parse_nul_paths(result.stdout))
+
+
+def _git_filter_overrides(workspace: Path) -> list[str]:
+    args = ["config", "--includes", "--show-origin", "-z", "--name-only", "--get-regexp", r"^filter\..*\.(clean|process|smudge)$"]
+    configured = run_process(
+        "git", args,
+        cwd=workspace, check=False,
+    )
+    trusted = run_process("git", ["config", "--global", *args[1:]], cwd=workspace, check=False)
+
+    def records(output: str) -> set[tuple[str, str]]:
+        entries = [entry for entry in output.split("\x00") if entry]
+        return set(zip(entries[::2], entries[1::2]))
+
+    trusted_records = records(trusted.stdout)
+    keys = set()
+    for _, key in records(configured.stdout) - trusted_records:
+        normalized = key.lower()
+        if not normalized.startswith("filter.") or not normalized.endswith((".clean", ".process", ".smudge")):
+            continue
+        if len(key) > 512:
+            raise EngineError("unsafe_git_config", "A repository-local Git filter key exceeds the safety limit.")
+        keys.add(key)
+    return [part for key in sorted(keys) for part in ("-c", f"{key}=")]
 
 
 def _diff_paths(
@@ -365,15 +415,25 @@ def _diff_paths(
             workspace,
             ["diff", "--name-only", "-z", "--no-renames", "--diff-filter=D", "HEAD", *scope_args],
         )
-        return DiffPaths(existing=existing - deleted, deleted=deleted), "working tree compared with HEAD"
+        return DiffPaths(
+            existing={path for path in existing - deleted if not _default_ignored(path)},
+            deleted={path for path in deleted if not _default_ignored(path)},
+        ), "working tree compared with HEAD"
     if kind == "commit":
         if not head:
             raise EngineError("invalid_diff_target", "Commit diff requires diffHeadRevision.")
-        head = require_git_ref(head, "diffHeadRevision")
-        common = ["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "--no-renames"]
-        existing = _diff_name_only(workspace, [*common, "--diff-filter=ACMRTUXB", head, *scope_args])
-        deleted = _diff_name_only(workspace, [*common, "--diff-filter=D", head, *scope_args])
-        return DiffPaths(existing=existing - deleted, deleted=deleted), f"commit {head}"
+        resolved_base, resolved_head = _resolved_commit_target(workspace, head, base)
+        common = ["diff", "--name-only", "-z", "--no-renames"]
+        existing = _diff_name_only(
+            workspace, [*common, "--diff-filter=ACMRTUXB", resolved_base, resolved_head, *scope_args]
+        )
+        deleted = _diff_name_only(
+            workspace, [*common, "--diff-filter=D", resolved_base, resolved_head, *scope_args]
+        )
+        return DiffPaths(
+            existing={path for path in existing - deleted if not _default_ignored(path)},
+            deleted={path for path in deleted if not _default_ignored(path)},
+        ), f"commit {resolved_head}"
     if kind == "range":
         if not base or not head:
             raise EngineError("invalid_diff_target", "Range diff requires diffBaseRevision and diffHeadRevision.")
@@ -382,30 +442,114 @@ def _diff_paths(
         common = ["diff", "--name-only", "-z", "--no-renames"]
         existing = _diff_name_only(workspace, [*common, "--diff-filter=ACMRTUXB", f"{base}...{head}", *scope_args])
         deleted = _diff_name_only(workspace, [*common, "--diff-filter=D", f"{base}...{head}", *scope_args])
-        return DiffPaths(existing=existing - deleted, deleted=deleted), f"range {base}...{head}"
+        return DiffPaths(
+            existing={path for path in existing - deleted if not _default_ignored(path)},
+            deleted={path for path in deleted if not _default_ignored(path)},
+        ), f"range {base}...{head}"
     raise EngineError("invalid_diff_target", f"Unsupported diff target kind: {kind}")
 
 
-def _diff_patch(workspace: Path, scope: str, kind: str, base: str | None, head: str | None) -> str:
+def _diff_patch(
+    workspace: Path, scope: str, kind: str, base: str | None, head: str | None, *, legacy: bool = False
+) -> str:
     common = ["--no-ext-diff", "--no-textconv", "--find-renames", "--unified=40"]
+    mode = [] if legacy else ["-c", "core.fileMode=true"]
     if kind == "working_tree":
-        args = ["diff", *common, "HEAD", "--", scope]
+        args = [*mode, "diff", *common, "HEAD", "--", scope]
     elif kind == "commit":
         if not head:
             raise EngineError("invalid_diff_target", "Commit diff requires diffHeadRevision.")
-        args = ["show", "--format=", *common, require_git_ref(head, "diffHeadRevision"), "--", scope]
+        resolved_base, resolved_head = _resolved_commit_target(workspace, head, base)
+        args = [*mode, "diff", *common, resolved_base, resolved_head, "--", scope]
     elif kind == "range":
         if not base or not head:
             raise EngineError("invalid_diff_target", "Range diff requires diffBaseRevision and diffHeadRevision.")
         target = f"{require_git_ref(base, 'diffBaseRevision')}...{require_git_ref(head, 'diffHeadRevision')}"
-        args = ["diff", *common, target, "--", scope]
+        args = [*mode, "diff", *common, target, "--", scope]
     else:
         raise EngineError("invalid_diff_target", f"Unsupported diff target kind: {kind}")
-    output = run_process("git", args, cwd=workspace).stdout
+    output = run_process("git", [*_git_filter_overrides(workspace), *args], cwd=workspace).stdout
     data = output.encode("utf-8", "surrogatepass")
     if len(data) > 600_000:
         raise EngineError("diff_context_too_large", "The bounded Git patch exceeds 600000 bytes; narrow the Diff scope.")
     return output
+
+
+def _git_file_mode(path: Path) -> str:
+    return "100755" if path.stat().st_mode & stat.S_IXUSR else "100644"
+
+
+def _diff_header_path(prefix: str, relative: str) -> str:
+    value = f"{prefix}/{relative}"
+    return json.dumps(value, ensure_ascii=False) if any(
+        character.isspace() or character in '"\\' or ord(character) < 32 or ord(character) == 127
+        for character in value
+    ) else value
+
+
+def _diff_context_patch(
+    workspace: Path, scope: str, kind: str, base: str | None, head: str | None, max_file_bytes: int,
+    *, legacy: bool = False, include_ignored: bool | None = None,
+) -> str:
+    patch = _diff_patch(workspace, scope, kind, base, head, legacy=legacy)
+    if kind != "working_tree":
+        return patch
+    workspace = workspace.resolve()
+    untracked = _diff_name_only(workspace, ["ls-files", "--others", "--exclude-standard", "-z", "--", scope])
+    additions = []
+    paths = untracked if (legacy if include_ignored is None else include_ignored) else {
+        path for path in untracked if not _default_ignored(path)
+    }
+    for relative in sorted(paths):
+        candidate = workspace / relative
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        if candidate.is_symlink() or workspace not in resolved.parents or not resolved.is_file():
+            continue
+        loaded = _read_source(resolved, max_file_bytes)
+        if loaded is None:
+            continue
+        text, _ = loaded
+        lines = text.splitlines() if legacy else text.split("\n")
+        if not legacy and text.endswith("\n"):
+            lines.pop()
+        elif not legacy and not text:
+            lines = []
+        old_path = f"a/{relative}" if legacy else _diff_header_path("a", relative)
+        new_path = f"b/{relative}" if legacy else _diff_header_path("b", relative)
+        additions.extend([
+            f"diff --git {old_path} {new_path}",
+            f"new file mode {'100644' if legacy else _git_file_mode(resolved)}", "--- /dev/null",
+            f"+++ {new_path}", f"@@ -0,0 +1,{len(lines)} @@", *[f"+{line}" for line in lines],
+        ])
+        if not legacy and text and not text.endswith("\n"):
+            additions.append("\\ No newline at end of file")
+    if additions:
+        patch += ("\n" if patch and not patch.endswith("\n") else "") + "\n".join(additions) + "\n"
+    if len(patch.encode("utf-8", "surrogatepass")) > 600_000:
+        raise EngineError("diff_context_too_large", "The bounded Git patch exceeds 600000 bytes; narrow the Diff scope.")
+    return patch
+
+
+def _legacy_diff_patch_projection(patch: str) -> str:
+    """Drop old v1 sections for paths the current inventory never reviews."""
+
+    sections = re.split(r"(?m)(?=^diff --git )", patch)
+    retained = []
+    for section in sections:
+        if section.startswith("diff --git "):
+            try:
+                paths = shlex.split(section.splitlines()[0][len("diff --git "):])
+            except ValueError:
+                paths = []
+            if len(paths) == 2 and paths[0].startswith("a/") and paths[1].startswith("b/") and all(
+                len(path) > 2 and path[1] == "/" and _default_ignored(path[2:]) for path in paths
+            ):
+                continue
+        retained.append(section)
+    return "".join(retained)
 
 
 def _diff_context(
@@ -417,28 +561,44 @@ def _diff_context(
     changed: DiffPaths,
     max_file_bytes: int,
     excluded_supporting_paths: set[str],
+    source_files: Iterable[SourceFile],
 ) -> dict[str, Any]:
-    patch = _diff_patch(workspace, scope, kind, base, head)
-    if kind == "working_tree":
-        untracked = _diff_name_only(workspace, ["ls-files", "--others", "--exclude-standard", "-z", "--", scope])
-        additions = []
-        for relative in sorted(untracked):
-            loaded = _read_source(workspace / relative, max_file_bytes)
-            if loaded is None:
+    if kind == "commit" and head:
+        resolved_base, resolved_head = _resolved_commit_target(workspace, head, base)
+    elif kind == "working_tree":
+        resolved_head = _resolved_git_commit(workspace, "HEAD", "diffHeadRevision")
+        for value, field in ((base, "diffBaseRevision"), (head, "diffHeadRevision")):
+            if not value:
                 continue
-            text, _ = loaded
-            lines = text.splitlines()
-            additions.extend([
-                f"diff --git a/{relative} b/{relative}", "new file mode 100644", "--- /dev/null",
-                f"+++ b/{relative}", f"@@ -0,0 +1,{len(lines)} @@", *[f"+{line}" for line in lines],
-            ])
-        if additions:
-            patch += ("\n" if patch and not patch.endswith("\n") else "") + "\n".join(additions) + "\n"
-        if len(patch.encode("utf-8", "surrogatepass")) > 600_000:
-            raise EngineError("diff_context_too_large", "The bounded Git patch exceeds 600000 bytes; narrow the Diff scope.")
+            try:
+                supplied = _resolved_git_commit(workspace, value, field)
+            except EngineError as exc:
+                raise EngineError("invalid_diff_target", f"{field} must resolve to the current working-tree HEAD.") from exc
+            if supplied != resolved_head:
+                raise EngineError("invalid_diff_target", f"{field} must match the current working-tree HEAD.")
+        resolved_base = resolved_head
+    else:
+        resolved_head = _resolved_git_commit(workspace, head or "HEAD", "diffHeadRevision")
+        resolved_base = _resolved_git_commit(workspace, base, "diffBaseRevision") if kind == "range" and base else None
+    effective_base = resolved_base if kind in ("commit", "range") else base
+    effective_head = resolved_head if kind in ("commit", "range") else head
+    current_paths, _ = _diff_paths(workspace, scope, kind, effective_base, effective_head)
+    if current_paths != changed:
+        raise EngineError("diff_context_changed", "The Diff target changed while its context was prepared.")
+    patch = _diff_context_patch(workspace, scope, kind, effective_base, effective_head, max_file_bytes)
     siblings = _diff_supporting_paths(
         workspace, changed.existing, changed.deleted, max_file_bytes, excluded_supporting_paths,
     )
+    source_digests = []
+    for source in source_files:
+        loaded = _read_security_surface(source.path, max_file_bytes)
+        if loaded is None:
+            raise EngineError("diff_context_changed", f"A Diff source changed while its context was prepared: {source.relative_path}")
+        source_digests.append({
+            "path": source.relative_path,
+            "contentDigest": "sha256:" + sha256_bytes(loaded[2]),
+            "mode": _git_file_mode(source.path),
+        })
     rename_hints = []
     for line in patch.splitlines():
         if line.startswith("rename from "):
@@ -447,10 +607,14 @@ def _diff_context(
             rename_hints[-1]["to"] = line[len("rename to "):]
     payload = {
         "documentType": "kiro-security-power.diff-context",
-        "schemaVersion": "1.0",
-        "target": {"kind": kind, "baseRevision": base, "headRevision": head, "scope": scope},
+        "schemaVersion": "1.1",
+        "target": {
+            "kind": kind, "baseRevision": base, "headRevision": head, "scope": scope,
+            "resolvedBaseRevision": resolved_base, "resolvedHeadRevision": resolved_head,
+        },
         "changedPaths": sorted(changed.existing),
         "deletedPaths": sorted(changed.deleted),
+        "sourceDigests": source_digests,
         "excludedSupportingPaths": sorted(excluded_supporting_paths),
         "renameHints": rename_hints[:200],
         "supportingPaths": siblings,
@@ -459,6 +623,26 @@ def _diff_context(
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
     payload["contextDigest"] = "sha256:" + sha256_bytes(encoded.encode("utf-8"))
     return payload
+
+
+def _tracked_content_matches_index(workspace: Path, relative: str) -> bool:
+    indexed = run_process("git", ["ls-files", "--stage", "-z", "--", relative], cwd=workspace, check=False)
+    record = indexed.stdout.split("\x00", 1)[0]
+    metadata, separator, _ = record.partition("\t")
+    fields = metadata.split()
+    if indexed.returncode != 0 or not separator or len(fields) != 3 or fields[2] != "0" or fields[0] not in ("100644", "100755"):
+        return False
+    path = workspace / relative
+    try:
+        if path.is_symlink() or _git_file_mode(path) != fields[0]:
+            return False
+    except OSError:
+        return False
+    current = run_process(
+        "git", [*_git_filter_overrides(workspace), "hash-object", f"--path={relative}", "--", relative],
+        cwd=workspace, check=False,
+    )
+    return current.returncode == 0 and current.stdout.strip() == fields[1]
 
 
 def _diff_supporting_paths(
@@ -491,6 +675,7 @@ def _diff_supporting_paths(
             if (
                 sibling in seen or sibling in excluded_paths or candidate.is_symlink() or workspace.resolve() not in resolved.parents
                 or not candidate.is_file() or candidate.suffix.lower() not in SOURCE_EXTENSIONS
+                or not _tracked_content_matches_index(workspace, sibling)
             ):
                 continue
             loaded = _read_security_surface(candidate, max_file_bytes)
@@ -729,10 +914,12 @@ def build_inventory(
     diff_context = (
         _diff_context(
             workspace, scope, diff_target_kind or "working_tree", diff_base_revision,
-            diff_head_revision, changed_paths, max_file_bytes, excluded_supporting_paths,
+            diff_head_revision, changed_paths, max_file_bytes, excluded_supporting_paths, files,
         )
         if changed_paths is not None else None
     )
+    if diff_context is not None and diff_context["target"]["resolvedHeadRevision"] != revision:
+        raise EngineError("diff_context_changed", "The checked-out Diff revision changed while its context was prepared.")
     return Inventory(
         files=files,
         include_paths=[scope],

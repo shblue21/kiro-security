@@ -341,10 +341,13 @@ def build_findings_document(
                 "sink": sink,
             },
         }
-        if details.get("legacyContract") is not True:
+        explicit_root_cause = details.get("rootCause")
+        if isinstance(explicit_root_cause, dict) or (
+            isinstance(explicit_root_cause, str) and explicit_root_cause.strip()
+        ):
+            finding["rootCause"] = explicit_root_cause
+        elif details.get("legacyContract") is not True:
             finding["rootCause"] = root_cause
-        elif details.get("rootCause"):
-            finding["rootCause"] = details["rootCause"]
         if item["findingId"] in writeup_paths:
             finding["writeup"] = {"reportPath": writeup_paths[item["findingId"]]}
         result.append(finding)

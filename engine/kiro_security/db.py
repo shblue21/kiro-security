@@ -635,11 +635,16 @@ class Workbench:
             connection.close()
         return self.get_scan(row["id"]) if row else None
 
-    def set_scan_target(self, scan_id: str, *, revision: str | None, snapshot_digest: str | None) -> None:
+    def set_scan_target(
+        self, scan_id: str, *, revision: str | None, snapshot_digest: str | None,
+        diff_base_revision: str | None = None, diff_head_revision: str | None = None,
+    ) -> None:
         with self.transaction() as connection:
             connection.execute(
-                "UPDATE scans SET target_revision=?, snapshot_digest=?, updated_at=? WHERE id=?",
-                (revision, snapshot_digest, utc_now(), scan_id),
+                """UPDATE scans SET target_revision=?, snapshot_digest=?,
+                    diff_base_revision=COALESCE(?, diff_base_revision),
+                    diff_head_revision=COALESCE(?, diff_head_revision), updated_at=? WHERE id=?""",
+                (revision, snapshot_digest, diff_base_revision, diff_head_revision, utc_now(), scan_id),
             )
 
     def set_capabilities(self, scan_id: str, capabilities: dict[str, Any]) -> None:

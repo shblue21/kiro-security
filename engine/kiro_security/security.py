@@ -13,6 +13,10 @@ from typing import Any, Iterable
 from .errors import EngineError
 
 _SECRET_PATTERNS = [
+    re.compile(
+        r'(?i)(["\']?authorization["\']?)([ \t]*[=:][ \t]*)'
+        r'((?!["\'])[^\r\n]*(?:\r?\n[ \t]+[^\r\n]*)+)'
+    ),
     re.compile(r'(?i)(["\']?authorization["\']?)(\s*[=:]\s*")((?:\\[\s\S]?|[^"\\])*)(?="|\Z)'),
     re.compile(r"(?i)([\"']?authorization[\"']?)(\s*[=:]\s*')((?:\\[\s\S]?|[^'\\])*)(?='|\Z)"),
     re.compile(
@@ -168,11 +172,15 @@ def run_process(
 ) -> subprocess.CompletedProcess[str]:
     env_keys = ("PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "WINDIR", "TMPDIR", "TEMP", "TMP", "LANG", "LC_ALL")
     env = {key: os.environ[key] for key in env_keys if key in os.environ}
-    env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0", "LC_ALL": env.get("LC_ALL", "C.UTF-8")})
+    env.update({
+        "GIT_CONFIG_NOSYSTEM": "1", "GIT_LITERAL_PATHSPECS": "1", "GIT_TERMINAL_PROMPT": "0",
+        "LC_ALL": env.get("LC_ALL", "C.UTF-8"),
+    })
+    command = [executable, *(["-c", "core.fsmonitor=false"] if executable == "git" else []), *list(args)]
     try:
         if input_bytes is not None:
             completed = subprocess.run(
-                [executable, *list(args)],
+                command,
                 cwd=cwd,
                 env=env,
                 input=input_bytes,
@@ -193,7 +201,7 @@ def run_process(
                 )
             return result
         return subprocess.run(
-            [executable, *list(args)],
+            command,
             cwd=cwd,
             env=env,
             text=True,
