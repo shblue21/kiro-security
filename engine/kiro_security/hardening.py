@@ -27,6 +27,14 @@ def register_model_hardening(scan_id: str, portfolio: dict[str, Any]) -> None:
 def render_model_hardening(portfolio: dict[str, Any]) -> dict[str, Any]:
     lines = [f"# {portfolio['title']}", "", portfolio["summary"], "", "## Architecture and security boundaries", ""]
     lines.extend(f"- {item}" for item in portfolio["architectureBoundaries"])
+    if portfolio.get("assessmentOutcome") == "local_remediation_preferred":
+        lines.extend([
+            "", "## Assessment", "", portfolio["recommendationRationale"], "",
+            "No evidence-backed structural portfolio is proposed; apply and verify the finding-level remediation.",
+            "", "## Evidence references", "",
+        ])
+        lines.extend(f"- {item}" for item in portfolio["evidenceReferences"])
+        return {"title": portfolio["title"], "summary": portfolio["summary"], "content": "\n".join(lines) + "\n"}
     lines.extend(["", "## Viable options", ""])
     for option in portfolio["options"]:
         lines.extend([

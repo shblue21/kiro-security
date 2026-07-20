@@ -22,10 +22,16 @@ def coverage_mode(scan: dict[str, Any]) -> str:
 
 
 def _finding_is_reportable(finding: dict[str, Any]) -> bool:
+    attack = finding.get("attackPath") if isinstance(finding.get("attackPath"), dict) else {}
     return finding.get("validationStatus") != "rejected" and finding.get("triageStatus") not in (
         "false_positive",
         "already_fixed",
-    )
+    ) and attack.get("policyDecision", "reportable") == "reportable"
+
+
+def _finding_is_policy_deferred(finding: dict[str, Any]) -> bool:
+    attack = finding.get("attackPath") if isinstance(finding.get("attackPath"), dict) else {}
+    return attack.get("policyDecision") == "deferred"
 
 
 def _markdown_text(value: Any) -> str:
@@ -37,14 +43,15 @@ def _markdown_text(value: Any) -> str:
 
 def _finding_references_for_path(
     findings: list[dict[str, Any]], path: str
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
     related = [
         finding
         for finding in findings
         if any(isinstance(location, dict) and location.get("path") == path for location in finding.get("locations") or [])
     ]
     reportable = [finding for finding in related if _finding_is_reportable(finding)]
-    suppressed = [finding for finding in related if not _finding_is_reportable(finding)]
+    deferred = [finding for finding in related if _finding_is_policy_deferred(finding)]
+    suppressed = [finding for finding in related if not _finding_is_reportable(finding) and not _finding_is_policy_deferred(finding)]
     evidence_refs = sorted(
         {
             str(evidence["id"])
@@ -53,7 +60,7 @@ def _finding_references_for_path(
             if isinstance(evidence, dict) and evidence.get("id") and evidence.get("path") == path
         }
     )
-    return reportable, suppressed, evidence_refs
+    return reportable, suppressed, deferred, evidence_refs
 
 
 def synchronize_coverage_ledger(
@@ -79,10 +86,10 @@ def synchronize_coverage_ledger(
         row_id = str(item["rowId"])
         path = str(item["path"])
         surface = str(item.get("surface") or f"source_review:{item.get('language') or 'text'}")
-        reportable, suppressed, evidence_refs = _finding_references_for_path(findings, path)
+        reportable, suppressed, policy_deferred, evidence_refs = _finding_references_for_path(findings, path)
         prior = existing.get(row_id)
         if is_model_scan(scan) and prior is not None and prior["disposition"] == "deferred":
-            related = [*reportable, *suppressed]
+            related = [*reportable, *suppressed, *policy_deferred]
             candidate_ids = (
                 sorted({coverage_finding_reference(finding) for finding in related})
                 if related
@@ -101,6 +108,24 @@ def synchronize_coverage_ledger(
                     root_control=prior.get("rootControl"),
                     sink=prior.get("sink"),
                     worker_id=prior.get("workerId"),
+                )
+            )
+            continue
+        if policy_deferred:
+            related = [*policy_deferred, *reportable]
+            candidate_ids = sorted({coverage_finding_reference(finding) for finding in related})
+            final_rows.append(
+                make_coverage_row(
+                    row_id=row_id,
+                    path=path,
+                    surface=surface,
+                    disposition="deferred",
+                    reason=f"The completed attack-path review deferred {len(policy_deferred)} candidate(s) pending additional proof.",
+                    evidence_refs=evidence_refs,
+                    candidate_ids=candidate_ids,
+                    entrypoint=(existing.get(row_id) or {}).get("entrypoint"),
+                    root_control=(existing.get(row_id) or {}).get("rootControl"),
+                    sink=(existing.get(row_id) or {}).get("sink"),
                 )
             )
             continue

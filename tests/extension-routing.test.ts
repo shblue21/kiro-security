@@ -50,18 +50,12 @@ test("manifest contributes every required command and activation route", () => {
   assert.equal(manifest.capabilities.untrustedWorkspaces.supported, false);
 });
 
-test("activation offers approval-driven Agent onboarding without modifying configuration on its own", () => {
+test("activation stays quiet: no onboarding notification, Agent setup lives in the panel", () => {
   const extensionSource = readFileSync(path.join(root, "packages", "extension", "src", "extension.ts"), "utf8");
   const controllerSource = readFileSync(path.join(root, "packages", "extension", "src", "controller.ts"), "utf8");
-  assert.match(extensionSource, /controller\.offerAgentOnboarding\(\)/);
+  assert.doesNotMatch(extensionSource, /offerAgentOnboarding/);
+  assert.doesNotMatch(controllerSource, /offerAgentOnboarding/);
   assert.match(extensionSource, /onDidGrantWorkspaceTrust/);
-  assert.match(controllerSource, /kiroSecurity\.agentIntegrationOnboarding\.\$\{version\}/);
-  assert.match(controllerSource, /Install and verify/);
-  assert.match(controllerSource, /if \(choice === "Install and verify"\)/);
-  const onboardingStart = controllerSource.indexOf("async offerAgentOnboarding");
-  const onboardingEnd = controllerSource.indexOf("\n  startPolling", onboardingStart);
-  assert.ok(onboardingStart >= 0 && onboardingEnd > onboardingStart);
-  assert.doesNotMatch(controllerSource.slice(onboardingStart, onboardingEnd), /agentIntegration\.install\(/);
 });
 
 test("webview command routes reject forged scan modes and traversal scope is left for host validation", () => {

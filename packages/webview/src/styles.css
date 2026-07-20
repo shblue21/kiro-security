@@ -35,6 +35,7 @@ input, select, textarea { width: 100%; color: var(--vscode-input-foreground); ba
 textarea { min-height: 64px; resize: vertical; }
 .scan-form { display: grid; gap: 10px; }
 .diff-options { display: grid; gap: 8px; padding: 8px; border-left: 2px solid var(--vscode-focusBorder); }
+.agent-scan-options { display: grid; gap: 8px; }
 .hidden { display: none !important; }
 .button-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .button-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(92px, 1fr)); gap: 6px; }
@@ -90,7 +91,6 @@ dt { color: var(--vscode-descriptionForeground); }
 dd { margin: 0; overflow-wrap: anywhere; }
 .history-list { display: grid; gap: 8px; }
 .history-grid { font-size: 11px; }
-.event-line { text-align: center; color: var(--vscode-descriptionForeground); font-size: calc(var(--vscode-font-size) * .85); }
 .empty { padding: 26px 12px; text-align: center; color: var(--vscode-descriptionForeground); }
 .empty.compact { padding: 14px; }
 .loading { padding: 20px; color: var(--vscode-descriptionForeground); }

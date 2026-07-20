@@ -282,7 +282,7 @@
           "minimum": 1,
           "maximum": 60,
           "default": 2,
-          "description": "Polling interval used to reconcile scans started by the VSIX, Power, or MCP adapter."
+          "description": "How often scan status refreshes, in seconds."
         },
         "kiroSecurity.showValidatedDiagnostics": {
           "type": "boolean",

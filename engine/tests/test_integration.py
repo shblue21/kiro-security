@@ -86,21 +86,14 @@ def zero_finding_tail_result(assignment: dict, scan_id: str) -> dict:
     assert assignment["kind"] == "hardening", assignment["kind"]
     return {
         "scanId": scan_id,
-        "title": "Zero-finding integration hardening portfolio",
-        "summary": "Preserve the reviewed security boundaries and continue repository-native regression coverage.",
+        "assessmentOutcome": "local_remediation_preferred",
+        "title": "Zero-finding integration hardening assessment",
+        "summary": "No evidence-backed structural portfolio is required by this zero-finding scan.",
         "architectureBoundaries": ["Workspace inputs cross into repository-defined application code."],
-        "options": [
-            {"id": "tests", "title": "Boundary regression tests", "description": "Add negative tests at reviewed boundaries.", "advantages": ["Executable evidence"], "disadvantages": ["Maintenance cost"], "tradeoffs": "Higher test maintenance for stronger regression detection.", "evidenceRefs": [scan_id]},
-            {"id": "review", "title": "Focused security review", "description": "Repeat focused review when boundaries change.", "advantages": ["Low implementation impact"], "disadvantages": ["Manual effort"], "tradeoffs": "Lower code cost with recurring review effort.", "evidenceRefs": [scan_id]},
-        ],
-        "recommendedOptionId": "tests",
-        "recommendationRationale": "Repository-native negative tests provide repeatable evidence.",
-        "migrationSteps": ["Identify reviewed boundaries", "Add negative regression tests"],
-        "rolloutPlan": ["Land tests with boundary owners"],
-        "rollbackPlan": ["Revert only unstable tests while retaining documented boundaries"],
-        "successMetrics": ["Boundary regression tests pass"],
-        "workPackages": [{"id": "tests", "title": "Boundary tests", "dependencies": [], "deliverables": ["Negative regression tests"]}],
-        "diagram": "Before: input -> repository boundary\nAfter: input -> tested repository boundary",
+        "options": [], "recommendedOptionId": None,
+        "recommendationRationale": "Retain finding-level remediation unless future evidence identifies a recurring structural boundary failure.",
+        "migrationSteps": [], "rolloutPlan": [], "rollbackPlan": [], "successMetrics": [],
+        "workPackages": [], "diagram": "",
         "evidenceReferences": [scan_id],
     }
 
@@ -204,7 +197,7 @@ def test_deep_two_round_discovery_enforces_worker_merge_and_receipt_contracts(wo
             for row in assignment["worklist"]
         ]
 
-    def submit(assignment: dict, *, candidates: list[dict] | None = None, completion: dict | None = None) -> dict:
+    def submit(assignment: dict, *, candidates: list[dict] | None = None, completion: dict | None = None, threat_model: str | None = None) -> dict:
         submitted = candidates or []
         candidate_id = submitted[0]["candidateId"] if submitted else None
         candidate_path = submitted[0]["affectedLocations"][0]["path"] if submitted else None
@@ -213,7 +206,7 @@ def test_deep_two_round_discovery_enforces_worker_merge_and_receipt_contracts(wo
             "workerId": assignment["workerId"],
             "claimToken": assignment["claimToken"],
             "rowReceipts": receipts(assignment, candidate_id, candidate_path),
-            "threatModel": f"Independent round {assignment['round']} worker {assignment['workerIndex']} threat model.",
+            "threatModel": threat_model if threat_model is not None else f"Independent round {assignment['round']} worker {assignment['workerIndex']} threat model.",
             "summary": "Focused multi-round discovery regression.",
             "seedResearch": "Repository-native seed review." if submitted else None,
             "dedupeReport": "No prior canonical candidate subsumed this candidate." if submitted else None,
@@ -275,6 +268,12 @@ def test_deep_two_round_discovery_enforces_worker_merge_and_receipt_contracts(wo
             item["worklistDigest"], item["securityContextPath"], item["securityContextDigest"],
             item["securityGuidanceDigest"],
         ) for item in round_one}) == 1
+        assert len({(item["briefVersion"], item["brief"], item["issuedBriefDigest"]) for item in round_one}) == 1
+        assert "counterevidence" in round_one[0]["brief"] and "Do not invent" in round_one[0]["brief"]
+
+        with pytest.raises(EngineError) as error:
+            submit(replacement, threat_model="")
+        assert error.value.code == "invalid_worker_threat_model"
 
         with pytest.raises(EngineError) as error:
             submit(replacement, completion={
@@ -334,6 +333,8 @@ def test_deep_two_round_discovery_enforces_worker_merge_and_receipt_contracts(wo
             assert (worker_dir / relative).is_file(), relative
 
         merge = service.deep_claim_merge({"scanId": scan["id"]})
+        assert merge["mergeBriefVersion"] == "deep-merge-brief/v1"
+        assert "lossless canonical set" in merge["mergeBrief"]
         connection = service.workbench._connect()
         try:
             result = connection.execute("SELECT result_json FROM deep_workers WHERE id=?", (replacement["workerId"],)).fetchone()
@@ -359,6 +360,14 @@ def test_deep_two_round_discovery_enforces_worker_merge_and_receipt_contracts(wo
                 "canonicalCandidates": [{**canonical, "identity": {**canonical["identity"], "instance": "manipulated"}}],
             })
         assert error.value.code == "canonical_source_identity_mismatch"
+        with pytest.raises(EngineError) as error:
+            service.deep_submit_merge({
+                "scanId": scan["id"], "claimToken": merge["claimToken"],
+                "canonicalCandidates": [{**canonical, "locations": canonical["locations"][:-1]}],
+            })
+        assert error.value.code == "canonical_source_evidence_missing"
+        canonical["remediation"] = "Use a fixed executable boundary and pass only separately validated arguments."
+        canonical["remediationSubsumption"] = "This paraphrase preserves the source recommendation's fixed executable and validated arguments."
         first_merge = service.deep_submit_merge({
             "scanId": scan["id"], "claimToken": merge["claimToken"], "canonicalCandidates": [canonical],
         })
@@ -542,11 +551,82 @@ def test_resume_recovers_orphaned_claimed_tail_attempt(workspace: Path) -> None:
         assert attempts[1]["previous_assignment_id"] == claimed["assignmentId"]
         replacement = resumed.deep_get_tail_assignment({"scanId": scan["id"], "modelId": "integration-model", "delegationId": "orphaned-tail-2", "runtime": DEEP_WORKER_RUNTIME})
         assert replacement["attempt"] == 2
+        assert replacement["payload"]["assignmentContract"] == claimed["payload"]["assignmentContract"]
     finally:
         if resumed is not None:
             resumed.shutdown({})
         else:
             service.shutdown({})
+
+
+def test_tail_assignment_contract_and_ignore_policy(workspace: Path) -> None:
+    service = service_for(workspace)
+    try:
+        scan = prepare_tail_test_scan(service)
+        finding = tail_test_finding(service, scan["id"])
+        tail = service.runner.tail
+        assert tail.prepare_validation(scan["id"]) is False
+
+        def claim(kind: str) -> dict:
+            assignment = service.deep_get_tail_assignment({
+                "scanId": scan["id"], "modelId": "integration-model",
+                "delegationId": f"tail-contract-{kind}", "runtime": DEEP_WORKER_RUNTIME,
+            })
+            assert assignment["kind"] == kind
+            contract = assignment["payload"]["assignmentContract"]
+            assert contract["version"] == "deep-tail-assignment/v1"
+            assert contract["kind"] == kind and contract["issuedInstructionDigest"].startswith("sha256:")
+            assert assignment["payload"]["scanMode"] == "deep"
+            return assignment
+
+        def submit(assignment: dict, result: dict) -> None:
+            tail.submit({
+                "scanId": scan["id"], "assignmentId": assignment["assignmentId"],
+                "claimToken": assignment["claimToken"], "modelId": "integration-model",
+                "delegationId": f"tail-contract-{assignment['kind']}", "runtime": DEEP_WORKER_RUNTIME,
+                "completionAttestation": DEEP_COMPLETION_ATTESTATION, "result": result,
+            })
+
+        threat = claim("threat_model")
+        submit(threat, zero_finding_tail_result(threat, scan["id"]))
+        assert tail.prepare_validation(scan["id"]) is False
+        validation = claim("validation")
+        path = finding["locations"][0]["path"]
+        submit(validation, {
+            "findingId": finding["findingId"], "status": "validated", "method": "focused source review",
+            "rationale": "The assigned flow remains plausible.",
+            "evidence": [{"path": path, "result": "Reviewed the assigned source."}],
+            "counterevidence": ["No stronger nearby control was established."], "crossFileTrace": [path],
+            "frameworkControls": ["No framework control established"], "proofGaps": [], "tests": [],
+            "dynamicValidationUnavailableReason": None,
+        })
+        assert tail.prepare_validation(scan["id"]) is True
+        assert tail.prepare_attack_paths_and_writeups(scan["id"]) is False
+        attack = claim("attack_path")
+        assert attack["payload"]["threatModel"]["scanId"] == scan["id"]
+        submit(attack, {
+            "findingId": finding["findingId"], "narrative": "The reviewed path lacks a reportable product exposure.",
+            "actor": "repository user", "attackerPrerequisite": "local repository access", "entrypoint": path,
+            "attackerControlledSource": "fixture input", "rootControl": "repository boundary",
+            "controlBypass": "No externally reachable bypass was established.",
+            "crossFilePath": [{"path": path, "step": "Reviewed the assigned path."}],
+            "privilegedSink": "fixture effect", "impact": "No reportable deployed impact established.",
+            "exploitPreconditions": ["Local repository access"], "counterevidence": ["No deployed entrypoint."],
+            "residualUncertainty": "Deployment context remains unknown.",
+            "severity": {"level": "informational", "rationale": "No exposed product path was established."},
+            "exploitability": "Not established", "confidence": {"level": "high", "rationale": "The exclusion is source-backed."},
+            "policyDecision": "ignore", "policyRationale": "The evidence does not establish a product vulnerability.",
+        })
+        assert tail.prepare_attack_paths_and_writeups(scan["id"]) is True
+        assert tail.writeup_paths(scan["id"]) == {}
+        assert tail.prepare_hardening(scan["id"]) is False
+        hardening = claim("hardening")
+        assert hardening["payload"]["findings"] == []
+        submit(hardening, zero_finding_tail_result(hardening, scan["id"]))
+        assert tail.prepare_hardening(scan["id"]) is True
+        assert tail._assignment_contract("writeup")["kind"] == "writeup"
+    finally:
+        service.shutdown({})
 
 
 def test_deep_and_diff_modes_use_real_repository_state(workspace: Path) -> None:

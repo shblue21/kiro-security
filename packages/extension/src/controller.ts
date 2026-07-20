@@ -115,38 +115,6 @@ export class SecurityController implements vscode.Disposable {
     }
   }
 
-  async offerAgentOnboarding(): Promise<void> {
-    if (!this.workspaceRoot || !vscode.workspace.isTrusted || this.agentIntegrationStatus.configured) return;
-    const version = String(this.context.extension.packageJSON.version);
-    const key = `kiroSecurity.agentIntegrationOnboarding.${version}`;
-    if (this.context.workspaceState.get<boolean>(key, false)) return;
-    await this.context.workspaceState.update(key, true);
-
-    const runtime = this.agentIntegrationStatus.dependencies.python;
-    const installReady = runtime.available && runtime.compatible && Boolean(runtime.executable);
-    const actions = installReady
-      ? ["Install and verify", "Open Setup", "Later"]
-      : ["Open Setup", "Configure Python", "Later"];
-    const choice = await vscode.window.showInformationMessage(
-      installReady
-        ? "Kiro Security Power is installed. Connect the Kiro Agent panel to the same verified security engine and SQLite workbench?"
-        : "Kiro Security Power is installed, but Agent integration needs Python 3.10 or newer with sqlite3. Open Setup to review the detected runtime.",
-      ...actions,
-    );
-    if (choice === "Install and verify") {
-      await this.installAgentIntegration();
-      return;
-    }
-    if (choice === "Open Setup") {
-      await vscode.commands.executeCommand("kiroSecurity.openPanel");
-      this.viewSink?.postNavigation("setup");
-      return;
-    }
-    if (choice === "Configure Python") {
-      await vscode.commands.executeCommand("workbench.action.openSettings", `@ext:${this.context.extension.id} kiroSecurity.pythonPath`);
-    }
-  }
-
   startPolling(): void {
     if (this.pollTimer) clearInterval(this.pollTimer);
     const seconds = vscode.workspace.getConfiguration("kiroSecurity").get<number>("autoRefreshSeconds", 2);
@@ -192,8 +160,13 @@ export class SecurityController implements vscode.Disposable {
       });
     }
     this.viewSink?.postEvent(event.name, event.params);
-    if (event.name === "scan.completed" && typeof event.params.scanId === "string" && !this.viewSink?.isVisible()) {
+    if (event.name === "scan.completed" && typeof event.params.scanId === "string") {
       void (async () => {
+        if (this.viewSink?.isVisible()) {
+          await this.selectScan(String(event.params.scanId));
+          this.viewSink?.postNavigation("findings");
+          return;
+        }
         const choice = await vscode.window.showInformationMessage("Kiro Security scan completed.", "View findings");
         if (choice !== "View findings") return;
         await this.selectScan(String(event.params.scanId));
@@ -327,7 +300,7 @@ export class SecurityController implements vscode.Disposable {
         ].filter(Boolean).join("\n");
         await vscode.env.clipboard.writeText(prompt);
         const choice = await vscode.window.showInformationMessage(
-          `${label} scans require Kiro Agent host attestation. A ready-to-paste Agent prompt was copied.`,
+          `Prompt copied. Paste it into a Kiro Agent chat to run the ${label} scan.`,
           "Open Setup",
         );
         if (choice === "Open Setup") {
@@ -412,7 +385,7 @@ export class SecurityController implements vscode.Disposable {
         await this.context.workspaceState.update("kiroSecurity.selectedOccurrenceId", undefined);
       }
       await this.refresh();
-      void vscode.window.showInformationMessage(`Kiro Security scan ${scanId} was cleaned from the workspace workbench.`);
+      void vscode.window.showInformationMessage("Scan deleted.");
     });
   }
 
@@ -666,20 +639,20 @@ export class SecurityController implements vscode.Disposable {
       if (!configPath) throw new Error("A workspace is required for workspace-scoped Agent integration.");
       const steeringPath = this.agentIntegration.steeringPath(scope);
       const approvalDescription = autoApprovePolicy === "read_only"
-        ? "Only read-only status and finding lookup tools will be pre-approved; scans, triage, remediation, and exports still require Agent approval."
-        : "No tools will be pre-approved.";
+        ? "Read-only lookups are pre-approved; scans and changes always require approval."
+        : "Every tool requires approval.";
       const existing = this.agentIntegrationStatus.configured ? "Repair and verify" : "Install and verify";
       const confirmation = await vscode.window.showInformationMessage(
-        [
-          `${existing} Kiro Security Power Agent integration?`,
-          `MCP config: ${configPath}`,
-          `Auto steering: ${steeringPath}`,
-          `Prepared Power/runtime: ${this.agentIntegration.powerPath}`,
-          `Runtime: ${runtime.executable} (${runtime.version ?? "version unknown"})`,
-          approvalDescription,
-          "Unrelated MCP servers and JSONC comments are preserved. An existing kiro-security-power entry is replaced. Files are backed up and a failed verification is rolled back.",
-        ].join("\n\n"),
-        { modal: true },
+        `${existing} the Kiro Agent connection? Files are backed up and restored automatically if verification fails.`,
+        {
+          modal: true,
+          detail: [
+            approvalDescription,
+            `Config: ${configPath}`,
+            `Steering: ${steeringPath}`,
+            `Runtime: ${runtime.executable} (${runtime.version ?? "version unknown"})`,
+          ].join("\n"),
+        },
         existing,
       );
       if (confirmation !== existing) return;

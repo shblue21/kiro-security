@@ -199,7 +199,9 @@
             "level": { "enum": ["high", "medium", "low"] },
             "rationale": { "type": "string", "minLength": 1 }
           }
-        }
+        },
+        "policyDecision": { "enum": ["reportable", "ignore", "deferred"] },
+        "policyRationale": { "type": "string", "minLength": 1 }
       }
     },
     "workerAttestation": {

@@ -132,7 +132,7 @@ function setupView(): string {
   const checks: Array<[string, string, "ok" | "pending" | "neutral"]> = [
     ["Workspace", snapshot?.workspaceRoot ?? dashboard?.workspace?.root_path ?? "Open a local folder to continue", hasWorkspace ? "ok" : "pending"],
     ["Workspace trust", snapshot?.workspaceTrusted ? "Trusted" : "Trust this workspace in Kiro to continue", snapshot?.workspaceTrusted ? "ok" : "pending"],
-    ["VSIX engine (Fast Scan)", snapshot?.engineStatus ?? "stopped", snapshot?.engineStatus === "ready" ? "ok" : "neutral"],
+    ["Scan engine", snapshot?.engineStatus ?? "stopped", snapshot?.engineStatus === "ready" ? "ok" : "neutral"],
     ["Python / SQLite", pythonLabel, pythonReady ? "ok" : "pending"],
     ["Git (optional)", gitAvailable ? "Available for Git changes scans" : "Not found; only Git changes scans need it", gitAvailable ? "ok" : "neutral"],
   ];
@@ -166,7 +166,7 @@ function setupView(): string {
         ${integration.configured ? `<button data-action="install-agent" ${busy || !setupReady ? "disabled" : ""}>Apply options and verify</button>` : ""}
       </div></details>
       <details class="setup-options" id="setup-troubleshooting"><summary>Advanced and troubleshooting</summary><div class="setup-options-body">
-        <div class="button-row">${integrationHealthy ? `<button data-action="verify-agent" ${busy || !setupReady ? "disabled" : ""}>Verify again</button>` : ""}<button data-action="open-mcp" ${busy || !hasWorkspace || !snapshot?.workspaceTrusted ? "disabled" : ""}>Create or open MCP config</button><button class="secondary" data-action="copy-mcp" ${busy || !setupReady || !integration.power?.prepared ? "disabled" : ""}>Copy reviewed MCP JSON</button><button class="danger" data-action="remove-agent" ${busy || !integration.configured || !hasWorkspace || !snapshot?.workspaceTrusted ? "disabled" : ""}>Remove integration</button></div>
+        <div class="button-row">${integrationHealthy ? `<button data-action="verify-agent" ${busy || !setupReady ? "disabled" : ""}>Verify again</button>` : ""}<button data-action="open-mcp" ${busy || !hasWorkspace || !snapshot?.workspaceTrusted ? "disabled" : ""}>Create or open MCP config</button><button class="secondary" data-action="copy-mcp" ${busy || !setupReady || !integration.power?.prepared ? "disabled" : ""}>Copy connection settings</button><button class="danger" data-action="remove-agent" ${busy || !integration.configured || !hasWorkspace || !snapshot?.workspaceTrusted ? "disabled" : ""}>Remove integration</button></div>
       ${integration.lastVerifiedAt ? `<p class="muted">Last verified: ${h(date(integration.lastVerifiedAt))}</p>` : ""}
       ${(integration.configLocations ?? []).length ? `<dl><dt>MCP config</dt><dd class="mono">${h(integration.configLocations.join("\n"))}</dd>${integration.steeringPath ? `<dt>Steering</dt><dd class="mono">${h(integration.steeringPath)}</dd>` : ""}</dl>` : ""}
       ${(integration.details ?? []).length ? `<ul class="detail-list">${integration.details.map((detail: string) => `<li>${h(detail)}</li>`).join("")}</ul>` : ""}
@@ -192,19 +192,24 @@ function dashboardView(): string {
   const active = dashboard.activeScan;
   const selected = dashboard.selectedScan;
   const selectedMode = ui.scanMode ?? "fast";
+  const agentScan = selectedMode !== "fast";
+  const agentDepth = agentScan ? selectedMode : "standard";
   const progress = active?.progress?.overall_percent ?? 0;
   const coverage = selected?.coverage;
   return `<div class="stack">
-    <section class="card scan-form"><h2>Start a scan</h2>
-      <label>Mode<select id="scan-mode"><option value="fast" ${selectedMode === "fast" ? "selected" : ""}>Fast (deterministic)</option><option value="standard" ${selectedMode === "standard" ? "selected" : ""}>Standard (Kiro Agent)</option><option value="deep" ${selectedMode === "deep" ? "selected" : ""}>Deep (Kiro Agent)</option><option value="diff" ${selectedMode === "diff" ? "selected" : ""}>Git changes (Kiro Agent)</option></select></label>
+    <section class="card scan-form"><h2>Scan this repository</h2>
+      <label>Scan type<select id="scan-kind"><option value="fast" ${agentScan ? "" : "selected"}>This repository (local, fast)</option><option value="agent" ${agentScan ? "selected" : ""}>Deep analysis with Kiro Agent</option></select></label>
       <label>Scope<input id="scan-scope" value="${attr(dashboard.workspace.default_scope || ".")}" maxlength="4096" autocomplete="off"></label>
-      <div id="agent-scan-handoff" class="handoff-note ${selectedMode === "fast" ? "hidden" : ""}"><strong>Runs in Kiro Agent</strong><span>The VSIX cannot attest model runtime state. Continue to copy a scoped, ready-to-paste Agent prompt.</span></div>
-      <div id="diff-options" class="diff-options hidden">
-        <label>Diff target<select id="diff-kind"><option value="working_tree">Working tree</option><option value="commit">Commit</option><option value="range">Range</option></select></label>
-        <label>Base revision<input id="diff-base" maxlength="256" placeholder="HEAD~1"></label>
-        <label>Head revision<input id="diff-head" maxlength="256" placeholder="HEAD"></label>
+      <div id="agent-scan-options" class="agent-scan-options ${agentScan ? "" : "hidden"}">
+        <label>Depth<select id="scan-mode"><option value="standard" ${agentDepth === "standard" ? "selected" : ""}>Standard</option><option value="deep" ${agentDepth === "deep" ? "selected" : ""}>Deep</option><option value="diff" ${agentDepth === "diff" ? "selected" : ""}>Git changes</option></select></label>
+        <div class="handoff-note"><strong>Runs in Kiro Agent</strong><span>Continue to copy a ready-to-paste prompt for Kiro Agent chat.</span></div>
+        <div id="diff-options" class="diff-options ${agentDepth === "diff" ? "" : "hidden"}">
+          <label>Diff target<select id="diff-kind"><option value="working_tree">Working tree</option><option value="commit">Commit</option><option value="range">Range</option></select></label>
+          <label>Base revision<input id="diff-base" maxlength="256" placeholder="HEAD~1"></label>
+          <label>Head revision<input id="diff-head" maxlength="256" placeholder="HEAD"></label>
+        </div>
       </div>
-      <div class="button-row"><button id="start-scan" class="primary" data-action="start" ${active ? "disabled" : ""}>${selectedMode === "fast" ? "Start scan" : "Continue in Kiro Agent"}</button>${dashboard.latestResumableScan ? `<button data-action="resume" data-scan-id="${attr(dashboard.latestResumableScan.id)}" ${active ? "disabled" : ""}>Resume interrupted</button>` : ""}</div>
+      <div class="button-row"><button id="start-scan" class="primary" data-action="start" ${active ? "disabled" : ""}>${agentScan ? "Continue in Kiro Agent" : "Scan this repository"}</button>${dashboard.latestResumableScan ? `<button data-action="resume" data-scan-id="${attr(dashboard.latestResumableScan.id)}" ${active ? "disabled" : ""}>Resume interrupted</button>` : ""}</div>
     </section>
     ${active ? `<section class="card active-scan"><div class="card-title"><div><h2>Active scan</h2><p>${h(scanLabel(active))} · ${h(active.scope)}</p></div>${statusBadge(active.status)}</div>
       ${phaseStepper(active)}<div class="progress-label"><strong>${h(progressLabel(active.phase, progress))}</strong><span>${h(active.progress?.message ?? "Working…")}</span></div>
@@ -212,12 +217,12 @@ function dashboardView(): string {
       <div class="metrics"><div><strong>${h(active.files_completed)}/${h(active.files_total)}</strong><span>files</span></div><div><strong>${h(active.progress?.reportable_findings_count ?? 0)}</strong><span>findings</span></div><div><strong>${h(elapsed(active))}</strong><span>elapsed</span></div></div>
       <button class="danger" data-action="cancel" data-scan-id="${attr(active.id)}">Cancel scan</button></section>` : ""}
     ${selected ? `<section class="card"><div class="card-title"><div><h2>${h(scanLabel(selected))}</h2><p>Completed ${h(date(selected.completed_at ?? selected.updated_at))}</p><p class="mono">${h(selected.id)}</p></div>${statusBadge(selected.status)}</div>
-      <div class="metrics"><div><strong>${h(selected.files_total)}</strong><span>files inventoried</span></div><div><strong>${h(dashboard.findings.length)}</strong><span>findings</span></div><div><strong>${h(coverage?.completeness ?? "unknown")}</strong><span>coverage</span></div></div>
+      <div class="metrics"><div><strong>${h(selected.files_total)}</strong><span>files scanned</span></div><div><strong>${h(dashboard.findings.length)}</strong><span>findings</span></div>${coverage?.completeness ? `<div><strong>${h(coverage.completeness)}</strong><span>coverage</span></div>` : ""}</div>
       ${severitySummary(dashboard.findings)}
+      ${!snapshot?.agentIntegration?.configured ? `<div class="handoff-note"><strong>Want deeper analysis?</strong><span>Connect Kiro Agent to unlock Standard, Diff, and Deep scans.</span><div class="button-row"><button data-action="go-setup">Connect Kiro Agent</button></div></div>` : ""}
       <div class="button-row"><button data-action="show-findings">View findings</button><button data-action="hardening" data-scan-id="${attr(selected.id)}">Hardening proposal</button><label class="compact-label">Export<select id="export-format" aria-label="Export format"><option value="markdown">Markdown</option><option value="json">JSON</option><option value="csv">CSV</option><option value="sarif">SARIF</option></select></label><button data-action="export" data-scan-id="${attr(selected.id)}">Export</button></div>
       <details><summary>Artifacts (${selected.artifacts?.length ?? 0})</summary><ul class="artifact-list">${(selected.artifacts ?? []).map((artifact: any) => `<li><button class="link" data-action="artifact" data-path="${attr(artifact.path)}">${h(artifact.kind)}</button><span class="muted mono">${h(String(artifact.sha256).slice(0, 12))}</span></li>`).join("") || "<li>None yet</li>"}</ul></details>
-    </section>` : `<div class="empty"><h2>No scan history</h2><p>Start a Standard, Deep, or Git changes scan.</p></div>`}
-    ${lastEvent ? `<p class="event-line" aria-hidden="true">Latest event: ${h(lastEvent)}</p>` : ""}
+    </section>` : `<div class="empty"><h2>No scans yet</h2><p>Scan this repository to see results here.</p></div>`}
   </div>`;
 }
 
@@ -265,20 +270,20 @@ function detailView(finding: any): string {
     <section class="card"><h3>Validation</h3>${finding.validation ? `<p>${statusBadge(finding.validation.status)} ${h(finding.validation.rationale)}</p><p class="muted">Method: ${h(finding.validation.method)} · ${h(date(finding.validation.createdAt))}</p>` : `<p class="muted">This finding has not been validated.</p><button data-action="validate" data-occurrence-id="${attr(finding.occurrenceId)}">Validate finding</button>`}</section>
     <section class="card"><h3>Triage</h3><label>Decision note<textarea id="triage-note" data-occurrence-id="${attr(finding.occurrenceId)}" maxlength="4000" placeholder="Required for Accept risk and Won't fix">${h(finding.triage?.note ?? "")}</textarea></label><div class="button-grid">${[["open","Open"],["accepted_risk","Accept risk"],["false_positive","False positive"],["already_fixed","Already fixed"],["wont_fix","Won't fix"]].map(([value,label]) => `<button class="${finding.triageStatus === value ? "selected-action" : ""}" data-action="triage" data-decision="${value}" data-occurrence-id="${attr(finding.occurrenceId)}">${label}</button>`).join("")}</div></section>
     <section class="card"><h3>Fix workflow and remediation</h3><p>${h(finding.remediation)}</p><button data-action="remediation" data-occurrence-id="${attr(finding.occurrenceId)}">Create remediation guidance</button>${(finding.remediationRecords ?? []).length ? jsonBlock(finding.remediationRecords) : ""}</section>
-    <section class="card"><h3>Tracking handoff</h3><p class="muted">Copies a ready-to-paste Kiro Agent prompt. No external issue is created automatically.</p><button data-action="tracking" data-provider="manual" data-occurrence-id="${attr(finding.occurrenceId)}">Copy tracking prompt</button>${(finding.trackingRecords ?? []).length ? jsonBlock(finding.trackingRecords) : ""}</section>
+    <section class="card"><h3>Send to issue tracker</h3><p class="muted">Copies a prompt for Kiro Agent. Nothing is created without your approval.</p><button data-action="tracking" data-provider="manual" data-occurrence-id="${attr(finding.occurrenceId)}">Copy tracking prompt</button>${(finding.trackingRecords ?? []).length ? jsonBlock(finding.trackingRecords) : ""}</section>
     <section class="card"><h3>Related findings</h3>${(finding.relatedFindings ?? []).map((related: any) => `<button class="related-finding" data-action="finding" data-occurrence-id="${attr(related.occurrenceId)}"><strong>${h(related.title)}</strong><span>${severityBadge(related.severity.level)} ${h(related.locations?.[0]?.path ?? "")}</span></button>`).join("") || `<p class="muted">No related findings in this scan.</p>`}</section>
     <section class="card"><h3>Artifact links</h3><ul class="artifact-list">${(finding.artifactLinks ?? []).map((artifact: any) => `<li><button class="link" data-action="artifact" data-path="${attr(artifact.path)}">${h(artifact.kind)}</button><span class="muted mono">${h(String(artifact.sha256 ?? "").slice(0, 12))}</span></li>`).join("") || "<li>No artifacts recorded.</li>"}</ul></section>
-    <section class="card"><h3>Metadata</h3><dl><dt>Finding ID</dt><dd class="mono">${h(finding.findingId)}</dd><dt>Occurrence ID</dt><dd class="mono">${h(finding.occurrenceId)}</dd><dt>Rule</dt><dd>${h(finding.ruleId)}</dd><dt>Category</dt><dd>${h(finding.taxonomy?.category)}</dd><dt>CWE</dt><dd>${h((finding.taxonomy?.cwe ?? []).join(", ") || "—")}</dd><dt>Scan ID</dt><dd class="mono">${h(finding.scanId)}</dd></dl></section>
+    <section class="card"><h3>Metadata</h3><dl><dt>Finding ID</dt><dd class="mono">${h(finding.findingId)}</dd><dt>Rule</dt><dd>${h(finding.ruleId)}</dd><dt>Category</dt><dd>${h(finding.taxonomy?.category)}</dd><dt>CWE</dt><dd>${h((finding.taxonomy?.cwe ?? []).join(", ") || "—")}</dd><dt>Scan ID</dt><dd class="mono">${h(finding.scanId)}</dd></dl></section>
   </article>`;
 }
 
 function historyView(): string {
   const dashboard = snapshot?.dashboard;
   const scans = dashboard?.scans ?? [];
-  return `<div class="stack"><section class="card"><h2>History and recovery</h2><p>Completed and interrupted scans are persisted in the shared SQLite workbench. Power and MCP scans appear here after reconciliation.</p></section>
+  return `<div class="stack"><section class="card"><h2>History and recovery</h2><p>All past scans, including ones started from Kiro Agent.</p></section>
     <section class="history-list">${scans.map((scan: any) => `<article class="card history-item"><div class="card-title"><div><h3>${h(scanLabel(scan))}</h3><p class="mono">${h(scan.id)}</p></div>${statusBadge(scan.status)}</div>
       <dl class="history-grid"><dt>Scope</dt><dd>${h(scan.scope)}</dd><dt>Phase</dt><dd>${h(scan.phase.replaceAll("_", " "))}</dd><dt>Created</dt><dd>${h(date(scan.created_at))}</dd><dt>Elapsed</dt><dd>${h(elapsed(scan))}</dd><dt>Files</dt><dd>${h(scan.files_completed)}/${h(scan.files_total)}</dd><dt>Error</dt><dd>${h(scan.failure_message ?? "—")}</dd></dl>
-      <div class="button-row"><button data-action="select-scan" data-scan-id="${attr(scan.id)}">Open</button>${["interrupted","failed"].includes(scan.status) ? `<button data-action="resume" data-scan-id="${attr(scan.id)}" ${dashboard?.activeScan ? "disabled" : ""}>Resume</button>` : ""}${scan.status === "running" ? `<button class="danger" data-action="cancel" data-scan-id="${attr(scan.id)}">Cancel</button>` : `<button class="danger" data-action="cleanup" data-scan-id="${attr(scan.id)}">Cleanup</button>`}</div></article>`).join("") || `<div class="empty"><h2>No scans yet</h2></div>`}</section><section class="card"><button data-action="logs">Open structured logs</button></section></div>`;
+      <div class="button-row"><button data-action="select-scan" data-scan-id="${attr(scan.id)}">Open</button>${["interrupted","failed"].includes(scan.status) ? `<button data-action="resume" data-scan-id="${attr(scan.id)}" ${dashboard?.activeScan ? "disabled" : ""}>Resume</button>` : ""}${scan.status === "running" ? `<button class="danger" data-action="cancel" data-scan-id="${attr(scan.id)}">Cancel</button>` : `<button class="danger" data-action="cleanup" data-scan-id="${attr(scan.id)}">Cleanup</button>`}</div></article>`).join("") || `<div class="empty"><h2>No scans yet</h2></div>`}</section><section class="card"><button data-action="logs">View logs</button></section></div>`;
 }
 
 function render(): void {
@@ -287,7 +292,7 @@ function render(): void {
     ? [snapshot?.workspaceRoot, snapshot?.workspaceTrusted, snapshot?.engineStatus, snapshot?.secondarySidebarOnboarded, snapshot?.dashboard?.workspace, snapshot?.dashboard?.engine?.dependencies?.git, snapshot?.agentIntegration]
     : ui.tab === "findings" ? [snapshot?.dashboard?.findings, snapshot?.selectedFinding]
       : ui.tab === "history" ? [snapshot?.dashboard?.workspace, snapshot?.dashboard?.activeScan?.id, snapshot?.dashboard?.scans]
-        : [snapshot?.dashboard, lastEvent];
+        : [snapshot?.dashboard, snapshot?.agentIntegration?.configured];
   const renderKey = JSON.stringify([ui, snapshot?.engineError, viewState]);
   if (app.firstElementChild && renderKey === lastRenderKey) return;
   const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -337,18 +342,21 @@ function bindControls(): void {
     persist();
     render();
   }));
+  const kind = document.getElementById("scan-kind") as HTMLSelectElement | null;
   const mode = document.getElementById("scan-mode") as HTMLSelectElement | null;
+  const agentOptions = document.getElementById("agent-scan-options");
   const diffOptions = document.getElementById("diff-options");
-  const handoff = document.getElementById("agent-scan-handoff");
   const startScan = document.getElementById("start-scan");
   const syncMode = () => {
-    if (!mode) return;
-    ui.scanMode = mode.value as PersistedState["scanMode"];
+    if (!kind) return;
+    const agent = kind.value === "agent";
+    ui.scanMode = agent ? (mode?.value as PersistedState["scanMode"]) ?? "standard" : "fast";
     persist();
-    diffOptions?.classList.toggle("hidden", mode.value !== "diff");
-    handoff?.classList.toggle("hidden", mode.value === "fast");
-    if (startScan) startScan.textContent = mode.value === "fast" ? "Start scan" : "Continue in Kiro Agent";
+    agentOptions?.classList.toggle("hidden", !agent);
+    diffOptions?.classList.toggle("hidden", !agent || mode?.value !== "diff");
+    if (startScan) startScan.textContent = agent ? "Continue in Kiro Agent" : "Scan this repository";
   };
+  kind?.addEventListener("change", syncMode);
   mode?.addEventListener("change", syncMode);
   syncMode();
   const filterInputs: Array<[string, keyof FindingFilters]> = [
@@ -402,8 +410,9 @@ async function handleAction(element: HTMLElement): Promise<void> {
   if (action === "open-mcp") post({ type: "openMcpConfig", scope: (document.getElementById("agent-scope") as HTMLSelectElement | null)?.value ?? "workspace" });
   if (action === "retry-engine") post({ type: "retryEngine" });
   if (action === "show-findings") { ui.tab = "findings"; persist(); render(); }
+  if (action === "go-setup") { ui.tab = "setup"; persist(); render(); }
   if (action === "start") {
-    const mode = (document.getElementById("scan-mode") as HTMLSelectElement)?.value ?? "standard";
+    const mode = ui.scanMode ?? "fast";
     const scope = (document.getElementById("scan-scope") as HTMLInputElement)?.value ?? ".";
     const message: any = { type: "startScan", mode: mode === "fast" ? "standard" : mode, scope, analysisProfile: mode === "fast" ? "fast" : "model" };
     if (mode === "diff") {

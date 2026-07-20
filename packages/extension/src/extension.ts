@@ -114,7 +114,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand("kiroSecurity.retryEngine", () => controller.retryEngine()),
     vscode.workspace.onDidGrantWorkspaceTrust(() => {
       void controller.initialize()
-        .then(() => controller.offerAgentOnboarding())
         .catch((error: unknown) => controller.reportError("Workspace trust initialization failed", error));
     }),
     vscode.workspace.onDidChangeConfiguration((event) => {
@@ -129,7 +128,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   });
   await controller.initialize();
   controller.startPolling();
-  void controller.offerAgentOnboarding().catch((error: unknown) => controller.reportError("Agent onboarding failed", error));
 }
 
 export async function deactivate(): Promise<void> {

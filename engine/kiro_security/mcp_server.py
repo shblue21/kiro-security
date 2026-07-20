@@ -128,6 +128,7 @@ TOOLS: list[dict[str, Any]] = [
         "name": "security_deep_claim_worker",
         "description": (
             "Claim one of exactly six independent model discovery workers for the active Deep round. "
+            "Pass the returned versioned brief unchanged as the fresh worker's complete semantic assignment. "
             "Requires a host-attested runtime (contractVersion deep-worker/v2, delegationMode fresh, capability flags, "
             "usableWorkerSlots >= 6). All six workers in a round must share one modelId/agentType/reasoningEffort/"
             "hostVersion profile, and all six must be claimed before the first result is submitted."
@@ -227,7 +228,7 @@ TOOLS: list[dict[str, Any]] = [
         "description": "Replace only an incomplete Deep worker. Completed worker artifacts are immutable.",
         "inputSchema": {"type": "object", "properties": {"workspaceRoot": {"type": "string"}, "scanId": {"type": "string"}, "workerIndex": {"type": "integer", "minimum": 1, "maximum": 6}, "reason": {"type": "string"}}, "required": ["scanId", "workerIndex"], "additionalProperties": False},
     },
-    {"name": "security_deep_claim_merge", "description": "Claim semantic merge after all six workers are complete.", "inputSchema": _id_schema("scanId")},
+    {"name": "security_deep_claim_merge", "description": "Claim semantic merge after all six workers are complete and apply the returned mergeBrief unchanged.", "inputSchema": _id_schema("scanId")},
     {
         "name": "security_deep_submit_merge",
         "description": (
@@ -240,7 +241,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "security_deep_get_tail_assignment",
-        "description": "Claim the next eligible fresh-context Deep tail assignment after canonical discovery.",
+        "description": "Claim the next eligible fresh-context Deep tail assignment and pass payload.assignmentContract.instruction unchanged.",
         "inputSchema": {"type": "object", "properties": {"workspaceRoot": {"type": "string"}, "scanId": {"type": "string"}, "modelId": {"type": "string"}, "delegationId": {"type": "string"}, "runtime": {"type": "object"}}, "required": ["scanId", "modelId", "delegationId", "runtime"], "additionalProperties": False},
     },
     {

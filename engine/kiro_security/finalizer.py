@@ -630,17 +630,21 @@ def _report_values(label: str, values: list[Any]) -> list[str]:
     return [f"**{label}:** {'; '.join(rendered)}", ""] if rendered else []
 
 
+def _reportable_finding(item: dict[str, Any]) -> bool:
+    attack = item.get("attackPath") if isinstance(item.get("attackPath"), dict) else {}
+    return (
+        item.get("validationStatus") != "rejected"
+        and item.get("triageStatus") not in ("false_positive", "already_fixed")
+        and attack.get("policyDecision", "reportable") == "reportable"
+    )
+
+
 def _project_report(
     scan: dict[str, Any], findings_document: dict[str, Any], coverage: dict[str, Any],
     threat_model: dict[str, Any] | None = None,
 ) -> str:
     findings = _projection_findings(findings_document)
-    reportable = [
-        item
-        for item in findings
-        if item.get("validationStatus") != "rejected"
-        and item.get("triageStatus") not in ("false_positive", "already_fixed")
-    ]
+    reportable = [item for item in findings if _reportable_finding(item)]
     counts = Counter(item["severity"]["level"] for item in reportable)
     lines = [
         "# Kiro Security Power report",
@@ -666,7 +670,7 @@ def _project_report(
     lines.extend([
         "", "## Threat model", "",
         _markdown_text((threat_model or {}).get("summary")) or "No canonical threat-model summary was recorded.",
-        "", "**Structural hardening:** [Open portfolio](hardening/hardening.md)",
+        "", "**Security hardening:** [Open assessment](hardening/hardening.md)",
         "", "## Findings", "",
     ])
     for index, item in enumerate(reportable, start=1):
