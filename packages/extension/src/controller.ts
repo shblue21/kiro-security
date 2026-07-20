@@ -170,7 +170,7 @@ export class SecurityController implements vscode.Disposable {
     await this.engine.start();
     const config = vscode.workspace.getConfiguration("kiroSecurity");
     const defaultScope = this.validateScope(config.get<string>("defaultScope", "."));
-    const defaultMode = config.get<ScanMode>("defaultMode", "standard");
+    const defaultMode: ScanMode = "standard";
     const defaultsKey = `${defaultMode}\0${defaultScope}`;
     if (this.registeredDefaultsKey !== defaultsKey) {
       await this.engine.request("register_workspace", {
@@ -474,7 +474,7 @@ export class SecurityController implements vscode.Disposable {
 
   async createTrackingHandoff(occurrenceId: string, provider?: TrackingProvider): Promise<void> {
     await this.userAction("Create tracking handoff", async () => {
-      const target = provider ? ` for ${provider}` : "";
+      const target = provider && provider !== "manual" ? ` for ${provider}` : "";
       const prompt = `Prepare a tracking handoff${target} in Kiro Agent for Kiro Security finding ${occurrenceId}. Verify connector identity, search for duplicates, show the exact preview, and request approval before creating or updating anything.`;
       await vscode.env.clipboard.writeText(prompt);
       await vscode.window.showInformationMessage(
@@ -698,12 +698,10 @@ export class SecurityController implements vscode.Disposable {
         return installed;
       });
       const choice = await vscode.window.showInformationMessage(
-        `Kiro Agent integration is ready. Verified ${result.toolCount} tools with Python ${result.pythonVersion}. Kiro should reload the MCP configuration automatically. Native Powers-panel import is optional.`,
+        `Kiro Agent integration is ready. Verified ${result.toolCount} tools with Python ${result.pythonVersion}. Kiro should reload the MCP configuration automatically.`,
         "Open MCP config",
-        "Show optional Power bundle",
       );
       if (choice === "Open MCP config") await this.openMcpConfig(scope);
-      if (choice === "Show optional Power bundle") await this.revealPowerBundle();
     });
   }
 
@@ -768,29 +766,6 @@ export class SecurityController implements vscode.Disposable {
     await vscode.window.showTextDocument(document, { preview: false });
   }
 
-  async revealPowerBundle(): Promise<void> {
-    const powerPath = this.agentIntegrationStatus.power.preparedPath ?? this.agentIntegration.powerPath;
-    try {
-      const info = await fs.stat(path.join(powerPath, "POWER.md"));
-      if (!info.isFile()) throw new Error("Power bundle is not prepared. Run Install Agent Integration first.");
-    } catch {
-      throw new Error("Power bundle is not prepared. Run Install Agent Integration first.");
-    }
-    await vscode.env.clipboard.writeText(powerPath);
-    await vscode.commands.executeCommand("revealFileInOS", vscode.Uri.file(powerPath));
-    const choice = await vscode.window.showInformationMessage(
-      `Optional native Power bundle path copied: ${powerPath}. In Kiro open Powers → Add Custom Power → Import power from a folder, select this folder, review permissions, and install. Agent MCP tools and steering already work without this optional import.`,
-      "I imported it",
-    );
-    if (choice === "I imported it") await this.markPowerImported();
-  }
-
-  async markPowerImported(): Promise<void> {
-    await this.agentIntegration.markPowerImported();
-    this.agentIntegrationLastChecked = 0;
-    await this.refreshAgentIntegration(true, "checking");
-  }
-
   async retryEngine(): Promise<void> {
     await this.userAction("Retry engine", async () => {
       if (!this.engine) {
@@ -814,34 +789,6 @@ export class SecurityController implements vscode.Disposable {
     }
     this.startPolling();
     await this.refresh();
-  }
-
-  async configure(): Promise<void> {
-    const choice = await vscode.window.showQuickPick(
-      [
-        { label: "Install or repair Kiro Agent integration", action: "install-agent" },
-        { label: "Verify Kiro Agent integration", action: "verify-agent" },
-        { label: "Open MCP configuration", action: "open-mcp" },
-        { label: "Show optional native Power bundle", action: "power" },
-        { label: "Open Kiro Security settings", action: "settings" },
-        { label: "Set optional analyzer credential", action: "set-secret" },
-        { label: "Clear optional analyzer credential", action: "clear-secret" },
-        { label: "Copy reviewed MCP configuration", action: "copy-mcp" },
-      ],
-      { title: "Kiro Security: Configure" },
-    );
-    if (!choice) return;
-    if (choice.action === "install-agent") await this.installAgentIntegration();
-    if (choice.action === "verify-agent") await this.verifyAgentIntegration();
-    if (choice.action === "open-mcp") await this.openMcpConfig();
-    if (choice.action === "power") await this.revealPowerBundle();
-    if (choice.action === "settings") await vscode.commands.executeCommand("workbench.action.openSettings", `@ext:${this.context.extension.id}`);
-    if (choice.action === "set-secret") {
-      const value = await vscode.window.showInputBox({ title: "Optional analyzer credential", password: true, ignoreFocusOut: true });
-      if (value) await this.context.secrets.store("kiroSecurity.optionalAnalyzerCredential", value);
-    }
-    if (choice.action === "clear-secret") await this.context.secrets.delete("kiroSecurity.optionalAnalyzerCredential");
-    if (choice.action === "copy-mcp") await this.copyMcpConfig();
   }
 
   async copyMcpConfig(): Promise<void> {

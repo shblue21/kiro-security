@@ -35,7 +35,6 @@
     "onCommand:kiroSecurity.validateFinding",
     "onCommand:kiroSecurity.exportReport",
     "onCommand:kiroSecurity.openLogs",
-    "onCommand:kiroSecurity.configure",
     "onUri",
     "onCommand:kiroSecurity.showFindingDetails",
     "onCommand:kiroSecurity.createRemediation",
@@ -44,7 +43,6 @@
     "onCommand:kiroSecurity.verifyAgentIntegration",
     "onCommand:kiroSecurity.removeAgentIntegration",
     "onCommand:kiroSecurity.openMcpConfig",
-    "onCommand:kiroSecurity.revealPowerBundle",
     "onCommand:kiroSecurity.retryEngine"
   ],
   "extensionKind": [
@@ -137,12 +135,6 @@
         "category": "Kiro Security"
       },
       {
-        "command": "kiroSecurity.configure",
-        "title": "Configure",
-        "category": "Kiro Security",
-        "icon": "$(settings-gear)"
-      },
-      {
         "command": "kiroSecurity.showFindingDetails",
         "title": "Show Finding Details",
         "category": "Kiro Security"
@@ -180,12 +172,6 @@
         "title": "Open MCP Configuration",
         "category": "Kiro Security",
         "icon": "$(json)"
-      },
-      {
-        "command": "kiroSecurity.revealPowerBundle",
-        "title": "Show Optional Power Bundle",
-        "category": "Kiro Security",
-        "icon": "$(package)"
       },
       {
         "command": "kiroSecurity.retryEngine",
@@ -286,16 +272,6 @@
           ],
           "description": "Safe MCP auto-approval policy installed by the Setup flow. Scan, triage, remediation, tracking, hardening, and export tools are never auto-approved."
         },
-        "kiroSecurity.defaultMode": {
-          "type": "string",
-          "enum": [
-            "standard",
-            "deep",
-            "diff"
-          ],
-          "default": "standard",
-          "description": "Default model target used by Kiro Agent. The VSIX dashboard starts with Fast deterministic pre-screening."
-        },
         "kiroSecurity.defaultScope": {
           "type": "string",
           "default": ".",
@@ -312,11 +288,6 @@
           "type": "boolean",
           "default": true,
           "description": "Publish validated findings to the Problems view."
-        },
-        "kiroSecurity.telemetry.enabled": {
-          "type": "boolean",
-          "default": false,
-          "description": "Reserved opt-in telemetry switch. Version 0.3.0 does not transmit telemetry."
         },
         "kiroSecurity.maxFiles": {
           "type": "integer",

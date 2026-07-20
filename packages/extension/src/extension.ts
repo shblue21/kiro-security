@@ -107,12 +107,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.commands.registerCommand("kiroSecurity.exportReport", () => controller.exportReport()),
     vscode.commands.registerCommand("kiroSecurity.openLogs", () => logger.show()),
-    vscode.commands.registerCommand("kiroSecurity.configure", () => controller.configure()),
     vscode.commands.registerCommand("kiroSecurity.installAgentIntegration", () => controller.installAgentIntegration()),
     vscode.commands.registerCommand("kiroSecurity.verifyAgentIntegration", () => controller.verifyAgentIntegration()),
     vscode.commands.registerCommand("kiroSecurity.removeAgentIntegration", () => controller.removeAgentIntegration()),
     vscode.commands.registerCommand("kiroSecurity.openMcpConfig", () => controller.openMcpConfig()),
-    vscode.commands.registerCommand("kiroSecurity.revealPowerBundle", () => controller.revealPowerBundle()),
     vscode.commands.registerCommand("kiroSecurity.retryEngine", () => controller.retryEngine()),
     vscode.workspace.onDidGrantWorkspaceTrust(() => {
       void controller.initialize()

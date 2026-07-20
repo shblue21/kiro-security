@@ -153,7 +153,7 @@ export class SecurityWebviewProvider implements vscode.WebviewViewProvider, Secu
         await this.controller.copyFindingLink(message.occurrenceId);
         return;
       case "openSettings":
-        await this.controller.configure();
+        await vscode.commands.executeCommand("workbench.action.openSettings", `@ext:${this.context.extension.id}`);
         return;
       case "openLogs":
         this.controller.logger.show();
@@ -172,12 +172,6 @@ export class SecurityWebviewProvider implements vscode.WebviewViewProvider, Secu
         return;
       case "openMcpConfig":
         await this.controller.openMcpConfig(message.scope);
-        return;
-      case "revealPowerBundle":
-        await this.controller.revealPowerBundle();
-        return;
-      case "markPowerImported":
-        await this.controller.markPowerImported();
         return;
       case "retryEngine":
         await this.controller.retryEngine();

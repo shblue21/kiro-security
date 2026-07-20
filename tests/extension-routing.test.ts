@@ -24,13 +24,11 @@ const required = [
   "kiroSecurity.validateFinding",
   "kiroSecurity.exportReport",
   "kiroSecurity.openLogs",
-  "kiroSecurity.configure",
   "kiroSecurity.createTrackingHandoff",
   "kiroSecurity.installAgentIntegration",
   "kiroSecurity.verifyAgentIntegration",
   "kiroSecurity.removeAgentIntegration",
   "kiroSecurity.openMcpConfig",
-  "kiroSecurity.revealPowerBundle",
   "kiroSecurity.retryEngine",
 ];
 
@@ -41,6 +39,13 @@ test("manifest contributes every required command and activation route", () => {
   }
   assert.equal(manifest.contributes.views.kiroSecurity[0].type, "webview");
   assert.equal(manifest.contributes.viewsWelcome, undefined);
+  const commandIds = manifest.contributes.commands.map((entry: { command: string }) => entry.command);
+  for (const removed of ["kiroSecurity.configure", "kiroSecurity.revealPowerBundle"]) {
+    assert.equal(commandIds.includes(removed), false, `${removed} should be removed`);
+  }
+  for (const removedSetting of ["kiroSecurity.defaultMode", "kiroSecurity.telemetry.enabled"]) {
+    assert.equal(manifest.contributes.configuration.properties[removedSetting], undefined, `${removedSetting} should be removed`);
+  }
   assert.equal(manifest.contributes.commands.every((entry: { title: string }) => !entry.title.includes("Kiro Security")), true);
   assert.equal(manifest.capabilities.untrustedWorkspaces.supported, false);
 });

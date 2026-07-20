@@ -358,8 +358,6 @@ export type WebviewMessage =
   | { type: "verifyAgentIntegration" }
   | { type: "removeAgentIntegration" }
   | { type: "openMcpConfig"; scope?: AgentIntegrationScope }
-  | { type: "revealPowerBundle" }
-  | { type: "markPowerImported" }
   | { type: "retryEngine" };
 
 export interface WebviewSnapshot {

@@ -1221,20 +1221,6 @@ export class AgentIntegrationManager {
     return result;
   }
 
-  async markPowerImported(): Promise<void> {
-    const previous = await this.readState();
-    await this.writeState({
-      schemaVersion: 1,
-      productVersion: this.productVersion,
-      verifiedAt: previous?.verifiedAt,
-      configPath: previous?.configPath,
-      configDigest: previous?.configDigest,
-      steeringPath: previous?.steeringPath,
-      powerImportedConfirmed: true,
-      autoApprovePolicy: previous?.autoApprovePolicy,
-    });
-  }
-
   async removeDirectIntegration(): Promise<AgentIntegrationRemovalResult> {
     const removedConfigPaths: string[] = [];
     const removedSteeringPaths: string[] = [];

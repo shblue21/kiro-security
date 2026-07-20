@@ -198,7 +198,7 @@ test("webview harness renders loading, dashboard, empty/error, filtering, and de
   assert.match(harness.document.body.textContent ?? "", /Connect Kiro Agent/);
   assert.match(harness.document.body.textContent ?? "", /read-only lookups only/i);
   assert.ok(harness.document.querySelector("#setup-installation-options"));
-  assert.ok(harness.document.querySelector("#setup-power"));
+  assert.equal(harness.document.querySelector("#setup-power"), null, "Power bundle UI should be removed");
   assert.equal(harness.document.querySelectorAll(".agent-setup > .button-row button").length, 1);
   (harness.document.querySelector('[data-action="install-agent"]') as HTMLElement).click();
   const installMessage = harness.messages.at(-1);

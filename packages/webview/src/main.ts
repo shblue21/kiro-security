@@ -151,10 +151,6 @@ function setupView(): string {
     : !integration.configured ? "Install and verify"
       : repairRequired ? "Repair and verify"
         : integrationHealthy ? "Verify again" : "Verify setup";
-  const powerRegistration = integration.power?.registration;
-  const powerLabel = powerRegistration === "detected" || powerRegistration === "user_confirmed"
-    ? "added"
-    : integration.power?.prepared ? "available to add" : "available after setup";
   const statusRole = integration.state === "error" ? `role="alert"`
     : busy && integration.operation !== "checking" ? `role="status"` : "";
   return `<div class="stack">
@@ -177,12 +173,6 @@ function setupView(): string {
       </div></details>
     </section>
     <details class="card setup-disclosure" id="setup-environment" ${setupReady ? "" : "open"}><summary><span><strong>System checks</strong><small>${setupReady ? "Agent requirements passed" : "Action required"}</small></span>${badge(setupReady ? "ready" : "check setup", setupReady ? "success" : "warning")}</summary><div class="setup-disclosure-body">${checks.map(([name, value, state]) => `<div class="check"><span class="check-icon ${state}" aria-hidden="true">${state === "ok" ? "✓" : state === "neutral" ? "·" : "!"}</span><div><strong>${h(name)}</strong><div class="muted break-word">${h(value)}</div></div></div>`).join("")}</div></details>
-    <details class="card setup-disclosure" id="setup-power"><summary><span><strong>Optional: Add to Kiro Powers</strong><small>Agent scans already work without this step</small></span>${badge(powerLabel, powerLabel === "added" ? "success" : "neutral")}</summary><div class="setup-disclosure-body">
-      <p>Importing the prepared folder also registers this integration in Kiro's Powers panel.</p>
-      <p class="muted break-word">${integration.power?.preparedPath ? h(integration.power.preparedPath) : "The Power folder is prepared during Agent integration installation."}</p>
-      <div class="button-row"><button data-action="reveal-power" ${busy || !integration.power?.prepared ? "disabled" : ""}>Show Power folder</button><button data-action="mark-power-imported" ${busy || !integration.power?.prepared ? "disabled" : ""}>I imported it</button></div>
-      <p class="muted">Kiro must display its own Power permission confirmation; this VSIX does not bypass that confirmation.</p>
-    </div></details>
     ${!snapshot?.secondarySidebarOnboarded ? `<details class="card setup-disclosure" id="setup-placement"><summary><strong>Panel placement</strong></summary><div class="setup-disclosure-body"><p>Run <strong>Kiro Security: Open Security Panel on Right</strong>. If Secondary Side Bar placement is unavailable, the command opens a separate panel beside the editor.</p></div></details>` : ""}
   </div>`;
 }
@@ -275,7 +265,7 @@ function detailView(finding: any): string {
     <section class="card"><h3>Validation</h3>${finding.validation ? `<p>${statusBadge(finding.validation.status)} ${h(finding.validation.rationale)}</p><p class="muted">Method: ${h(finding.validation.method)} · ${h(date(finding.validation.createdAt))}</p>` : `<p class="muted">This finding has not been validated.</p><button data-action="validate" data-occurrence-id="${attr(finding.occurrenceId)}">Validate finding</button>`}</section>
     <section class="card"><h3>Triage</h3><label>Decision note<textarea id="triage-note" data-occurrence-id="${attr(finding.occurrenceId)}" maxlength="4000" placeholder="Required for Accept risk and Won't fix">${h(finding.triage?.note ?? "")}</textarea></label><div class="button-grid">${[["open","Open"],["accepted_risk","Accept risk"],["false_positive","False positive"],["already_fixed","Already fixed"],["wont_fix","Won't fix"]].map(([value,label]) => `<button class="${finding.triageStatus === value ? "selected-action" : ""}" data-action="triage" data-decision="${value}" data-occurrence-id="${attr(finding.occurrenceId)}">${label}</button>`).join("")}</div></section>
     <section class="card"><h3>Fix workflow and remediation</h3><p>${h(finding.remediation)}</p><button data-action="remediation" data-occurrence-id="${attr(finding.occurrenceId)}">Create remediation guidance</button>${(finding.remediationRecords ?? []).length ? jsonBlock(finding.remediationRecords) : ""}</section>
-    <section class="card"><h3>Tracking handoff</h3><p class="muted">Choose a target to copy a ready-to-paste Kiro Agent prompt. No external issue is created automatically.</p><div class="button-grid">${[["manual","Manual"],["github","GitHub"],["linear","Linear"],["jira","Jira"]].map(([value,label]) => `<button data-action="tracking" data-provider="${value}" data-occurrence-id="${attr(finding.occurrenceId)}">${label}</button>`).join("")}</div>${(finding.trackingRecords ?? []).length ? jsonBlock(finding.trackingRecords) : ""}</section>
+    <section class="card"><h3>Tracking handoff</h3><p class="muted">Copies a ready-to-paste Kiro Agent prompt. No external issue is created automatically.</p><button data-action="tracking" data-provider="manual" data-occurrence-id="${attr(finding.occurrenceId)}">Copy tracking prompt</button>${(finding.trackingRecords ?? []).length ? jsonBlock(finding.trackingRecords) : ""}</section>
     <section class="card"><h3>Related findings</h3>${(finding.relatedFindings ?? []).map((related: any) => `<button class="related-finding" data-action="finding" data-occurrence-id="${attr(related.occurrenceId)}"><strong>${h(related.title)}</strong><span>${severityBadge(related.severity.level)} ${h(related.locations?.[0]?.path ?? "")}</span></button>`).join("") || `<p class="muted">No related findings in this scan.</p>`}</section>
     <section class="card"><h3>Artifact links</h3><ul class="artifact-list">${(finding.artifactLinks ?? []).map((artifact: any) => `<li><button class="link" data-action="artifact" data-path="${attr(artifact.path)}">${h(artifact.kind)}</button><span class="muted mono">${h(String(artifact.sha256 ?? "").slice(0, 12))}</span></li>`).join("") || "<li>No artifacts recorded.</li>"}</ul></section>
     <section class="card"><h3>Metadata</h3><dl><dt>Finding ID</dt><dd class="mono">${h(finding.findingId)}</dd><dt>Occurrence ID</dt><dd class="mono">${h(finding.occurrenceId)}</dd><dt>Rule</dt><dd>${h(finding.ruleId)}</dd><dt>Category</dt><dd>${h(finding.taxonomy?.category)}</dd><dt>CWE</dt><dd>${h((finding.taxonomy?.cwe ?? []).join(", ") || "—")}</dd><dt>Scan ID</dt><dd class="mono">${h(finding.scanId)}</dd></dl></section>
@@ -410,8 +400,6 @@ async function handleAction(element: HTMLElement): Promise<void> {
   if (action === "verify-agent") post({ type: "verifyAgentIntegration" });
   if (action === "remove-agent") post({ type: "removeAgentIntegration" });
   if (action === "open-mcp") post({ type: "openMcpConfig", scope: (document.getElementById("agent-scope") as HTMLSelectElement | null)?.value ?? "workspace" });
-  if (action === "reveal-power") post({ type: "revealPowerBundle" });
-  if (action === "mark-power-imported") post({ type: "markPowerImported" });
   if (action === "retry-engine") post({ type: "retryEngine" });
   if (action === "show-findings") { ui.tab = "findings"; persist(); render(); }
   if (action === "start") {

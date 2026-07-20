@@ -85,8 +85,6 @@ export function validateWebviewMessage(value: unknown): WebviewMessage | undefin
     case "copyMcpConfig":
     case "verifyAgentIntegration":
     case "removeAgentIntegration":
-    case "revealPowerBundle":
-    case "markPowerImported":
     case "retryEngine":
       return { type: value.type };
     case "installAgentIntegration":
