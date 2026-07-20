@@ -6,6 +6,7 @@ import { SecurityController, SecurityViewSink } from "./controller";
 export class SecurityWebviewProvider implements vscode.WebviewViewProvider, SecurityViewSink, vscode.Disposable {
   private view: vscode.WebviewView | undefined;
   private readonly panels = new Set<vscode.WebviewPanel>();
+  private readonly messageListeners = new Set<vscode.Disposable>();
   private disposed = false;
 
   constructor(
@@ -15,9 +16,11 @@ export class SecurityWebviewProvider implements vscode.WebviewViewProvider, Secu
 
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
-    this.configureWebview(view.webview);
+    const listener = this.configureWebview(view.webview);
     view.webview.html = this.html(view.webview);
     view.onDidDispose(() => {
+      listener.dispose();
+      this.messageListeners.delete(listener);
       if (this.view === view) this.view = undefined;
     });
     void view.webview.postMessage({ type: "snapshot", snapshot: this.controller.snapshot() });
@@ -35,9 +38,13 @@ export class SecurityWebviewProvider implements vscode.WebviewViewProvider, Secu
       },
     );
     this.panels.add(panel);
-    this.configureWebview(panel.webview);
+    const listener = this.configureWebview(panel.webview);
     panel.webview.html = this.html(panel.webview);
-    panel.onDidDispose(() => this.panels.delete(panel));
+    panel.onDidDispose(() => {
+      listener.dispose();
+      this.messageListeners.delete(listener);
+      this.panels.delete(panel);
+    });
     await panel.webview.postMessage({ type: "snapshot", snapshot: this.controller.snapshot() });
   }
 
@@ -61,21 +68,27 @@ export class SecurityWebviewProvider implements vscode.WebviewViewProvider, Secu
     for (const panel of this.panels) void panel.webview.postMessage(message);
   }
 
-  private configureWebview(webview: vscode.Webview): void {
+  isVisible(): boolean {
+    if (this.view?.visible) return true;
+    for (const panel of this.panels) if (panel.visible) return true;
+    return false;
+  }
+
+  private configureWebview(webview: vscode.Webview): vscode.Disposable {
     webview.options = {
       enableScripts: true,
       localResourceRoots: this.localResourceRoots(),
     };
-    this.context.subscriptions.push(
-      webview.onDidReceiveMessage((raw: unknown) => {
-        const message = validateWebviewMessage(raw);
-        if (!message) {
-          this.controller.logger.log("warning", "Rejected malformed webview message");
-          return;
-        }
-        void this.handleMessage(message).catch((error: unknown) => this.controller.reportError("Webview action failed", error));
-      }),
-    );
+    const listener = webview.onDidReceiveMessage((raw: unknown) => {
+      const message = validateWebviewMessage(raw);
+      if (!message) {
+        this.controller.logger.log("warning", "Rejected malformed webview message");
+        return;
+      }
+      void this.handleMessage(message).catch((error: unknown) => this.controller.reportError("Webview action failed", error));
+    });
+    this.messageListeners.add(listener);
+    return listener;
   }
 
   private localResourceRoots(): vscode.Uri[] {
@@ -206,5 +219,7 @@ export class SecurityWebviewProvider implements vscode.WebviewViewProvider, Secu
     this.disposed = true;
     for (const panel of this.panels) panel.dispose();
     this.panels.clear();
+    for (const listener of this.messageListeners) listener.dispose();
+    this.messageListeners.clear();
   }
 }

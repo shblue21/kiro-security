@@ -1,2 +1,2 @@
 # Finding review
-List scan findings, retrieve full evidence for relevant occurrences, follow source and sink locations, and distinguish candidate, validated, rejected, and needs-review states.
+List scan findings and retrieve the full occurrence with `security_get_finding` before drawing conclusions. Follow the current source, closest-control, sink, impact, validation, and attack-path evidence; preserve independently reachable instances even when they share a title or CWE. Distinguish candidate, validated, rejected, deferred, and needs-review states, and separate observed evidence, counterevidence, and proof gaps. Recurrence across workers, a dangerous API, or a high candidate severity is supporting context—not proof of exploitability or reportability.

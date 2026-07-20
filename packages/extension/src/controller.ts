@@ -27,6 +27,7 @@ export interface SecurityViewSink {
   postSnapshot(snapshot: WebviewSnapshot): void;
   postEvent(name: EngineEventName, params: Record<string, unknown>): void;
   postNavigation(tab: "setup" | "dashboard" | "findings" | "history"): void;
+  isVisible(): boolean;
 }
 
 export class SecurityController implements vscode.Disposable {
@@ -40,6 +41,7 @@ export class SecurityController implements vscode.Disposable {
   private eventRefreshTimer: NodeJS.Timeout | undefined;
   private refreshPromise: Promise<void> | undefined;
   private lastEventSequence = 0;
+  private lastSnapshotJson: string | undefined;
   private disposed = false;
   private registeredDefaultsKey: string | undefined;
   private readonly agentIntegration: AgentIntegrationManager;
@@ -190,6 +192,15 @@ export class SecurityController implements vscode.Disposable {
       });
     }
     this.viewSink?.postEvent(event.name, event.params);
+    if (event.name === "scan.completed" && typeof event.params.scanId === "string" && !this.viewSink?.isVisible()) {
+      void (async () => {
+        const choice = await vscode.window.showInformationMessage("Kiro Security scan completed.", "View findings");
+        if (choice !== "View findings") return;
+        await this.selectScan(String(event.params.scanId));
+        await vscode.commands.executeCommand("kiroSecurity.openPanel");
+        this.viewSink?.postNavigation("findings");
+      })().catch((error: unknown) => this.handleError("Open completed scan", error, true));
+    }
     this.scheduleRefresh();
   }
 
@@ -278,7 +289,11 @@ export class SecurityController implements vscode.Disposable {
   }
 
   private postSnapshot(): void {
-    this.viewSink?.postSnapshot(this.snapshot());
+    const snapshot = this.snapshot();
+    const serialized = JSON.stringify(snapshot);
+    if (serialized === this.lastSnapshotJson) return;
+    this.lastSnapshotJson = serialized;
+    this.viewSink?.postSnapshot(snapshot);
   }
 
   private validateScope(scope: string): string {
@@ -301,7 +316,25 @@ export class SecurityController implements vscode.Disposable {
   ): Promise<ScanRecord | undefined> {
     return this.userAction("Start scan", async () => {
       if (mode === "deep" || mode === "diff" || options.analysisProfile === "model") {
-        throw new Error("Model Standard, Diff, and Deep scans must be started from Kiro Agent because the VSIX cannot provide host model/runtime attestation. Use Fast Scan for local deterministic pre-screening.");
+        const scope = this.validateScope(options.scope ?? vscode.workspace.getConfiguration("kiroSecurity").get<string>("defaultScope", "."));
+        const label = mode === "diff" ? "Diff" : mode === "deep" ? "Deep" : "Standard";
+        const prompt = [
+          `Run a ${label} Kiro Security scan for workspace-relative scope ${JSON.stringify(scope)}.`,
+          mode === "diff" ? `Diff target: ${options.diffTargetKind ?? "working_tree"}.` : undefined,
+          options.diffBaseRevision ? `Base revision: ${this.validateGitRef(options.diffBaseRevision, "Base revision")}.` : undefined,
+          options.diffHeadRevision ? `Head revision: ${this.validateGitRef(options.diffHeadRevision, "Head revision")}.` : undefined,
+          "Use the installed kiro-security-power Agent tools and preserve their runtime attestation requirements.",
+        ].filter(Boolean).join("\n");
+        await vscode.env.clipboard.writeText(prompt);
+        const choice = await vscode.window.showInformationMessage(
+          `${label} scans require Kiro Agent host attestation. A ready-to-paste Agent prompt was copied.`,
+          "Open Setup",
+        );
+        if (choice === "Open Setup") {
+          await vscode.commands.executeCommand("kiroSecurity.openPanel");
+          this.viewSink?.postNavigation("setup");
+        }
+        return undefined;
       }
       const engine = await this.ensureEngine();
       const config = vscode.workspace.getConfiguration("kiroSecurity");
@@ -310,9 +343,6 @@ export class SecurityController implements vscode.Disposable {
         mode,
         analysisProfile: "fast",
         scope,
-        diffTargetKind: mode === "diff" ? options.diffTargetKind ?? "working_tree" : undefined,
-        diffBaseRevision: mode === "diff" ? this.validateGitRef(options.diffBaseRevision, "Base revision") : undefined,
-        diffHeadRevision: mode === "diff" ? this.validateGitRef(options.diffHeadRevision, "Head revision") : undefined,
         maxFiles: config.get<number>("maxFiles", 10_000),
         maxFileBytes: config.get<number>("maxFileBytes", 1_048_576),
       });
@@ -445,9 +475,10 @@ export class SecurityController implements vscode.Disposable {
   async createTrackingHandoff(occurrenceId: string, provider?: TrackingProvider): Promise<void> {
     await this.userAction("Create tracking handoff", async () => {
       const target = provider ? ` for ${provider}` : "";
+      const prompt = `Prepare a tracking handoff${target} in Kiro Agent for Kiro Security finding ${occurrenceId}. Verify connector identity, search for duplicates, show the exact preview, and request approval before creating or updating anything.`;
+      await vscode.env.clipboard.writeText(prompt);
       await vscode.window.showInformationMessage(
-        `Start tracking${target} in Kiro Agent for finding ${occurrenceId}. The Agent must supply truthful connector identity, duplicate-search evidence, and approval for the exact generated preview; the VSIX cannot attest those facts.`,
-        { modal: true },
+        `A ready-to-paste Kiro Agent tracking prompt${target} was copied. No external record was created.`,
       );
     });
   }
@@ -654,9 +685,18 @@ export class SecurityController implements vscode.Disposable {
       if (confirmation !== existing) return;
       this.agentIntegrationStatus = { ...this.agentIntegrationStatus, operation: "installing", lastError: undefined };
       this.postSnapshot();
-      const result = await this.agentIntegration.install({ pythonPath: this.pythonPath(), scope, autoApprovePolicy });
-      this.agentIntegrationLastChecked = 0;
-      await this.refreshAgentIntegration(true, "verifying");
+      const result = await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title: `${existing} Kiro Security Agent integration`,
+        cancellable: false,
+      }, async (progress) => {
+        progress.report({ message: "Writing reviewed integration files…" });
+        const installed = await this.agentIntegration.install({ pythonPath: this.pythonPath(), scope, autoApprovePolicy });
+        this.agentIntegrationLastChecked = 0;
+        progress.report({ message: "Verifying Agent tools…" });
+        await this.refreshAgentIntegration(true, "verifying");
+        return installed;
+      });
       const choice = await vscode.window.showInformationMessage(
         `Kiro Agent integration is ready. Verified ${result.toolCount} tools with Python ${result.pythonVersion}. Kiro should reload the MCP configuration automatically. Native Powers-panel import is optional.`,
         "Open MCP config",
@@ -672,9 +712,17 @@ export class SecurityController implements vscode.Disposable {
       this.requireTrustedWorkspace("verifying Kiro Agent integration");
       this.agentIntegrationStatus = { ...this.agentIntegrationStatus, operation: "verifying", lastError: undefined };
       this.postSnapshot();
-      const result = await this.agentIntegration.verify(this.pythonPath());
-      this.agentIntegrationLastChecked = 0;
-      await this.refreshAgentIntegration(true, "verifying");
+      const result = await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title: "Verifying Kiro Security Agent integration",
+        cancellable: false,
+      }, async (progress) => {
+        progress.report({ message: "Checking MCP tools…" });
+        const verified = await this.agentIntegration.verify(this.pythonPath());
+        this.agentIntegrationLastChecked = 0;
+        await this.refreshAgentIntegration(true, "verifying");
+        return verified;
+      });
       void vscode.window.showInformationMessage(
         `Kiro Security Agent integration verified: ${result.toolCount} tools, MCP ${result.serverVersion}, engine ${result.engineVersion}.`,
       );
@@ -692,9 +740,18 @@ export class SecurityController implements vscode.Disposable {
       if (confirmation !== "Remove integration") return;
       this.agentIntegrationStatus = { ...this.agentIntegrationStatus, operation: "removing" };
       this.postSnapshot();
-      const result = await this.agentIntegration.removeDirectIntegration();
-      this.agentIntegrationLastChecked = 0;
-      await this.refreshAgentIntegration(true, "checking");
+      const result = await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title: "Removing Kiro Security Agent integration",
+        cancellable: false,
+      }, async (progress) => {
+        progress.report({ message: "Removing managed MCP entries…" });
+        const removed = await this.agentIntegration.removeDirectIntegration();
+        this.agentIntegrationLastChecked = 0;
+        progress.report({ message: "Refreshing integration status…" });
+        await this.refreshAgentIntegration(true, "checking");
+        return removed;
+      });
       const skipped = result.skippedUnmanagedConfigPaths.length
         ? ` ${result.skippedUnmanagedConfigPaths.length} same-named but unmanaged MCP entry was left unchanged.`
         : "";

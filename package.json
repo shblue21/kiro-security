@@ -64,132 +64,132 @@
     "commands": [
       {
         "command": "kiroSecurity.openPanel",
-        "title": "Kiro Security: Open Security Panel",
+        "title": "Open Security Panel",
         "category": "Kiro Security",
         "icon": "$(shield)"
       },
       {
         "command": "kiroSecurity.openPanelRight",
-        "title": "Kiro Security: Open Security Panel on Right",
+        "title": "Open Security Panel on Right",
         "category": "Kiro Security",
         "icon": "$(layout-sidebar-right)"
       },
       {
         "command": "kiroSecurity.startFastScan",
-        "title": "Kiro Security: Start Fast Scan",
+        "title": "Start Fast Scan",
         "category": "Kiro Security",
         "icon": "$(play)"
       },
       {
         "command": "kiroSecurity.startStandardScan",
-        "title": "Kiro Security: Start Standard Scan in Kiro Agent",
+        "title": "Start Standard Scan in Kiro Agent",
         "category": "Kiro Security",
         "icon": "$(play)"
       },
       {
         "command": "kiroSecurity.startDeepScan",
-        "title": "Kiro Security: Start Deep Scan",
+        "title": "Start Deep Scan in Kiro Agent",
         "category": "Kiro Security",
         "icon": "$(search-fuzzy)"
       },
       {
         "command": "kiroSecurity.scanGitChanges",
-        "title": "Kiro Security: Start Diff Scan in Kiro Agent",
+        "title": "Start Diff Scan in Kiro Agent",
         "category": "Kiro Security",
         "icon": "$(git-compare)"
       },
       {
         "command": "kiroSecurity.refreshThreatModel",
-        "title": "Kiro Security: Create or Refresh Threat Model",
+        "title": "Create or Refresh Threat Model",
         "category": "Kiro Security"
       },
       {
         "command": "kiroSecurity.resumeLastScan",
-        "title": "Kiro Security: Resume Last Scan",
+        "title": "Resume Last Scan",
         "category": "Kiro Security",
         "icon": "$(debug-continue)"
       },
       {
         "command": "kiroSecurity.cancelActiveScan",
-        "title": "Kiro Security: Cancel Active Scan",
+        "title": "Cancel Active Scan",
         "category": "Kiro Security",
         "icon": "$(debug-stop)"
       },
       {
         "command": "kiroSecurity.openFinding",
-        "title": "Kiro Security: Open Finding",
+        "title": "Open Finding",
         "category": "Kiro Security"
       },
       {
         "command": "kiroSecurity.validateFinding",
-        "title": "Kiro Security: Validate Finding",
+        "title": "Validate Finding",
         "category": "Kiro Security"
       },
       {
         "command": "kiroSecurity.exportReport",
-        "title": "Kiro Security: Export Report",
+        "title": "Export Report",
         "category": "Kiro Security",
         "icon": "$(export)"
       },
       {
         "command": "kiroSecurity.openLogs",
-        "title": "Kiro Security: Open Logs",
+        "title": "Open Logs",
         "category": "Kiro Security"
       },
       {
         "command": "kiroSecurity.configure",
-        "title": "Kiro Security: Configure",
+        "title": "Configure",
         "category": "Kiro Security",
         "icon": "$(settings-gear)"
       },
       {
         "command": "kiroSecurity.showFindingDetails",
-        "title": "Show Kiro Security Finding Details",
+        "title": "Show Finding Details",
         "category": "Kiro Security"
       },
       {
         "command": "kiroSecurity.createRemediation",
-        "title": "Create Kiro Security Remediation Guidance",
+        "title": "Create Remediation Guidance",
         "category": "Kiro Security"
       },
       {
         "command": "kiroSecurity.createTrackingHandoff",
-        "title": "Create Kiro Security Tracking Handoff",
+        "title": "Create Tracking Handoff",
         "category": "Kiro Security"
       },
       {
         "command": "kiroSecurity.installAgentIntegration",
-        "title": "Kiro Security: Install or Repair Agent Integration",
+        "title": "Install or Repair Agent Integration",
         "category": "Kiro Security",
         "icon": "$(plug)"
       },
       {
         "command": "kiroSecurity.verifyAgentIntegration",
-        "title": "Kiro Security: Verify Agent Integration",
+        "title": "Verify Agent Integration",
         "category": "Kiro Security",
         "icon": "$(verified)"
       },
       {
         "command": "kiroSecurity.removeAgentIntegration",
-        "title": "Kiro Security: Remove Agent Integration",
+        "title": "Remove Agent Integration",
         "category": "Kiro Security",
         "icon": "$(trash)"
       },
       {
         "command": "kiroSecurity.openMcpConfig",
-        "title": "Kiro Security: Open MCP Configuration",
+        "title": "Open MCP Configuration",
         "category": "Kiro Security",
         "icon": "$(json)"
       },
       {
         "command": "kiroSecurity.revealPowerBundle",
-        "title": "Kiro Security: Show Optional Power Bundle",
+        "title": "Show Optional Power Bundle",
         "category": "Kiro Security",
         "icon": "$(package)"
       },
       {
         "command": "kiroSecurity.retryEngine",
-        "title": "Kiro Security: Retry Engine",
+        "title": "Retry Engine",
         "category": "Kiro Security",
         "icon": "$(debug-restart)"
       }
@@ -214,12 +214,6 @@
         }
       ]
     },
-    "viewsWelcome": [
-      {
-        "view": "kiroSecurity.securityView",
-        "contents": "Trust and open a local workspace to use Kiro Security Power.\n[Open a folder](command:vscode.openFolder)"
-      }
-    ],
     "menus": {
       "view/title": [
         {
@@ -300,7 +294,7 @@
             "diff"
           ],
           "default": "standard",
-          "description": "Default model target shown in the Security dashboard; the VSIX Fast option remains the local deterministic pre-screen."
+          "description": "Default model target used by Kiro Agent. The VSIX dashboard starts with Fast deterministic pre-screening."
         },
         "kiroSecurity.defaultScope": {
           "type": "string",

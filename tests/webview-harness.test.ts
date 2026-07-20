@@ -111,10 +111,25 @@ test("webview harness renders loading, dashboard, empty/error, filtering, and de
   assert.match(harness.document.body.textContent ?? "", /Connecting/);
 
   harness.window.dispatchEvent(new harness.window.MessageEvent("message", { data: { type: "snapshot", snapshot: snapshot() } }));
-  assert.match(harness.document.body.textContent ?? "", /Selected scan/);
+  assert.match(harness.document.body.textContent ?? "", /Fast \(deterministic\)/);
   assert.match(harness.document.body.textContent ?? "", /1\s*findings/);
   assert.ok(harness.document.querySelector('[aria-label="Security panel sections"]'));
-  assert.equal((harness.document.getElementById("scan-mode") as HTMLSelectElement).value, "standard");
+  const initialMode = harness.document.getElementById("scan-mode") as HTMLSelectElement;
+  assert.equal(initialMode.value, "fast");
+  const unchangedMode = initialMode;
+  harness.window.dispatchEvent(new harness.window.MessageEvent("message", { data: { type: "snapshot", snapshot: snapshot() } }));
+  assert.equal(harness.document.getElementById("scan-mode"), unchangedMode, "unchanged snapshots should not replace the DOM");
+  initialMode.value = "deep";
+  initialMode.dispatchEvent(new harness.window.Event("change", { bubbles: true }));
+  assert.equal(harness.document.getElementById("start-scan")?.textContent, "Continue in Kiro Agent");
+  (harness.document.getElementById("start-scan") as HTMLElement).click();
+  assert.deepEqual({ type: harness.messages.at(-1).type, mode: harness.messages.at(-1).mode, profile: harness.messages.at(-1).analysisProfile }, { type: "startScan", mode: "deep", profile: "model" });
+
+  (harness.document.getElementById("scan-scope") as HTMLInputElement).value = "src/custom";
+  const renamed = snapshot();
+  renamed.dashboard = { ...renamed.dashboard, workspace: { ...renamed.dashboard.workspace, display_name: "renamed" } };
+  harness.window.dispatchEvent(new harness.window.MessageEvent("message", { data: { type: "snapshot", snapshot: renamed } }));
+  assert.equal((harness.document.getElementById("scan-scope") as HTMLInputElement).value, "src/custom", "edited inputs survive snapshot re-renders");
 
   const labeled = snapshot();
   const modelScan = { ...labeled.dashboard.selectedScan, capabilities: { analysisProfile: "model" } };
@@ -129,6 +144,15 @@ test("webview harness renders loading, dashboard, empty/error, filtering, and de
 
   (harness.document.querySelector('[data-tab="findings"]') as HTMLElement).click();
   assert.match(harness.document.body.textContent ?? "", /Command injection reaches shell/);
+  assert.ok(harness.document.querySelector(".badge-critical"));
+  assert.equal(harness.document.querySelector('[role="listitem"]'), null);
+  (harness.document.querySelector('.severity-summary [data-severity="critical"]') as HTMLElement).click();
+  assert.equal(harness.getPersisted().filters.severity, "critical");
+  assert.equal(harness.document.querySelector('.severity-summary [data-severity="critical"]')?.getAttribute("aria-pressed"), "true");
+  assert.equal((harness.document.getElementById("filter-severity") as HTMLSelectElement).value, "critical", "severity chips drive the severity filter");
+  assert.match(harness.document.body.textContent ?? "", /Command injection reaches shell/);
+  (harness.document.querySelector('.severity-summary [data-severity="critical"]') as HTMLElement).click();
+  assert.equal(harness.getPersisted().filters.severity, "");
   const query = harness.document.getElementById("filter-query") as HTMLInputElement;
   query.value = "does-not-match";
   query.dispatchEvent(new harness.window.Event("input", { bubbles: true }));
@@ -159,19 +183,68 @@ test("webview harness renders loading, dashboard, empty/error, filtering, and de
   assert.equal(harness.messages.at(-1).type, "openSource");
   (harness.document.querySelector('[data-action="export-finding"]') as HTMLElement).click();
   assert.equal(harness.messages.at(-1).type, "exportFinding");
+  const beforeRisk = harness.messages.length;
+  (harness.document.querySelector('[data-action="triage"][data-decision="accepted_risk"]') as HTMLElement).click();
+  assert.equal(harness.messages.length, beforeRisk, "accepted risk requires an audit note");
+  (harness.document.getElementById("triage-note") as HTMLTextAreaElement).value = "Compensating control is documented.";
+  (harness.document.querySelector('[data-action="triage"][data-decision="accepted_risk"]') as HTMLElement).click();
+  assert.equal(harness.messages.at(-1).note, "Compensating control is documented.");
   (harness.document.querySelector('[data-action="tracking"]') as HTMLElement).click();
   assert.equal(harness.messages.at(-1).type, "createTrackingHandoff");
   assert.equal(harness.messages.at(-1).provider, "manual");
 
   harness.window.dispatchEvent(new harness.window.MessageEvent("message", { data: { type: "navigate", tab: "setup" } }));
   assert.equal(harness.getPersisted().tab, "setup");
-  assert.match(harness.document.body.textContent ?? "", /Kiro Agent integration/);
+  assert.match(harness.document.body.textContent ?? "", /Connect Kiro Agent/);
   assert.match(harness.document.body.textContent ?? "", /read-only lookups only/i);
+  assert.ok(harness.document.querySelector("#setup-installation-options"));
+  assert.ok(harness.document.querySelector("#setup-power"));
+  assert.equal(harness.document.querySelectorAll(".agent-setup > .button-row button").length, 1);
   (harness.document.querySelector('[data-action="install-agent"]') as HTMLElement).click();
   const installMessage = harness.messages.at(-1);
   assert.equal(installMessage.type, "installAgentIntegration");
   assert.equal(installMessage.scope, "workspace");
   assert.equal(installMessage.autoApprovePolicy, "read_only");
+
+  const configured = snapshot();
+  configured.agentIntegration = { ...configured.agentIntegration, configured: true, state: "needs_repair", configScope: "user", autoApprovePolicy: "none" };
+  harness.window.dispatchEvent(new harness.window.MessageEvent("message", { data: { type: "snapshot", snapshot: configured } }));
+  assert.equal((harness.document.getElementById("agent-scope") as HTMLSelectElement).value, "user");
+  assert.equal((harness.document.getElementById("agent-scope") as HTMLSelectElement).disabled, true);
+  assert.equal((harness.document.getElementById("agent-auto-approve") as HTMLSelectElement).value, "none");
+  const advanced = harness.document.getElementById("setup-troubleshooting") as HTMLDetailsElement;
+  advanced.open = true;
+  advanced.dispatchEvent(new harness.window.Event("toggle"));
+  harness.window.dispatchEvent(new harness.window.MessageEvent("message", { data: { type: "snapshot", snapshot: configured } }));
+  assert.equal((harness.document.getElementById("setup-troubleshooting") as HTMLDetailsElement).open, true);
+  (harness.document.getElementById("setup-primary-action") as HTMLButtonElement).focus();
+  const checking = { ...configured, agentIntegration: { ...configured.agentIntegration, operation: "checking" } };
+  harness.window.dispatchEvent(new harness.window.MessageEvent("message", { data: { type: "snapshot", snapshot: checking } }));
+  assert.equal((harness.document.getElementById("setup-primary-action") as HTMLButtonElement).disabled, true);
+  harness.window.dispatchEvent(new harness.window.MessageEvent("message", { data: { type: "snapshot", snapshot: configured } }));
+  assert.equal((harness.document.activeElement as HTMLElement).id, "setup-primary-action");
+  (harness.document.querySelector('.agent-setup > .button-row [data-action="install-agent"]') as HTMLElement).click();
+  assert.equal(harness.messages.at(-1).type, "installAgentIntegration");
+  assert.equal(harness.messages.at(-1).scope, "user");
+  assert.equal(harness.messages.at(-1).autoApprovePolicy, "none");
+
+  const blocked = snapshot({ workspaceTrusted: false, engineStatus: "stopped" });
+  harness.window.dispatchEvent(new harness.window.MessageEvent("message", { data: { type: "snapshot", snapshot: blocked } }));
+  const checks = harness.document.getElementById("setup-environment") as HTMLDetailsElement;
+  assert.equal(checks.open, true);
+  checks.open = false;
+  checks.dispatchEvent(new harness.window.Event("toggle"));
+  blocked.engineStatus = "error";
+  harness.window.dispatchEvent(new harness.window.MessageEvent("message", { data: { type: "snapshot", snapshot: blocked } }));
+  assert.equal((harness.document.getElementById("setup-environment") as HTMLDetailsElement).open, false);
+  assert.equal((harness.document.querySelector('.agent-setup > .button-row [data-action="install-agent"]') as HTMLButtonElement).disabled, true);
+
+  const verified = snapshot();
+  verified.agentIntegration = { ...verified.agentIntegration, configured: true, verified: true, state: "verified", configScope: "workspace" };
+  harness.window.dispatchEvent(new harness.window.MessageEvent("message", { data: { type: "snapshot", snapshot: verified } }));
+  assert.match(harness.document.querySelector(".setup-status")?.textContent ?? "", /Start a new Kiro Agent conversation/);
+  assert.equal(harness.document.querySelectorAll(".agent-setup > .button-row").length, 0);
+  assert.ok(harness.document.querySelector('#setup-troubleshooting [data-action="verify-agent"]'));
 
   harness.window.dispatchEvent(new harness.window.MessageEvent("message", { data: { type: "snapshot", snapshot: snapshot({ engineStatus: "error", engineError: "Python missing", dashboard: null }) } }));
   assert.match(harness.document.body.textContent ?? "", /Python missing/);
@@ -188,4 +261,5 @@ test("packaged webview CSP and styles exclude remote script sources and include 
   assert.match(styles, /--vscode-/);
   assert.match(styles, /forced-colors: active/);
   assert.match(styles, /focus-visible/);
+  assert.doesNotMatch(styles, /font-size:\s*[89]px/);
 });

@@ -5,10 +5,10 @@
 }
 * { box-sizing: border-box; }
 body { margin: 0; color: var(--vscode-foreground); background: var(--vscode-sideBar-background); font: var(--vscode-font-size)/1.45 var(--vscode-font-family); }
-button, input, select { font: inherit; }
+button, input, select, textarea { font: inherit; }
 button { color: var(--vscode-button-foreground); background: var(--vscode-button-background); border: 1px solid transparent; border-radius: 3px; padding: 6px 10px; cursor: pointer; }
 button:hover { background: var(--vscode-button-hoverBackground); }
-button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; }
 button:disabled { opacity: .55; cursor: not-allowed; }
 button.secondary, .icon-button, button.link { color: var(--vscode-textLink-foreground); background: transparent; }
 button.link { padding: 0; text-align: left; }
@@ -31,7 +31,8 @@ p { margin: 6px 0; }
 .mono, code, pre { font-family: var(--vscode-editor-font-family); font-size: var(--vscode-editor-font-size); }
 .break-word { overflow-wrap: anywhere; }
 label { display: grid; gap: 4px; color: var(--vscode-descriptionForeground); font-size: 11px; }
-input, select { width: 100%; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, transparent); padding: 6px; border-radius: 2px; }
+input, select, textarea { width: 100%; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, transparent); padding: 6px; border-radius: 2px; }
+textarea { min-height: 64px; resize: vertical; }
 .scan-form { display: grid; gap: 10px; }
 .diff-options { display: grid; gap: 8px; padding: 8px; border-left: 2px solid var(--vscode-focusBorder); }
 .hidden { display: none !important; }
@@ -40,20 +41,21 @@ input, select { width: 100%; color: var(--vscode-input-foreground); background: 
 .selected-action { outline: 2px solid var(--vscode-focusBorder); }
 .badge-row { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 7px; }
 .badge { display: inline-block; max-width: 100%; padding: 2px 6px; border-radius: 999px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); font-size: 10px; text-transform: capitalize; white-space: nowrap; }
-.badge-success { background: var(--vscode-testing-iconPassed, var(--vscode-badge-background)); color: var(--vscode-editor-background); }
-.badge-warning { background: var(--vscode-editorWarning-foreground, var(--vscode-badge-background)); color: var(--vscode-editor-background); }
-.badge-danger { background: var(--vscode-editorError-foreground, var(--vscode-badge-background)); color: var(--vscode-editor-background); }
+.badge.badge-success { background: var(--vscode-testing-iconPassed, var(--vscode-badge-background)); color: var(--vscode-editor-background); }
+.badge.badge-warning { background: var(--vscode-editorWarning-foreground, var(--vscode-badge-background)); color: var(--vscode-editor-background); }
+.badge.badge-danger { background: var(--vscode-editorError-foreground, var(--vscode-badge-background)); color: var(--vscode-editor-background); }
+.badge.badge-critical { background: var(--vscode-inputValidation-errorBackground, var(--vscode-editorError-foreground)); color: var(--vscode-inputValidation-errorForeground, var(--vscode-foreground)); border: 1px solid var(--vscode-inputValidation-errorBorder, currentColor); font-weight: 700; }
 .stepper { display: grid; grid-template-columns: repeat(6, 1fr); gap: 3px; list-style: none; padding: 8px 0; margin: 0; }
 .step { min-width: 0; text-align: center; color: var(--vscode-descriptionForeground); }
 .step span { display: grid; place-items: center; width: 22px; height: 22px; margin: auto; border-radius: 50%; border: 1px solid var(--vscode-panel-border); font-size: 10px; }
-.step small { display: block; margin-top: 3px; font-size: 8px; overflow: hidden; text-overflow: ellipsis; }
+.step small { display: block; margin-top: 3px; font-size: calc(var(--vscode-font-size) * .85); overflow: hidden; text-overflow: ellipsis; }
 .step.done span, .step.active span { border-color: var(--vscode-focusBorder); color: var(--vscode-textLink-foreground); }
 .step.active span { box-shadow: 0 0 0 2px color-mix(in srgb, var(--vscode-focusBorder) 25%, transparent); }
 .progress-label { display: flex; justify-content: space-between; gap: 8px; margin: 6px 0; font-size: 11px; }
 progress { width: 100%; accent-color: var(--vscode-progressBar-background); }
 .metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 10px 0; }
 .metrics div { display: grid; padding: 7px; background: var(--vscode-editorWidget-background); border-radius: 3px; }
-.metrics span { color: var(--vscode-descriptionForeground); font-size: 9px; }
+.metrics span { color: var(--vscode-descriptionForeground); font-size: calc(var(--vscode-font-size) * .85); }
 .artifact-list { padding-left: 18px; }
 .artifact-list li { display: flex; gap: 8px; justify-content: space-between; padding: 3px 0; }
 .check { display: flex; gap: 9px; padding: 7px 0; border-bottom: 1px solid var(--vscode-widget-border, transparent); }
@@ -61,7 +63,15 @@ progress { width: 100%; accent-color: var(--vscode-progressBar-background); }
 .check-icon { display: grid; place-items: center; flex: 0 0 20px; height: 20px; border-radius: 50%; }
 .check-icon.ok { color: var(--vscode-testing-iconPassed); border: 1px solid currentColor; }
 .check-icon.pending { color: var(--vscode-editorWarning-foreground); border: 1px solid currentColor; }
+.check-icon.neutral { color: var(--vscode-descriptionForeground); border: 1px solid currentColor; }
 .danger-panel { border-color: var(--vscode-inputValidation-errorBorder); }
+.global-error { display: grid; gap: 4px; margin: 8px 10px 0; padding: 9px; color: var(--vscode-inputValidation-errorForeground, var(--vscode-foreground)); background: var(--vscode-inputValidation-errorBackground, var(--vscode-editor-background)); border: 1px solid var(--vscode-inputValidation-errorBorder, var(--vscode-editorError-foreground)); }
+.global-error .button-row { margin-top: 4px; }
+.handoff-note { display: grid; gap: 3px; padding: 8px; color: var(--vscode-descriptionForeground); border-left: 2px solid var(--vscode-focusBorder); background: var(--vscode-editorWidget-background); }
+.severity-summary { display: flex; flex-wrap: wrap; gap: 4px; }
+button.badge { background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); border: 1px solid transparent; cursor: pointer; }
+button.badge:hover { filter: brightness(1.15); }
+.badge[aria-pressed="true"] { outline: 2px solid var(--vscode-focusBorder); outline-offset: 1px; }
 .filters { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; margin: 8px 0 10px; }
 .filters .search { grid-column: 1 / -1; }
 .findings-layout { display: grid; gap: 10px; }
@@ -71,7 +81,7 @@ progress { width: 100%; accent-color: var(--vscode-progressBar-background); }
 .finding-card.selected { border-color: var(--vscode-focusBorder); background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
 .finding-heading { display: flex; align-items: center; gap: 6px; }
 .finding-summary { font-size: 11px; }
-.finding-meta, .finding-path { color: var(--vscode-descriptionForeground); font-size: 9px; overflow-wrap: anywhere; }
+.finding-meta, .finding-path { color: var(--vscode-descriptionForeground); font-size: calc(var(--vscode-font-size) * .85); overflow-wrap: anywhere; }
 .finding-detail { min-width: 0; }
 .evidence { margin: 8px 0; padding-top: 8px; border-top: 1px solid var(--vscode-widget-border, var(--vscode-panel-border)); }
 pre { max-height: 340px; overflow: auto; padding: 8px; color: var(--vscode-editor-foreground); background: var(--vscode-textCodeBlock-background, var(--vscode-editor-background)); border-radius: 3px; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -80,7 +90,7 @@ dt { color: var(--vscode-descriptionForeground); }
 dd { margin: 0; overflow-wrap: anywhere; }
 .history-list { display: grid; gap: 8px; }
 .history-grid { font-size: 11px; }
-.event-line { text-align: center; color: var(--vscode-descriptionForeground); font-size: 9px; }
+.event-line { text-align: center; color: var(--vscode-descriptionForeground); font-size: calc(var(--vscode-font-size) * .85); }
 .empty { padding: 26px 12px; text-align: center; color: var(--vscode-descriptionForeground); }
 .empty.compact { padding: 14px; }
 .loading { padding: 20px; color: var(--vscode-descriptionForeground); }
@@ -91,9 +101,20 @@ dd { margin: 0; overflow-wrap: anywhere; }
   .filters { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 @media (forced-colors: active) {
-  .card, .finding-card, button, input, select { border: 1px solid CanvasText; }
+  .card, .finding-card, button, input, select, textarea { border: 1px solid CanvasText; }
   .badge { border: 1px solid CanvasText; }
 }
 .agent-setup { display: grid; gap: 10px; }
+.setup-status { margin: 0; }
+.setup-options { border-top: 1px solid var(--vscode-widget-border, var(--vscode-panel-border)); padding-top: 8px; }
+.setup-options > summary, .setup-disclosure > summary { cursor: pointer; }
+.setup-options-body, .setup-disclosure-body { display: grid; gap: 8px; padding-top: 8px; }
+.setup-disclosure > summary { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: flex-start; gap: 8px; }
+.setup-disclosure > summary::before { content: "›"; color: var(--vscode-descriptionForeground); font-size: 16px; line-height: 1; }
+.setup-disclosure[open] > summary::before { transform: rotate(90deg); }
+.setup-disclosure > summary small { display: block; color: var(--vscode-descriptionForeground); font-weight: 400; }
 .detail-list { margin: 4px 0 0; padding-left: 18px; color: var(--vscode-descriptionForeground); }
 .detail-list li { margin: 3px 0; overflow-wrap: anywhere; }
+@media (max-width: 420px) {
+  .agent-setup .card-title { flex-direction: column; }
+}

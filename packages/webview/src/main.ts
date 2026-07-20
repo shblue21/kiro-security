@@ -10,8 +10,17 @@ type Tab = "setup" | "dashboard" | "findings" | "history";
 interface PersistedState {
   tab: Tab;
   filters: FindingFilters;
+  scanMode?: "fast" | "standard" | "deep" | "diff";
   agentScope?: "workspace" | "user";
   agentAutoApprove?: "none" | "read_only";
+}
+interface SetupFocus {
+  id?: string;
+  action?: string;
+  actionIndex: number;
+  occurrenceId?: string;
+  summary?: string;
+  tab?: string;
 }
 
 const vscode = acquireVsCodeApi<PersistedState>();
@@ -21,11 +30,17 @@ const saved = vscode.getState();
 const ui: PersistedState = saved ?? {
   tab: "dashboard",
   filters: { query: "", severity: "", confidence: "", validation: "", triage: "", sort: "severity" },
+  scanMode: "fast",
   agentScope: "workspace",
   agentAutoApprove: "read_only",
 };
+ui.scanMode ??= "fast";
 let snapshot: any = null;
 let lastEvent = "";
+let agentOptionsDirty = false;
+let lastRenderKey = "";
+const setupDisclosureState = new Map<string, boolean>();
+let pendingSetupFocus: SetupFocus | undefined;
 
 function h(value: unknown): string {
   return String(value ?? "")
@@ -57,12 +72,20 @@ function badge(text: unknown, kind = "neutral"): string {
 }
 function statusBadge(status: string): string {
   const kind = ["completed", "validated", "ready", "verified"].includes(status) ? "success"
-    : ["failed", "rejected", "critical", "high"].includes(status) ? "danger"
+    : ["failed", "rejected", "critical", "high", "error"].includes(status) ? "danger"
       : ["running", "needs_review", "needs_repair", "interrupted", "configured"].includes(status) ? "warning" : "neutral";
   return badge(status.replaceAll("_", " "), kind);
 }
 function severityBadge(level: string): string {
-  return badge(level, ["critical", "high"].includes(level) ? "danger" : level === "medium" ? "warning" : "neutral");
+  return badge(level, level === "critical" ? "critical" : level === "high" ? "danger" : level === "medium" ? "warning" : "neutral");
+}
+function severitySummary(findings: any[]): string {
+  const levels: Array<[string, string, string]> = [["critical", "C", "critical"], ["high", "H", "danger"], ["medium", "M", "warning"], ["low", "L", "neutral"], ["informational", "I", "neutral"]];
+  return `<div class="severity-summary" role="group" aria-label="Finding counts by severity">${levels.map(([level, prefix, kind]) => {
+    const count = findings.filter((finding) => finding.severity?.level === level).length;
+    const active = ui.filters.severity === level;
+    return `<button class="badge badge-${kind}" data-action="filter-severity" data-severity="${level}" aria-pressed="${active}" title="${active ? "Clear severity filter" : `Show only ${level} findings`}">${prefix} ${count}</button>`;
+  }).join("")}</div>`;
 }
 function scanLabel(scan: any): string {
   const model = scan?.mode === "deep" || scan?.capabilities?.analysisProfile === "model";
@@ -74,14 +97,14 @@ function scanLabel(scan: any): string {
 function nav(): string {
   return `<nav class="tabs" aria-label="Security panel sections">
     ${(["setup", "dashboard", "findings", "history"] as Tab[]).map((tab) =>
-      `<button class="tab ${ui.tab === tab ? "active" : ""}" data-tab="${tab}" aria-current="${ui.tab === tab ? "page" : "false"}">${tab[0].toUpperCase()}${tab.slice(1)}</button>`).join("")}
+      `<button class="tab ${ui.tab === tab ? "active" : ""}" data-tab="${tab}" ${ui.tab === tab ? `aria-current="page"` : ""}>${tab[0].toUpperCase()}${tab.slice(1)}</button>`).join("")}
   </nav>`;
 }
 
 function shell(content: string): string {
   return `<header class="topbar"><div><h1>Kiro Security Power</h1><p>${snapshot?.dashboard?.workspace?.display_name ? h(snapshot.dashboard.workspace.display_name) : "Repository security workbench"}</p></div>
     <button class="icon-button" data-action="refresh" title="Refresh" aria-label="Refresh security state">↻</button></header>
-    ${nav()}<section class="content">${content}</section>`;
+    ${nav()}${snapshot?.engineError ? `<section class="global-error" role="alert"><strong>Engine error</strong><span>${h(snapshot.engineError)}</span><div class="button-row"><button data-action="retry-engine">Retry</button><button data-action="settings">Configure</button><button data-action="logs">Logs</button></div></section>` : ""}<section class="content">${content}</section>`;
 }
 
 function setupView(): string {
@@ -102,37 +125,65 @@ function setupView(): string {
   const pythonLabel = python.available
     ? `Python ${python.version ?? "detected"}${python.sqliteVersion ? ` · SQLite ${python.sqliteVersion}` : ""} · ${python.executable ?? ""}`
     : python.error ?? "Python 3.9+ with sqlite3 was not found";
-  const checks = [
-    ["Workspace", snapshot?.workspaceRoot ?? dashboard?.workspace?.root_path ?? "No local workspace", Boolean(snapshot?.workspaceRoot ?? dashboard?.workspace?.root_path)],
-    ["Workspace trust", snapshot?.workspaceTrusted ? "Trusted" : "Not trusted", snapshot?.workspaceTrusted],
-    ["Engine", snapshot?.engineStatus ?? "stopped", snapshot?.engineStatus === "ready"],
-    ["Python / SQLite", pythonLabel, Boolean(python.available && python.compatible)],
-    ["Git", dashboard?.engine?.dependencies?.git?.available ? "Available for diff scans" : "Unavailable; Standard and Deep remain usable", Boolean(dashboard?.engine?.dependencies?.git?.available)],
-    ["Agent MCP", integrationLabel, integrationHealthy],
+  const hasWorkspace = Boolean(snapshot?.workspaceRoot ?? dashboard?.workspace?.root_path);
+  const pythonReady = Boolean(python.available && python.compatible);
+  const gitAvailable = Boolean(dashboard?.engine?.dependencies?.git?.available);
+  const setupReady = hasWorkspace && Boolean(snapshot?.workspaceTrusted) && pythonReady;
+  const checks: Array<[string, string, "ok" | "pending" | "neutral"]> = [
+    ["Workspace", snapshot?.workspaceRoot ?? dashboard?.workspace?.root_path ?? "Open a local folder to continue", hasWorkspace ? "ok" : "pending"],
+    ["Workspace trust", snapshot?.workspaceTrusted ? "Trusted" : "Trust this workspace in Kiro to continue", snapshot?.workspaceTrusted ? "ok" : "pending"],
+    ["VSIX engine (Fast Scan)", snapshot?.engineStatus ?? "stopped", snapshot?.engineStatus === "ready" ? "ok" : "neutral"],
+    ["Python / SQLite", pythonLabel, pythonReady ? "ok" : "pending"],
+    ["Git (optional)", gitAvailable ? "Available for Git changes scans" : "Not found; only Git changes scans need it", gitAvailable ? "ok" : "neutral"],
   ];
-  const configuredScope = ui.agentScope ?? integration.configScope ?? "workspace";
-  const configuredPolicy = ui.agentAutoApprove ?? integration.autoApprovePolicy ?? "read_only";
+  if (agentOptionsDirty && integration.configured && !busy
+    && integration.configScope === ui.agentScope && integration.autoApprovePolicy === ui.agentAutoApprove) agentOptionsDirty = false;
+  const configuredScope = integration.configured && !agentOptionsDirty
+    ? integration.configScope ?? ui.agentScope ?? "workspace"
+    : ui.agentScope ?? integration.configScope ?? "workspace";
+  const configuredPolicy = integration.configured && !agentOptionsDirty
+    ? integration.autoApprovePolicy ?? ui.agentAutoApprove ?? "read_only"
+    : ui.agentAutoApprove ?? integration.autoApprovePolicy ?? "read_only";
+  const repairRequired = integration.state === "needs_repair" || integration.state === "error";
+  const primaryAction = integration.configured && !repairRequired ? "verify-agent" : "install-agent";
   const operationLabel = busy
     ? `Working: ${String(integration.operation).replaceAll("_", " ")}…`
-    : integration.configured ? "Repair and verify" : "Install and verify";
+    : !integration.configured ? "Install and verify"
+      : repairRequired ? "Repair and verify"
+        : integrationHealthy ? "Verify again" : "Verify setup";
+  const powerRegistration = integration.power?.registration;
+  const powerLabel = powerRegistration === "detected" || powerRegistration === "user_confirmed"
+    ? "added"
+    : integration.power?.prepared ? "available to add" : "available after setup";
+  const statusRole = integration.state === "error" ? `role="alert"`
+    : busy && integration.operation !== "checking" ? `role="status"` : "";
   return `<div class="stack">
-    <section class="card"><h2>Environment</h2>${checks.map(([name, value, ok]) => `<div class="check"><span class="check-icon ${ok ? "ok" : "pending"}">${ok ? "✓" : "!"}</span><div><strong>${h(name)}</strong><div class="muted break-word">${h(value)}</div></div></div>`).join("")}</section>
-    ${snapshot?.engineError ? `<section class="card danger-panel"><h2>Engine error</h2><p>${h(snapshot.engineError)}</p><div class="button-row"><button data-action="retry-engine">Retry engine</button><button data-action="settings">Configure Python</button><button data-action="logs">Open logs</button></div></section>` : ""}
-    <section class="card agent-setup"><div class="card-title"><div><h2>Kiro Agent integration</h2><p>One approved setup connects the Agent panel to the same engine and SQLite workbench used by this VSIX.</p></div>${statusBadge(integration.state ?? "not_configured")}</div>
-      <label>Installation scope<select id="agent-scope" ${busy ? "disabled" : ""}><option value="workspace" ${configuredScope === "workspace" ? "selected" : ""}>Current workspace (.kiro)</option><option value="user" ${configuredScope === "user" ? "selected" : ""}>Current user (~/.kiro)</option></select></label>
-      <label>Tool approval policy<select id="agent-auto-approve" ${busy ? "disabled" : ""}><option value="read_only" ${configuredPolicy === "read_only" ? "selected" : ""}>Auto-approve read-only lookups only</option><option value="none" ${configuredPolicy === "none" ? "selected" : ""}>Require approval for every tool</option></select></label>
-      <p class="muted">The installer preserves unrelated MCP servers and JSONC comments, creates backups, writes auto-inclusion steering, starts the packaged MCP server, and rolls everything back when verification fails. Scan, triage, remediation, tracking, hardening, and export tools are never auto-approved.</p>
-      <div class="button-row"><button class="primary" data-action="install-agent" ${busy || !snapshot?.workspaceTrusted || !python.available || !python.compatible ? "disabled" : ""}>${h(operationLabel)}</button><button data-action="verify-agent" ${busy || !integration.configured ? "disabled" : ""}>Verify</button><button data-action="open-mcp" ${busy ? "disabled" : ""}>Open MCP config</button><button class="danger" data-action="remove-agent" ${busy || !integration.configured ? "disabled" : ""}>Remove</button></div>
+    <section class="card agent-setup" aria-busy="${busy ? "true" : "false"}"><div class="card-title"><div><h2>Connect Kiro Agent</h2><p>Fast Scan works without setup. Connect once to run Standard, Diff, or Deep scans from Kiro Agent.</p></div>${statusBadge(integration.state ?? "not_configured")}</div>
+      <p class="setup-status" ${statusRole}><strong>${h(busy ? operationLabel : integrationLabel)}</strong>${integrationHealthy && !busy ? " · Agent tools are ready. Start a new Kiro Agent conversation (or refresh MCP servers), then ask for a Standard, Diff, or Deep scan." : ""}</p>
+      ${!setupReady ? `<p class="muted">Complete the required system checks below before connecting.</p>` : ""}
+      ${integrationHealthy ? "" : `<div class="button-row"><button id="setup-primary-action" class="primary" data-action="${primaryAction}" ${busy || !setupReady ? "disabled" : ""}>${h(operationLabel)}</button>${!pythonReady ? `<button data-action="settings">Configure Python</button>` : ""}</div>`}
+      <details class="setup-options" id="setup-installation-options"><summary>Installation options</summary><div class="setup-options-body">
+        <label>Installation scope<select id="agent-scope" ${busy || integration.configured ? "disabled" : ""}><option value="workspace" ${configuredScope === "workspace" ? "selected" : ""}>Current workspace (recommended)</option><option value="user" ${configuredScope === "user" ? "selected" : ""}>Current user (all workspaces)</option></select></label>
+        ${integration.configured ? `<p class="muted">To change scope, remove the current integration, then install it again.</p>` : ""}
+        <label>Tool approval policy<select id="agent-auto-approve" ${busy ? "disabled" : ""}><option value="read_only" ${configuredPolicy === "read_only" ? "selected" : ""}>Auto-approve read-only lookups only (recommended)</option><option value="none" ${configuredPolicy === "none" ? "selected" : ""}>Require approval for every tool</option></select></label>
+        <p class="muted">Scans and changes always require approval. Installation preserves unrelated MCP servers and comments, creates backups, and rolls back if verification fails.</p>
+        ${integration.configured ? `<button data-action="install-agent" ${busy || !setupReady ? "disabled" : ""}>Apply options and verify</button>` : ""}
+      </div></details>
+      <details class="setup-options" id="setup-troubleshooting"><summary>Advanced and troubleshooting</summary><div class="setup-options-body">
+        <div class="button-row">${integrationHealthy ? `<button data-action="verify-agent" ${busy || !setupReady ? "disabled" : ""}>Verify again</button>` : ""}<button data-action="open-mcp" ${busy || !hasWorkspace || !snapshot?.workspaceTrusted ? "disabled" : ""}>Create or open MCP config</button><button class="secondary" data-action="copy-mcp" ${busy || !setupReady || !integration.power?.prepared ? "disabled" : ""}>Copy reviewed MCP JSON</button><button class="danger" data-action="remove-agent" ${busy || !integration.configured || !hasWorkspace || !snapshot?.workspaceTrusted ? "disabled" : ""}>Remove integration</button></div>
       ${integration.lastVerifiedAt ? `<p class="muted">Last verified: ${h(date(integration.lastVerifiedAt))}</p>` : ""}
       ${(integration.configLocations ?? []).length ? `<dl><dt>MCP config</dt><dd class="mono">${h(integration.configLocations.join("\n"))}</dd>${integration.steeringPath ? `<dt>Steering</dt><dd class="mono">${h(integration.steeringPath)}</dd>` : ""}</dl>` : ""}
       ${(integration.details ?? []).length ? `<ul class="detail-list">${integration.details.map((detail: string) => `<li>${h(detail)}</li>`).join("")}</ul>` : ""}
+      </div></details>
     </section>
-    <section class="card"><div class="card-title"><div><h2>Optional native Kiro Power entry</h2><p>The verified MCP tools and steering above are sufficient for Agent use. Importing the prepared folder additionally registers this integration in Kiro's Powers panel.</p></div>${badge(integration.power?.registration ?? "not prepared", integration.power?.registration === "detected" ? "success" : "neutral")}</div>
+    <details class="card setup-disclosure" id="setup-environment" ${setupReady ? "" : "open"}><summary><span><strong>System checks</strong><small>${setupReady ? "Agent requirements passed" : "Action required"}</small></span>${badge(setupReady ? "ready" : "check setup", setupReady ? "success" : "warning")}</summary><div class="setup-disclosure-body">${checks.map(([name, value, state]) => `<div class="check"><span class="check-icon ${state}" aria-hidden="true">${state === "ok" ? "✓" : state === "neutral" ? "·" : "!"}</span><div><strong>${h(name)}</strong><div class="muted break-word">${h(value)}</div></div></div>`).join("")}</div></details>
+    <details class="card setup-disclosure" id="setup-power"><summary><span><strong>Optional: Add to Kiro Powers</strong><small>Agent scans already work without this step</small></span>${badge(powerLabel, powerLabel === "added" ? "success" : "neutral")}</summary><div class="setup-disclosure-body">
+      <p>Importing the prepared folder also registers this integration in Kiro's Powers panel.</p>
       <p class="muted break-word">${integration.power?.preparedPath ? h(integration.power.preparedPath) : "The Power folder is prepared during Agent integration installation."}</p>
-      <div class="button-row"><button data-action="reveal-power" ${!integration.power?.prepared ? "disabled" : ""}>Show Power folder</button><button data-action="mark-power-imported" ${!integration.power?.prepared ? "disabled" : ""}>I imported it</button><button class="secondary" data-action="copy-mcp" ${!integration.power?.prepared ? "disabled" : ""}>Copy reviewed MCP JSON</button></div>
+      <div class="button-row"><button data-action="reveal-power" ${busy || !integration.power?.prepared ? "disabled" : ""}>Show Power folder</button><button data-action="mark-power-imported" ${busy || !integration.power?.prepared ? "disabled" : ""}>I imported it</button></div>
       <p class="muted">Kiro must display its own Power permission confirmation; this VSIX does not bypass that confirmation.</p>
-    </section>
-    ${!snapshot?.secondarySidebarOnboarded ? `<section class="card"><h2>Right-side placement</h2><p>Run <strong>Kiro Security: Open Security Panel on Right</strong>. If Secondary Side Bar placement is unavailable, the command opens a separate panel beside the editor.</p></section>` : ""}
+    </div></details>
+    ${!snapshot?.secondarySidebarOnboarded ? `<details class="card setup-disclosure" id="setup-placement"><summary><strong>Panel placement</strong></summary><div class="setup-disclosure-body"><p>Run <strong>Kiro Security: Open Security Panel on Right</strong>. If Secondary Side Bar placement is unavailable, the command opens a separate panel beside the editor.</p></div></details>` : ""}
   </div>`;
 }
 function phaseStepper(scan: any): string {
@@ -150,26 +201,29 @@ function dashboardView(): string {
   if (!dashboard) return `<div class="empty"><h2>Engine is not ready</h2><p>Open and trust a local workspace, then refresh.</p><button data-action="refresh">Refresh</button></div>`;
   const active = dashboard.activeScan;
   const selected = dashboard.selectedScan;
+  const selectedMode = ui.scanMode ?? "fast";
   const progress = active?.progress?.overall_percent ?? 0;
   const coverage = selected?.coverage;
   return `<div class="stack">
     <section class="card scan-form"><h2>Start a scan</h2>
-      <label>Mode<select id="scan-mode"><option value="fast">Fast (deterministic)</option><option value="standard" ${dashboard.workspace.default_mode === "standard" ? "selected" : ""}>Standard (Kiro Agent)</option><option value="deep" ${dashboard.workspace.default_mode === "deep" ? "selected" : ""}>Deep (Kiro Agent)</option><option value="diff" ${dashboard.workspace.default_mode === "diff" ? "selected" : ""}>Git changes (Kiro Agent)</option></select></label>
+      <label>Mode<select id="scan-mode"><option value="fast" ${selectedMode === "fast" ? "selected" : ""}>Fast (deterministic)</option><option value="standard" ${selectedMode === "standard" ? "selected" : ""}>Standard (Kiro Agent)</option><option value="deep" ${selectedMode === "deep" ? "selected" : ""}>Deep (Kiro Agent)</option><option value="diff" ${selectedMode === "diff" ? "selected" : ""}>Git changes (Kiro Agent)</option></select></label>
       <label>Scope<input id="scan-scope" value="${attr(dashboard.workspace.default_scope || ".")}" maxlength="4096" autocomplete="off"></label>
+      <div id="agent-scan-handoff" class="handoff-note ${selectedMode === "fast" ? "hidden" : ""}"><strong>Runs in Kiro Agent</strong><span>The VSIX cannot attest model runtime state. Continue to copy a scoped, ready-to-paste Agent prompt.</span></div>
       <div id="diff-options" class="diff-options hidden">
         <label>Diff target<select id="diff-kind"><option value="working_tree">Working tree</option><option value="commit">Commit</option><option value="range">Range</option></select></label>
         <label>Base revision<input id="diff-base" maxlength="256" placeholder="HEAD~1"></label>
         <label>Head revision<input id="diff-head" maxlength="256" placeholder="HEAD"></label>
       </div>
-      <div class="button-row"><button class="primary" data-action="start" ${active ? "disabled" : ""}>Start scan</button>${dashboard.latestResumableScan ? `<button data-action="resume" data-scan-id="${attr(dashboard.latestResumableScan.id)}" ${active ? "disabled" : ""}>Resume interrupted</button>` : ""}</div>
+      <div class="button-row"><button id="start-scan" class="primary" data-action="start" ${active ? "disabled" : ""}>${selectedMode === "fast" ? "Start scan" : "Continue in Kiro Agent"}</button>${dashboard.latestResumableScan ? `<button data-action="resume" data-scan-id="${attr(dashboard.latestResumableScan.id)}" ${active ? "disabled" : ""}>Resume interrupted</button>` : ""}</div>
     </section>
     ${active ? `<section class="card active-scan"><div class="card-title"><div><h2>Active scan</h2><p>${h(scanLabel(active))} · ${h(active.scope)}</p></div>${statusBadge(active.status)}</div>
       ${phaseStepper(active)}<div class="progress-label"><strong>${h(progressLabel(active.phase, progress))}</strong><span>${h(active.progress?.message ?? "Working…")}</span></div>
       <progress max="100" value="${attr(progress)}">${h(progress)}%</progress>
       <div class="metrics"><div><strong>${h(active.files_completed)}/${h(active.files_total)}</strong><span>files</span></div><div><strong>${h(active.progress?.reportable_findings_count ?? 0)}</strong><span>findings</span></div><div><strong>${h(elapsed(active))}</strong><span>elapsed</span></div></div>
       <button class="danger" data-action="cancel" data-scan-id="${attr(active.id)}">Cancel scan</button></section>` : ""}
-    ${selected ? `<section class="card"><div class="card-title"><div><h2>Selected scan</h2><p class="mono">${h(selected.id)}</p></div>${statusBadge(selected.status)}</div>
+    ${selected ? `<section class="card"><div class="card-title"><div><h2>${h(scanLabel(selected))}</h2><p>Completed ${h(date(selected.completed_at ?? selected.updated_at))}</p><p class="mono">${h(selected.id)}</p></div>${statusBadge(selected.status)}</div>
       <div class="metrics"><div><strong>${h(selected.files_total)}</strong><span>files inventoried</span></div><div><strong>${h(dashboard.findings.length)}</strong><span>findings</span></div><div><strong>${h(coverage?.completeness ?? "unknown")}</strong><span>coverage</span></div></div>
+      ${severitySummary(dashboard.findings)}
       <div class="button-row"><button data-action="show-findings">View findings</button><button data-action="hardening" data-scan-id="${attr(selected.id)}">Hardening proposal</button><label class="compact-label">Export<select id="export-format" aria-label="Export format"><option value="markdown">Markdown</option><option value="json">JSON</option><option value="csv">CSV</option><option value="sarif">SARIF</option></select></label><button data-action="export" data-scan-id="${attr(selected.id)}">Export</button></div>
       <details><summary>Artifacts (${selected.artifacts?.length ?? 0})</summary><ul class="artifact-list">${(selected.artifacts ?? []).map((artifact: any) => `<li><button class="link" data-action="artifact" data-path="${attr(artifact.path)}">${h(artifact.kind)}</button><span class="muted mono">${h(String(artifact.sha256).slice(0, 12))}</span></li>`).join("") || "<li>None yet</li>"}</ul></details>
     </section>` : `<div class="empty"><h2>No scan history</h2><p>Start a Standard, Deep, or Git changes scan.</p></div>`}
@@ -193,11 +247,11 @@ function findingsView(): string {
   const findings = snapshot?.dashboard?.findings ?? [];
   const visible = filterAndSortFindings(findings, ui.filters);
   const selected = snapshot?.selectedFinding;
-  return `<div class="findings-layout"><section class="findings-list"><div class="card-title"><div><h2>Findings</h2><p>${visible.length} of ${findings.length}</p></div></div>${filters()}
-    <div class="finding-cards" role="list">${visible.map((finding: any) => {
+  return `<div class="findings-layout"><section class="findings-list"><div class="card-title"><div><h2>Findings</h2><p>${visible.length} of ${findings.length}</p></div>${severitySummary(findings)}</div>${filters()}
+    <div class="finding-cards">${visible.map((finding: any) => {
       const location = finding.locations?.find((item: any) => item.role === "sink") ?? finding.locations?.[0];
       const isSelected = selected?.occurrenceId === finding.occurrenceId;
-      return `<button role="listitem" class="finding-card ${isSelected ? "selected" : ""}" data-action="finding" data-occurrence-id="${attr(finding.occurrenceId)}">
+      return `<button class="finding-card ${isSelected ? "selected" : ""}" data-action="finding" data-occurrence-id="${attr(finding.occurrenceId)}">
         <span class="finding-heading">${severityBadge(finding.severity.level)}<strong>${h(finding.title)}</strong></span>
         <span class="finding-summary">${h(finding.summary)}</span>
         <span class="finding-meta">${h(finding.confidence.level)} confidence · ${h(finding.validationStatus.replaceAll("_", " "))} · ${h(finding.triageStatus.replaceAll("_", " "))}</span>
@@ -219,9 +273,9 @@ function detailView(finding: any): string {
     <section class="card"><h3>Evidence</h3>${(finding.codeEvidence ?? []).map((evidence: any) => `<div class="evidence"><div class="card-title"><strong>${h(evidence.label)}</strong>${badge(evidence.role ?? evidence.kind)}</div><p class="mono">${h(evidence.path)}:${h(evidence.startLine)}</p><pre><code>${h(evidence.code)}</code></pre><p>${h(evidence.explanation)}</p></div>`).join("") || "<p class=\"muted\">No evidence recorded.</p>"}</section>
     <section class="card"><h3>Source-to-sink / attack path</h3>${finding.attackPath ? `<p>${h(finding.attackPath.narrative)}</p><dl><dt>Exploitability</dt><dd>${h(finding.attackPath.exploitability)}</dd><dt>Impact</dt><dd>${h(finding.attackPath.impact)}</dd><dt>Severity rationale</dt><dd>${h(finding.attackPath.severityRationale)}</dd></dl>${jsonBlock(finding.attackPath.path)}` : `<p class="muted">Attack-path analysis is not recorded yet.</p>`}</section>
     <section class="card"><h3>Validation</h3>${finding.validation ? `<p>${statusBadge(finding.validation.status)} ${h(finding.validation.rationale)}</p><p class="muted">Method: ${h(finding.validation.method)} · ${h(date(finding.validation.createdAt))}</p>` : `<p class="muted">This finding has not been validated.</p><button data-action="validate" data-occurrence-id="${attr(finding.occurrenceId)}">Validate finding</button>`}</section>
-    <section class="card"><h3>Triage</h3><div class="button-grid">${[["open","Open"],["accepted_risk","Accept risk"],["false_positive","False positive"],["already_fixed","Already fixed"],["wont_fix","Won't fix"]].map(([value,label]) => `<button class="${finding.triageStatus === value ? "selected-action" : ""}" data-action="triage" data-decision="${value}" data-occurrence-id="${attr(finding.occurrenceId)}">${label}</button>`).join("")}</div>${finding.triage?.note ? `<p>${h(finding.triage.note)}</p>` : ""}</section>
+    <section class="card"><h3>Triage</h3><label>Decision note<textarea id="triage-note" data-occurrence-id="${attr(finding.occurrenceId)}" maxlength="4000" placeholder="Required for Accept risk and Won't fix">${h(finding.triage?.note ?? "")}</textarea></label><div class="button-grid">${[["open","Open"],["accepted_risk","Accept risk"],["false_positive","False positive"],["already_fixed","Already fixed"],["wont_fix","Won't fix"]].map(([value,label]) => `<button class="${finding.triageStatus === value ? "selected-action" : ""}" data-action="triage" data-decision="${value}" data-occurrence-id="${attr(finding.occurrenceId)}">${label}</button>`).join("")}</div></section>
     <section class="card"><h3>Fix workflow and remediation</h3><p>${h(finding.remediation)}</p><button data-action="remediation" data-occurrence-id="${attr(finding.occurrenceId)}">Create remediation guidance</button>${(finding.remediationRecords ?? []).length ? jsonBlock(finding.remediationRecords) : ""}</section>
-    <section class="card"><h3>Tracking handoff</h3><p class="muted">Prepare an approval-ready payload. No external issue is created automatically.</p><div class="button-grid">${[["manual","Manual"],["github","GitHub"],["linear","Linear"],["jira","Jira"]].map(([value,label]) => `<button data-action="tracking" data-provider="${value}" data-occurrence-id="${attr(finding.occurrenceId)}">${label}</button>`).join("")}</div>${(finding.trackingRecords ?? []).length ? jsonBlock(finding.trackingRecords) : ""}</section>
+    <section class="card"><h3>Tracking handoff</h3><p class="muted">Choose a target to copy a ready-to-paste Kiro Agent prompt. No external issue is created automatically.</p><div class="button-grid">${[["manual","Manual"],["github","GitHub"],["linear","Linear"],["jira","Jira"]].map(([value,label]) => `<button data-action="tracking" data-provider="${value}" data-occurrence-id="${attr(finding.occurrenceId)}">${label}</button>`).join("")}</div>${(finding.trackingRecords ?? []).length ? jsonBlock(finding.trackingRecords) : ""}</section>
     <section class="card"><h3>Related findings</h3>${(finding.relatedFindings ?? []).map((related: any) => `<button class="related-finding" data-action="finding" data-occurrence-id="${attr(related.occurrenceId)}"><strong>${h(related.title)}</strong><span>${severityBadge(related.severity.level)} ${h(related.locations?.[0]?.path ?? "")}</span></button>`).join("") || `<p class="muted">No related findings in this scan.</p>`}</section>
     <section class="card"><h3>Artifact links</h3><ul class="artifact-list">${(finding.artifactLinks ?? []).map((artifact: any) => `<li><button class="link" data-action="artifact" data-path="${attr(artifact.path)}">${h(artifact.kind)}</button><span class="muted mono">${h(String(artifact.sha256 ?? "").slice(0, 12))}</span></li>`).join("") || "<li>No artifacts recorded.</li>"}</ul></section>
     <section class="card"><h3>Metadata</h3><dl><dt>Finding ID</dt><dd class="mono">${h(finding.findingId)}</dd><dt>Occurrence ID</dt><dd class="mono">${h(finding.occurrenceId)}</dd><dt>Rule</dt><dd>${h(finding.ruleId)}</dd><dt>Category</dt><dd>${h(finding.taxonomy?.category)}</dd><dt>CWE</dt><dd>${h((finding.taxonomy?.cwe ?? []).join(", ") || "—")}</dd><dt>Scan ID</dt><dd class="mono">${h(finding.scanId)}</dd></dl></section>
@@ -239,6 +293,26 @@ function historyView(): string {
 
 function render(): void {
   if (!app) return;
+  const viewState = ui.tab === "setup"
+    ? [snapshot?.workspaceRoot, snapshot?.workspaceTrusted, snapshot?.engineStatus, snapshot?.secondarySidebarOnboarded, snapshot?.dashboard?.workspace, snapshot?.dashboard?.engine?.dependencies?.git, snapshot?.agentIntegration]
+    : ui.tab === "findings" ? [snapshot?.dashboard?.findings, snapshot?.selectedFinding]
+      : ui.tab === "history" ? [snapshot?.dashboard?.workspace, snapshot?.dashboard?.activeScan?.id, snapshot?.dashboard?.scans]
+        : [snapshot?.dashboard, lastEvent];
+  const renderKey = JSON.stringify([ui, snapshot?.engineError, viewState]);
+  if (app.firstElementChild && renderKey === lastRenderKey) return;
+  const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const activeAction = activeElement?.dataset.action;
+  const activeActionIndex = activeAction
+    ? Array.from(document.querySelectorAll<HTMLElement>(`[data-action="${activeAction}"]`)).indexOf(activeElement)
+    : -1;
+  const activeSummary = activeElement?.tagName === "SUMMARY" ? activeElement.parentElement?.id : undefined;
+  if (activeElement && (activeElement.id || activeAction || activeSummary || activeElement.dataset.tab)) {
+    pendingSetupFocus = { id: activeElement.id || undefined, action: activeAction, actionIndex: activeActionIndex, occurrenceId: activeElement.dataset.occurrenceId, summary: activeSummary, tab: activeElement.dataset.tab };
+  }
+  const dirtyFields = new Map<string, string>();
+  document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input[id], textarea[id]").forEach((field) => {
+    if (field.value !== field.defaultValue) dirtyFields.set(`${field.id} ${field.dataset.occurrenceId ?? ""}`, field.value);
+  });
   app.setAttribute("aria-busy", "false");
   if (!snapshot) {
     app.innerHTML = `<div class="loading">Connecting to Kiro Security engine…</div>`;
@@ -246,7 +320,25 @@ function render(): void {
   }
   const view = ui.tab === "setup" ? setupView() : ui.tab === "findings" ? findingsView() : ui.tab === "history" ? historyView() : dashboardView();
   app.innerHTML = shell(view);
+  document.querySelectorAll<HTMLDetailsElement>("details[id]").forEach((detail) => {
+    if (setupDisclosureState.has(detail.id)) detail.open = Boolean(setupDisclosureState.get(detail.id));
+  });
+  document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input[id], textarea[id]").forEach((field) => {
+    const dirty = dirtyFields.get(`${field.id} ${field.dataset.occurrenceId ?? ""}`);
+    if (dirty !== undefined) field.value = dirty;
+  });
   bindControls();
+  lastRenderKey = renderKey;
+  const pending = pendingSetupFocus;
+  const actionMatches = pending?.action ? Array.from(document.querySelectorAll<HTMLElement>(`[data-action="${pending.action}"]`)) : [];
+  const focusTarget = pending?.id ? document.getElementById(pending.id)
+    : pending?.summary ? document.querySelector<HTMLElement>(`#${pending.summary} > summary`)
+      : pending?.tab ? document.querySelector<HTMLElement>(`[data-tab="${pending.tab}"]`)
+        : pending?.action && pending.occurrenceId ? actionMatches.find((match) => match.dataset.occurrenceId === pending.occurrenceId) ?? (pending.actionIndex >= 0 ? actionMatches[pending.actionIndex] : null)
+          : pending && pending.actionIndex >= 0 ? actionMatches[pending.actionIndex] : null;
+  const focusDisabled = focusTarget instanceof HTMLButtonElement || focusTarget instanceof HTMLSelectElement ? focusTarget.disabled : false;
+  if (focusTarget && !focusDisabled) { focusTarget.focus(); pendingSetupFocus = undefined; }
+  else if (!focusTarget) pendingSetupFocus = undefined;
 }
 
 function bindControls(): void {
@@ -257,9 +349,18 @@ function bindControls(): void {
   }));
   const mode = document.getElementById("scan-mode") as HTMLSelectElement | null;
   const diffOptions = document.getElementById("diff-options");
-  const syncDiff = () => diffOptions?.classList.toggle("hidden", mode?.value !== "diff");
-  mode?.addEventListener("change", syncDiff);
-  syncDiff();
+  const handoff = document.getElementById("agent-scan-handoff");
+  const startScan = document.getElementById("start-scan");
+  const syncMode = () => {
+    if (!mode) return;
+    ui.scanMode = mode.value as PersistedState["scanMode"];
+    persist();
+    diffOptions?.classList.toggle("hidden", mode.value !== "diff");
+    handoff?.classList.toggle("hidden", mode.value === "fast");
+    if (startScan) startScan.textContent = mode.value === "fast" ? "Start scan" : "Continue in Kiro Agent";
+  };
+  mode?.addEventListener("change", syncMode);
+  syncMode();
   const filterInputs: Array<[string, keyof FindingFilters]> = [
     ["filter-query", "query"], ["filter-severity", "severity"], ["filter-confidence", "confidence"],
     ["filter-validation", "validation"], ["filter-triage", "triage"], ["filter-sort", "sort"],
@@ -274,14 +375,29 @@ function bindControls(): void {
     });
   }
   const agentScope = document.getElementById("agent-scope") as HTMLSelectElement | null;
-  agentScope?.addEventListener("change", () => { ui.agentScope = agentScope.value as "workspace" | "user"; persist(); });
   const agentApproval = document.getElementById("agent-auto-approve") as HTMLSelectElement | null;
-  agentApproval?.addEventListener("change", () => { ui.agentAutoApprove = agentApproval.value as "none" | "read_only"; persist(); });
+  document.querySelectorAll<HTMLDetailsElement>("details[id]").forEach((detail) => detail.addEventListener("toggle", () => setupDisclosureState.set(detail.id, detail.open)));
+  const rememberAgentOptions = () => {
+    agentOptionsDirty = true;
+    if (agentScope) ui.agentScope = agentScope.value as "workspace" | "user";
+    if (agentApproval) ui.agentAutoApprove = agentApproval.value as "none" | "read_only";
+    persist();
+  };
+  agentScope?.addEventListener("change", rememberAgentOptions);
+  agentApproval?.addEventListener("change", rememberAgentOptions);
+  document.getElementById("triage-note")?.addEventListener("input", (event) => (event.currentTarget as HTMLTextAreaElement).setCustomValidity(""));
   document.querySelectorAll<HTMLElement>("[data-action]").forEach((element) => element.addEventListener("click", () => void handleAction(element)));
 }
 
 async function handleAction(element: HTMLElement): Promise<void> {
   const action = element.dataset.action;
+  if (action === "filter-severity") {
+    const severity = element.dataset.severity ?? "";
+    ui.filters.severity = ui.filters.severity === severity ? "" : severity;
+    ui.tab = "findings";
+    persist();
+    render();
+  }
   if (action === "refresh") post({ type: "refresh" });
   if (action === "settings") post({ type: "openSettings" });
   if (action === "logs") post({ type: "openLogs" });
@@ -317,7 +433,17 @@ async function handleAction(element: HTMLElement): Promise<void> {
   if (action === "finding") post({ type: "openFinding", occurrenceId: element.dataset.occurrenceId });
   if (action === "open-source") post({ type: "openSource", occurrenceId: element.dataset.occurrenceId });
   if (action === "validate") post({ type: "validateFinding", occurrenceId: element.dataset.occurrenceId });
-  if (action === "triage") post({ type: "triageFinding", occurrenceId: element.dataset.occurrenceId, decision: element.dataset.decision });
+  if (action === "triage") {
+    const decision = element.dataset.decision;
+    const noteInput = document.getElementById("triage-note") as HTMLTextAreaElement | null;
+    const note = noteInput?.value.trim() ?? "";
+    if (["accepted_risk", "wont_fix"].includes(String(decision)) && !note) {
+      noteInput?.setCustomValidity("Explain why this risk is accepted or will not be fixed.");
+      noteInput?.reportValidity();
+      return;
+    }
+    post({ type: "triageFinding", occurrenceId: element.dataset.occurrenceId, decision, note: note || undefined });
+  }
   if (action === "remediation") post({ type: "createRemediation", occurrenceId: element.dataset.occurrenceId });
   if (action === "tracking") post({ type: "createTrackingHandoff", occurrenceId: element.dataset.occurrenceId, provider: element.dataset.provider });
   if (action === "hardening") post({ type: "createHardening", scanId: element.dataset.scanId });

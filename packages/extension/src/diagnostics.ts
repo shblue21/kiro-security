@@ -18,6 +18,7 @@ export function diagnosticSeverity(severity: Severity): vscode.DiagnosticSeverit
 
 export class SecurityDiagnostics implements vscode.Disposable {
   private readonly occurrenceByDiagnostic = new WeakMap<vscode.Diagnostic, string>();
+  private lastSignature: string | undefined;
 
   constructor(
     private readonly collection: vscode.DiagnosticCollection,
@@ -26,11 +27,16 @@ export class SecurityDiagnostics implements vscode.Disposable {
   ) {}
 
   async refresh(findings: FindingSummary[], enabled: boolean): Promise<void> {
+    const visible = enabled ? findings.filter((finding) => finding.validationStatus === "validated" && !["false_positive", "already_fixed"].includes(finding.triageStatus)) : [];
+    const signature = JSON.stringify([enabled, visible.map((finding) => [
+      finding.occurrenceId, finding.title, finding.summary, finding.severity.level, finding.triageStatus, finding.locations,
+    ])]);
+    if (signature === this.lastSignature) return;
+    this.lastSignature = signature;
     this.collection.clear();
     if (!enabled) return;
     const grouped = new Map<string, { uri: vscode.Uri; diagnostics: vscode.Diagnostic[] }>();
-    for (const finding of findings) {
-      if (finding.validationStatus !== "validated" || ["false_positive", "already_fixed"].includes(finding.triageStatus)) continue;
+    for (const finding of visible) {
       const sink = finding.locations.find((item) => item.role === "sink") ?? finding.locations[0];
       if (!sink) continue;
       const uri = await safeWorkspaceUri(this.workspaceRoot, sink.path);

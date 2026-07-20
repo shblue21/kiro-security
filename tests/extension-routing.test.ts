@@ -40,6 +40,8 @@ test("manifest contributes every required command and activation route", () => {
     assert.equal(manifest.activationEvents.includes(`onCommand:${command}`) || ["kiroSecurity.openFinding", "kiroSecurity.validateFinding"].includes(command), true, `missing activation for ${command}`);
   }
   assert.equal(manifest.contributes.views.kiroSecurity[0].type, "webview");
+  assert.equal(manifest.contributes.viewsWelcome, undefined);
+  assert.equal(manifest.contributes.commands.every((entry: { title: string }) => !entry.title.includes("Kiro Security")), true);
   assert.equal(manifest.capabilities.untrustedWorkspaces.supported, false);
 });
 
@@ -62,6 +64,10 @@ test("webview command routes reject forged scan modes and traversal scope is lef
   assert.equal(validateWebviewMessage({ type: "startScan", mode: "arbitrary", scope: "src" }), undefined);
   const traversal = validateWebviewMessage({ type: "startScan", mode: "standard", scope: "../outside" });
   assert.equal(traversal?.type, "startScan", "shape validation should pass bounded strings; extension host enforces workspace containment");
+  const controllerSource = readFileSync(path.join(root, "packages", "extension", "src", "controller.ts"), "utf8");
+  const startScan = controllerSource.slice(controllerSource.indexOf("async startScan("), controllerSource.indexOf("async startScanForUri"));
+  assert.match(startScan, /clipboard\.writeText\(prompt\)/);
+  assert.doesNotMatch(startScan, /must be started from Kiro Agent/);
 });
 
 
