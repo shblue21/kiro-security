@@ -78,10 +78,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         await provider.openBesidePanel();
       }
     }),
-    vscode.commands.registerCommand("kiroSecurity.startFastScan", (uri?: vscode.Uri) => controller.startScanForUri("standard", uri)),
-    vscode.commands.registerCommand("kiroSecurity.startStandardScan", () => controller.startScan("standard", { analysisProfile: "model" })),
-    vscode.commands.registerCommand("kiroSecurity.startDeepScan", (uri?: vscode.Uri) => controller.startScanForUri("deep", uri)),
-    vscode.commands.registerCommand("kiroSecurity.scanGitChanges", () => controller.startScan("diff", { diffTargetKind: "working_tree" })),
     vscode.commands.registerCommand("kiroSecurity.refreshThreatModel", () => controller.refreshThreatModel()),
     vscode.commands.registerCommand("kiroSecurity.resumeLastScan", () => controller.resumeScan()),
     vscode.commands.registerCommand("kiroSecurity.cancelActiveScan", () => controller.cancelScan()),

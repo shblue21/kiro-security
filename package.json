@@ -1,7 +1,7 @@
 {
   "name": "kiro-security-power",
   "displayName": "Kiro Security Power",
-  "description": "Integrated repository security scanning, validation, attack-path analysis, triage, remediation guidance, and durable workbench state for Kiro IDE.",
+  "description": "Integrated repository security scanning, validation, attack-path analysis, triage, remediation guidance, and saved results for Kiro IDE.",
   "version": "0.3.0",
   "publisher": "kiro-security-power-dev",
   "license": "UNLICENSED",
@@ -24,10 +24,6 @@
     "onView:kiroSecurity.securityView",
     "onCommand:kiroSecurity.openPanel",
     "onCommand:kiroSecurity.openPanelRight",
-    "onCommand:kiroSecurity.startFastScan",
-    "onCommand:kiroSecurity.startStandardScan",
-    "onCommand:kiroSecurity.startDeepScan",
-    "onCommand:kiroSecurity.scanGitChanges",
     "onCommand:kiroSecurity.refreshThreatModel",
     "onCommand:kiroSecurity.resumeLastScan",
     "onCommand:kiroSecurity.cancelActiveScan",
@@ -55,7 +51,7 @@
     },
     "virtualWorkspaces": {
       "supported": false,
-      "description": "The engine requires a local filesystem and SQLite workbench."
+      "description": "Security scans require a trusted local workspace."
     }
   },
   "contributes": {
@@ -71,30 +67,6 @@
         "title": "Open Security Panel on Right",
         "category": "Kiro Security",
         "icon": "$(layout-sidebar-right)"
-      },
-      {
-        "command": "kiroSecurity.startFastScan",
-        "title": "Start Fast Scan",
-        "category": "Kiro Security",
-        "icon": "$(play)"
-      },
-      {
-        "command": "kiroSecurity.startStandardScan",
-        "title": "Start Standard Scan in Kiro Agent",
-        "category": "Kiro Security",
-        "icon": "$(play)"
-      },
-      {
-        "command": "kiroSecurity.startDeepScan",
-        "title": "Start Deep Scan in Kiro Agent",
-        "category": "Kiro Security",
-        "icon": "$(search-fuzzy)"
-      },
-      {
-        "command": "kiroSecurity.scanGitChanges",
-        "title": "Start Diff Scan in Kiro Agent",
-        "category": "Kiro Security",
-        "icon": "$(git-compare)"
       },
       {
         "command": "kiroSecurity.refreshThreatModel",
@@ -146,7 +118,7 @@
       },
       {
         "command": "kiroSecurity.createTrackingHandoff",
-        "title": "Create Tracking Handoff",
+        "title": "Send to Issue Tracker",
         "category": "Kiro Security"
       },
       {
@@ -203,11 +175,6 @@
     "menus": {
       "view/title": [
         {
-          "command": "kiroSecurity.startFastScan",
-          "when": "view == kiroSecurity.securityView",
-          "group": "navigation@1"
-        },
-        {
           "command": "kiroSecurity.cancelActiveScan",
           "when": "view == kiroSecurity.securityView && kiroSecurity.scanActive",
           "group": "navigation@2"
@@ -221,20 +188,6 @@
           "command": "kiroSecurity.installAgentIntegration",
           "when": "view == kiroSecurity.securityView",
           "group": "navigation@4"
-        }
-      ],
-      "editor/context": [
-        {
-          "command": "kiroSecurity.startFastScan",
-          "when": "resourceScheme == file && isInWorkspace",
-          "group": "kiroSecurity@10"
-        }
-      ],
-      "explorer/context": [
-        {
-          "command": "kiroSecurity.startFastScan",
-          "when": "resourceScheme == file",
-          "group": "kiroSecurity@10"
         }
       ]
     },

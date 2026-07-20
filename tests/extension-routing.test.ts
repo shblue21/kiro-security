@@ -13,10 +13,6 @@ const commands = new Set(manifest.contributes.commands.map((entry: { command: st
 const required = [
   "kiroSecurity.openPanel",
   "kiroSecurity.openPanelRight",
-  "kiroSecurity.startFastScan",
-  "kiroSecurity.startStandardScan",
-  "kiroSecurity.startDeepScan",
-  "kiroSecurity.scanGitChanges",
   "kiroSecurity.refreshThreatModel",
   "kiroSecurity.resumeLastScan",
   "kiroSecurity.cancelActiveScan",
@@ -40,7 +36,14 @@ test("manifest contributes every required command and activation route", () => {
   assert.equal(manifest.contributes.views.kiroSecurity[0].type, "webview");
   assert.equal(manifest.contributes.viewsWelcome, undefined);
   const commandIds = manifest.contributes.commands.map((entry: { command: string }) => entry.command);
-  for (const removed of ["kiroSecurity.configure", "kiroSecurity.revealPowerBundle"]) {
+  for (const removed of [
+    "kiroSecurity.configure",
+    "kiroSecurity.revealPowerBundle",
+    "kiroSecurity.startFastScan",
+    "kiroSecurity.startStandardScan",
+    "kiroSecurity.startDeepScan",
+    "kiroSecurity.scanGitChanges",
+  ]) {
     assert.equal(commandIds.includes(removed), false, `${removed} should be removed`);
   }
   for (const removedSetting of ["kiroSecurity.defaultMode", "kiroSecurity.telemetry.enabled"]) {

@@ -368,10 +368,10 @@ export class SecurityController implements vscode.Disposable {
   async cleanupScan(scanId: string): Promise<void> {
     await this.userAction("Clean up scan", async () => {
       const scan = this.dashboard?.scans.find((item) => item.id === scanId);
-      if (!scan) throw new Error("The scan is no longer present in the current workbench state.");
+      if (!scan) throw new Error("The scan is no longer available.");
       if (["queued", "running"].includes(scan.status)) throw new Error("Cancel the active scan before cleanup.");
       const confirmation = await vscode.window.showWarningMessage(
-        `Delete scan ${scanId}, its internal artifacts, and workbench records? External exports are retained.`,
+        `Delete scan ${scanId} and its saved results? Exported files are kept.`,
         { modal: true },
         "Delete scan",
       );
@@ -446,12 +446,12 @@ export class SecurityController implements vscode.Disposable {
   }
 
   async createTrackingHandoff(occurrenceId: string, provider?: TrackingProvider): Promise<void> {
-    await this.userAction("Create tracking handoff", async () => {
+    await this.userAction("Send to issue tracker", async () => {
       const target = provider && provider !== "manual" ? ` for ${provider}` : "";
-      const prompt = `Prepare a tracking handoff${target} in Kiro Agent for Kiro Security finding ${occurrenceId}. Verify connector identity, search for duplicates, show the exact preview, and request approval before creating or updating anything.`;
+      const prompt = `Prepare an issue-tracker update${target} in Kiro Agent for Kiro Security finding ${occurrenceId}. Confirm the destination account, search for duplicates, show the exact preview, and request approval before creating or updating anything.`;
       await vscode.env.clipboard.writeText(prompt);
       await vscode.window.showInformationMessage(
-        `A ready-to-paste Kiro Agent tracking prompt${target} was copied. No external record was created.`,
+        `A ready-to-paste Kiro Agent issue-tracker prompt${target} was copied. No issue was created.`,
       );
     });
   }

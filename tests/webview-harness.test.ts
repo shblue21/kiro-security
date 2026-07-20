@@ -114,27 +114,12 @@ test("webview harness renders loading, dashboard, empty/error, filtering, and de
   assert.match(harness.document.body.textContent ?? "", /Fast \(deterministic\)/);
   assert.match(harness.document.body.textContent ?? "", /1\s*findings/);
   assert.ok(harness.document.querySelector('[aria-label="Security panel sections"]'));
-  const scanKind = harness.document.getElementById("scan-kind") as HTMLSelectElement;
-  assert.equal(scanKind.value, "fast");
-  assert.equal(harness.document.getElementById("start-scan")?.textContent, "Scan this repository");
+  assert.equal(harness.document.getElementById("scan-kind"), null);
+  assert.equal(harness.document.getElementById("start-scan"), null);
   assert.ok(harness.document.querySelector('[data-action="go-setup"]'), "results card offers Agent upsell until connected");
-  const unchangedKind = scanKind;
+  const unchangedCard = harness.document.querySelector(".card");
   harness.window.dispatchEvent(new harness.window.MessageEvent("message", { data: { type: "snapshot", snapshot: snapshot() } }));
-  assert.equal(harness.document.getElementById("scan-kind"), unchangedKind, "unchanged snapshots should not replace the DOM");
-  scanKind.value = "agent";
-  scanKind.dispatchEvent(new harness.window.Event("change", { bubbles: true }));
-  const depthMode = harness.document.getElementById("scan-mode") as HTMLSelectElement;
-  depthMode.value = "deep";
-  depthMode.dispatchEvent(new harness.window.Event("change", { bubbles: true }));
-  assert.equal(harness.document.getElementById("start-scan")?.textContent, "Continue in Kiro Agent");
-  (harness.document.getElementById("start-scan") as HTMLElement).click();
-  assert.deepEqual({ type: harness.messages.at(-1).type, mode: harness.messages.at(-1).mode, profile: harness.messages.at(-1).analysisProfile }, { type: "startScan", mode: "deep", profile: "model" });
-
-  (harness.document.getElementById("scan-scope") as HTMLInputElement).value = "src/custom";
-  const renamed = snapshot();
-  renamed.dashboard = { ...renamed.dashboard, workspace: { ...renamed.dashboard.workspace, display_name: "renamed" } };
-  harness.window.dispatchEvent(new harness.window.MessageEvent("message", { data: { type: "snapshot", snapshot: renamed } }));
-  assert.equal((harness.document.getElementById("scan-scope") as HTMLInputElement).value, "src/custom", "edited inputs survive snapshot re-renders");
+  assert.equal(harness.document.querySelector(".card"), unchangedCard, "unchanged snapshots should not replace the DOM");
 
   const labeled = snapshot();
   const modelScan = { ...labeled.dashboard.selectedScan, capabilities: { analysisProfile: "model" } };

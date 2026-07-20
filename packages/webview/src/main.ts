@@ -102,7 +102,7 @@ function nav(): string {
 }
 
 function shell(content: string): string {
-  return `<header class="topbar"><div><h1>Kiro Security Power</h1><p>${snapshot?.dashboard?.workspace?.display_name ? h(snapshot.dashboard.workspace.display_name) : "Repository security workbench"}</p></div>
+  return `<header class="topbar"><div><h1>Kiro Security Power</h1><p>${snapshot?.dashboard?.workspace?.display_name ? h(snapshot.dashboard.workspace.display_name) : "Repository security"}</p></div>
     <button class="icon-button" data-action="refresh" title="Refresh" aria-label="Refresh security state">↻</button></header>
     ${nav()}${snapshot?.engineError ? `<section class="global-error" role="alert"><strong>Engine error</strong><span>${h(snapshot.engineError)}</span><div class="button-row"><button data-action="retry-engine">Retry</button><button data-action="settings">Configure</button><button data-action="logs">Logs</button></div></section>` : ""}<section class="content">${content}</section>`;
 }
@@ -154,7 +154,7 @@ function setupView(): string {
   const statusRole = integration.state === "error" ? `role="alert"`
     : busy && integration.operation !== "checking" ? `role="status"` : "";
   return `<div class="stack">
-    <section class="card agent-setup" aria-busy="${busy ? "true" : "false"}"><div class="card-title"><div><h2>Connect Kiro Agent</h2><p>Fast Scan works without setup. Connect once to run Standard, Diff, or Deep scans from Kiro Agent.</p></div>${statusBadge(integration.state ?? "not_configured")}</div>
+    <section class="card agent-setup" aria-busy="${busy ? "true" : "false"}"><div class="card-title"><div><h2>Connect Kiro Agent</h2><p>Connect once, then request repository security scans from Kiro Agent chat.</p></div>${statusBadge(integration.state ?? "not_configured")}</div>
       <p class="setup-status" ${statusRole}><strong>${h(busy ? operationLabel : integrationLabel)}</strong>${integrationHealthy && !busy ? " · Agent tools are ready. Start a new Kiro Agent conversation (or refresh MCP servers), then ask for a Standard, Diff, or Deep scan." : ""}</p>
       ${!setupReady ? `<p class="muted">Complete the required system checks below before connecting.</p>` : ""}
       ${integrationHealthy ? "" : `<div class="button-row"><button id="setup-primary-action" class="primary" data-action="${primaryAction}" ${busy || !setupReady ? "disabled" : ""}>${h(operationLabel)}</button>${!pythonReady ? `<button data-action="settings">Configure Python</button>` : ""}</div>`}
@@ -191,26 +191,9 @@ function dashboardView(): string {
   if (!dashboard) return `<div class="empty"><h2>Engine is not ready</h2><p>Open and trust a local workspace, then refresh.</p><button data-action="refresh">Refresh</button></div>`;
   const active = dashboard.activeScan;
   const selected = dashboard.selectedScan;
-  const selectedMode = ui.scanMode ?? "fast";
-  const agentScan = selectedMode !== "fast";
-  const agentDepth = agentScan ? selectedMode : "standard";
   const progress = active?.progress?.overall_percent ?? 0;
   const coverage = selected?.coverage;
   return `<div class="stack">
-    <section class="card scan-form"><h2>Scan this repository</h2>
-      <label>Scan type<select id="scan-kind"><option value="fast" ${agentScan ? "" : "selected"}>This repository (local, fast)</option><option value="agent" ${agentScan ? "selected" : ""}>Deep analysis with Kiro Agent</option></select></label>
-      <label>Scope<input id="scan-scope" value="${attr(dashboard.workspace.default_scope || ".")}" maxlength="4096" autocomplete="off"></label>
-      <div id="agent-scan-options" class="agent-scan-options ${agentScan ? "" : "hidden"}">
-        <label>Depth<select id="scan-mode"><option value="standard" ${agentDepth === "standard" ? "selected" : ""}>Standard</option><option value="deep" ${agentDepth === "deep" ? "selected" : ""}>Deep</option><option value="diff" ${agentDepth === "diff" ? "selected" : ""}>Git changes</option></select></label>
-        <div class="handoff-note"><strong>Runs in Kiro Agent</strong><span>Continue to copy a ready-to-paste prompt for Kiro Agent chat.</span></div>
-        <div id="diff-options" class="diff-options ${agentDepth === "diff" ? "" : "hidden"}">
-          <label>Diff target<select id="diff-kind"><option value="working_tree">Working tree</option><option value="commit">Commit</option><option value="range">Range</option></select></label>
-          <label>Base revision<input id="diff-base" maxlength="256" placeholder="HEAD~1"></label>
-          <label>Head revision<input id="diff-head" maxlength="256" placeholder="HEAD"></label>
-        </div>
-      </div>
-      <div class="button-row"><button id="start-scan" class="primary" data-action="start" ${active ? "disabled" : ""}>${agentScan ? "Continue in Kiro Agent" : "Scan this repository"}</button>${dashboard.latestResumableScan ? `<button data-action="resume" data-scan-id="${attr(dashboard.latestResumableScan.id)}" ${active ? "disabled" : ""}>Resume interrupted</button>` : ""}</div>
-    </section>
     ${active ? `<section class="card active-scan"><div class="card-title"><div><h2>Active scan</h2><p>${h(scanLabel(active))} · ${h(active.scope)}</p></div>${statusBadge(active.status)}</div>
       ${phaseStepper(active)}<div class="progress-label"><strong>${h(progressLabel(active.phase, progress))}</strong><span>${h(active.progress?.message ?? "Working…")}</span></div>
       <progress max="100" value="${attr(progress)}">${h(progress)}%</progress>
@@ -222,7 +205,7 @@ function dashboardView(): string {
       ${!snapshot?.agentIntegration?.configured ? `<div class="handoff-note"><strong>Want deeper analysis?</strong><span>Connect Kiro Agent to unlock Standard, Diff, and Deep scans.</span><div class="button-row"><button data-action="go-setup">Connect Kiro Agent</button></div></div>` : ""}
       <div class="button-row"><button data-action="show-findings">View findings</button><button data-action="hardening" data-scan-id="${attr(selected.id)}">Hardening proposal</button><label class="compact-label">Export<select id="export-format" aria-label="Export format"><option value="markdown">Markdown</option><option value="json">JSON</option><option value="csv">CSV</option><option value="sarif">SARIF</option></select></label><button data-action="export" data-scan-id="${attr(selected.id)}">Export</button></div>
       <details><summary>Artifacts (${selected.artifacts?.length ?? 0})</summary><ul class="artifact-list">${(selected.artifacts ?? []).map((artifact: any) => `<li><button class="link" data-action="artifact" data-path="${attr(artifact.path)}">${h(artifact.kind)}</button><span class="muted mono">${h(String(artifact.sha256).slice(0, 12))}</span></li>`).join("") || "<li>None yet</li>"}</ul></details>
-    </section>` : `<div class="empty"><h2>No scans yet</h2><p>Scan this repository to see results here.</p></div>`}
+    </section>` : `<div class="empty"><h2>No scans yet</h2><p>Ask Kiro Agent to run a security scan for this repository.</p></div>`}
   </div>`;
 }
 
