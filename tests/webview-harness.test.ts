@@ -114,6 +114,9 @@ test("webview harness renders loading, dashboard, empty/error, filtering, and de
   assert.match(harness.document.body.textContent ?? "", /Fast \(deterministic\)/);
   assert.match(harness.document.body.textContent ?? "", /1\s*findings/);
   assert.ok(harness.document.querySelector('[aria-label="Security panel sections"]'));
+  assert.equal(harness.document.querySelectorAll('[data-tab]').length, 3);
+  assert.equal(harness.document.querySelector('[data-tab="history"]'), null);
+  assert.equal(harness.document.querySelectorAll(".scan-state").length, 1);
   assert.equal(harness.document.getElementById("scan-kind"), null);
   assert.equal(harness.document.getElementById("start-scan"), null);
   assert.ok(harness.document.querySelector('[data-action="go-setup"]'), "results card offers Agent upsell until connected");
@@ -129,8 +132,8 @@ test("webview harness renders loading, dashboard, empty/error, filtering, and de
   labeled.dashboard.scans = [fastScan, modelScan];
   harness.window.dispatchEvent(new harness.window.MessageEvent("message", { data: { type: "snapshot", snapshot: labeled } }));
   assert.match(harness.document.querySelector(".active-scan")?.textContent ?? "", /Fast \(deterministic\)/);
-  (harness.document.querySelector('[data-tab="history"]') as HTMLElement).click();
-  assert.match(harness.document.querySelector(".history-list")?.textContent ?? "", /Fast \(deterministic\).*Standard \(Kiro Agent\)/s);
+  assert.equal(harness.document.querySelectorAll(".scan-state").length, 1, "running replaces the completed state card");
+  assert.match(harness.document.getElementById("recent-scans")?.textContent ?? "", /Standard \(Kiro Agent\)/);
 
   (harness.document.querySelector('[data-tab="findings"]') as HTMLElement).click();
   assert.match(harness.document.body.textContent ?? "", /Command injection reaches shell/);
@@ -160,24 +163,30 @@ test("webview harness renders loading, dashboard, empty/error, filtering, and de
     details: { sourceToSink: true },
     codeEvidence: [{ id: "ev", kind: "code", label: "Sink", path: "src/app.py", startLine: 10, endLine: 10, role: "sink", code: "subprocess.run(user, shell=True)", explanation: "Direct shell sink" }],
     validation: { id: "val", status: "validated", method: "static_trace", rationale: "Direct trace", evidence: [], createdAt: "2026-07-14T00:00:01Z" },
-    attackPath: { id: "path", narrative: "Request to shell", path: [], exploitability: "high", impact: "command execution", severityRationale: "critical" },
+    attackPath: { id: "path", narrative: "Request to shell", path: [{ kind: "source", label: "Attacker input", path: "src/app.py", startLine: 8 }, { kind: "sink", label: "Shell execution", path: "src/app.py", startLine: 10 }], exploitability: "high", impact: "command execution", severityRationale: "critical" },
     triage: null,
-    remediationRecords: [],
-    trackingRecords: [],
-    artifactLinks: [],
+    remediationRecords: [{ version: 1, state: "generated", summary: "Use an argument array.", updated_at: "2026-07-14T00:00:02Z" }],
+    trackingRecords: [{ provider: "github", destination: "owner/repository", status: "prepared", external_url: "https://example.com/issues/1", updated_at: "2026-07-14T00:00:03Z" }],
+    artifactLinks: [{ kind: "writeup", path: "findings/example.md", sha256: "a".repeat(64) }],
     relatedFindings: [],
   };
   harness.window.dispatchEvent(new harness.window.MessageEvent("message", { data: { type: "snapshot", snapshot: snapshot({ selectedFinding: detail }) } }));
   assert.match(harness.document.body.textContent ?? "", /Direct shell sink/);
+  assert.equal(harness.document.querySelectorAll(".detail.card").length, 1, "finding detail uses one primary container");
+  assert.equal(harness.document.querySelectorAll(".detail > .card").length, 0, "detail sections are not independent cards");
+  assert.equal(harness.document.querySelectorAll(".attack-steps li").length, 2);
+  assert.doesNotMatch(harness.document.body.textContent ?? "", /"(kind|provider|version)"\s*:/, "structured records are not dumped as JSON");
   (harness.document.querySelector('[data-action="open-source"]') as HTMLElement).click();
   assert.equal(harness.messages.at(-1).type, "openSource");
   (harness.document.querySelector('[data-action="export-finding"]') as HTMLElement).click();
   assert.equal(harness.messages.at(-1).type, "exportFinding");
   const beforeRisk = harness.messages.length;
-  (harness.document.querySelector('[data-action="triage"][data-decision="accepted_risk"]') as HTMLElement).click();
+  const triageDecision = harness.document.getElementById("triage-decision") as HTMLSelectElement;
+  triageDecision.value = "accepted_risk";
+  (harness.document.querySelector('[data-action="triage"]') as HTMLElement).click();
   assert.equal(harness.messages.length, beforeRisk, "accepted risk requires an audit note");
   (harness.document.getElementById("triage-note") as HTMLTextAreaElement).value = "Compensating control is documented.";
-  (harness.document.querySelector('[data-action="triage"][data-decision="accepted_risk"]') as HTMLElement).click();
+  (harness.document.querySelector('[data-action="triage"]') as HTMLElement).click();
   assert.equal(harness.messages.at(-1).note, "Compensating control is documented.");
   (harness.document.querySelector('[data-action="tracking"]') as HTMLElement).click();
   assert.equal(harness.messages.at(-1).type, "createTrackingHandoff");

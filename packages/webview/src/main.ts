@@ -35,6 +35,7 @@ const ui: PersistedState = saved ?? {
   agentAutoApprove: "read_only",
 };
 ui.scanMode ??= "fast";
+if (ui.tab === "history") ui.tab = "dashboard";
 let snapshot: any = null;
 let lastEvent = "";
 let agentOptionsDirty = false;
@@ -96,7 +97,7 @@ function scanLabel(scan: any): string {
 
 function nav(): string {
   return `<nav class="tabs" aria-label="Security panel sections">
-    ${(["setup", "dashboard", "findings", "history"] as Tab[]).map((tab) =>
+    ${(["setup", "dashboard", "findings"] as Tab[]).map((tab) =>
       `<button class="tab ${ui.tab === tab ? "active" : ""}" data-tab="${tab}" ${ui.tab === tab ? `aria-current="page"` : ""}>${tab[0].toUpperCase()}${tab.slice(1)}</button>`).join("")}
   </nav>`;
 }
@@ -193,19 +194,18 @@ function dashboardView(): string {
   const selected = dashboard.selectedScan;
   const progress = active?.progress?.overall_percent ?? 0;
   const coverage = selected?.coverage;
-  return `<div class="stack">
-    ${active ? `<section class="card active-scan"><div class="card-title"><div><h2>Active scan</h2><p>${h(scanLabel(active))} · ${h(active.scope)}</p></div>${statusBadge(active.status)}</div>
+  const history = (dashboard.scans ?? []).filter((scan: any) => scan.id !== active?.id && (active || scan.id !== selected?.id)).slice(0, 20);
+  const state = active ? `<section class="card scan-state active-scan"><div class="card-title"><div><h2>Active scan</h2><p>${h(scanLabel(active))} · ${h(active.scope)}</p></div>${statusBadge(active.status)}</div>
       ${phaseStepper(active)}<div class="progress-label"><strong>${h(progressLabel(active.phase, progress))}</strong><span>${h(active.progress?.message ?? "Working…")}</span></div>
       <progress max="100" value="${attr(progress)}">${h(progress)}%</progress>
       <div class="metrics"><div><strong>${h(active.files_completed)}/${h(active.files_total)}</strong><span>files</span></div><div><strong>${h(active.progress?.reportable_findings_count ?? 0)}</strong><span>findings</span></div><div><strong>${h(elapsed(active))}</strong><span>elapsed</span></div></div>
-      <button class="danger" data-action="cancel" data-scan-id="${attr(active.id)}">Cancel scan</button></section>` : ""}
-    ${selected ? `<section class="card"><div class="card-title"><div><h2>${h(scanLabel(selected))}</h2><p>Completed ${h(date(selected.completed_at ?? selected.updated_at))}</p><p class="mono">${h(selected.id)}</p></div>${statusBadge(selected.status)}</div>
+      <button class="danger" data-action="cancel" data-scan-id="${attr(active.id)}">Cancel scan</button></section>` : selected ? `<section class="card scan-state"><div class="card-title"><div><h2>${h(scanLabel(selected))}</h2><p>${selected.status === "completed" ? "Completed" : "Updated"} ${h(date(selected.completed_at ?? selected.updated_at))}</p></div>${statusBadge(selected.status)}</div>
       <div class="metrics"><div><strong>${h(selected.files_total)}</strong><span>files scanned</span></div><div><strong>${h(dashboard.findings.length)}</strong><span>findings</span></div>${coverage?.completeness ? `<div><strong>${h(coverage.completeness)}</strong><span>coverage</span></div>` : ""}</div>
       ${severitySummary(dashboard.findings)}
       ${!snapshot?.agentIntegration?.configured ? `<div class="handoff-note"><strong>Want deeper analysis?</strong><span>Connect Kiro Agent to unlock Standard, Diff, and Deep scans.</span><div class="button-row"><button data-action="go-setup">Connect Kiro Agent</button></div></div>` : ""}
-      <div class="button-row"><button data-action="show-findings">View findings</button><button data-action="hardening" data-scan-id="${attr(selected.id)}">Hardening proposal</button><label class="compact-label">Export<select id="export-format" aria-label="Export format"><option value="markdown">Markdown</option><option value="json">JSON</option><option value="csv">CSV</option><option value="sarif">SARIF</option></select></label><button data-action="export" data-scan-id="${attr(selected.id)}">Export</button></div>
-      <details><summary>Artifacts (${selected.artifacts?.length ?? 0})</summary><ul class="artifact-list">${(selected.artifacts ?? []).map((artifact: any) => `<li><button class="link" data-action="artifact" data-path="${attr(artifact.path)}">${h(artifact.kind)}</button><span class="muted mono">${h(String(artifact.sha256).slice(0, 12))}</span></li>`).join("") || "<li>None yet</li>"}</ul></details>
-    </section>` : `<div class="empty"><h2>No scans yet</h2><p>Ask Kiro Agent to run a security scan for this repository.</p></div>`}
+      <div class="button-row"><button class="primary" data-action="show-findings">View findings</button>${["interrupted", "failed"].includes(selected.status) ? `<button data-action="resume" data-scan-id="${attr(selected.id)}">Resume</button>` : ""}<details class="more-menu" id="dashboard-more-actions"><summary aria-label="More scan actions" title="More scan actions">⋯</summary><div class="more-menu-panel"><button data-action="hardening" data-scan-id="${attr(selected.id)}">Hardening proposal</button><label>Export format<select id="export-format"><option value="markdown">Markdown</option><option value="json">JSON</option><option value="csv">CSV</option><option value="sarif">SARIF</option></select></label><button data-action="export" data-scan-id="${attr(selected.id)}">Export</button>${(selected.artifacts ?? []).length ? `<h3>Artifacts</h3><ul class="artifact-list">${selected.artifacts.map((artifact: any) => `<li><button class="link" data-action="artifact" data-path="${attr(artifact.path)}">${h(artifact.kind)}</button><span class="muted mono">${h(String(artifact.sha256).slice(0, 12))}</span></li>`).join("")}</ul>` : ""}</div></details></div>
+    </section>` : `<section class="card scan-state empty"><h2>No scans yet</h2><p>Ask Kiro Agent to run a security scan for this repository.</p>${!snapshot?.agentIntegration?.configured ? `<button data-action="go-setup">Connect Kiro Agent</button>` : ""}</section>`;
+  return `<div class="stack">${state}${history.length ? `<details class="card setup-disclosure" id="recent-scans"><summary><span><strong>Recent scans</strong><small>${h(history.length)} available</small></span></summary><div class="history-list setup-disclosure-body">${history.map((scan: any) => `<div class="history-row"><button class="link" data-action="select-scan" data-scan-id="${attr(scan.id)}">${h(scanLabel(scan))}</button><span class="muted">${h(elapsed(scan))} · ${h(scan.files_completed)}/${h(scan.files_total)} files</span>${statusBadge(scan.status)}${["interrupted", "failed"].includes(scan.status) ? `<button data-action="resume" data-scan-id="${attr(scan.id)}" ${active ? "disabled" : ""}>Resume</button>` : `<button class="danger" data-action="cleanup" data-scan-id="${attr(scan.id)}">Cleanup</button>`}</div>`).join("")}</div></details>` : ""}
   </div>`;
 }
 
@@ -239,34 +239,50 @@ function findingsView(): string {
     <aside class="finding-detail">${selected ? detailView(selected) : `<div class="empty"><h2>Select a finding</h2><p>Review evidence, source-to-sink paths, validation, impact, and remediation.</p></div>`}</aside></div>`;
 }
 
-function jsonBlock(value: unknown): string {
-  return `<pre><code>${h(JSON.stringify(value, null, 2))}</code></pre>`;
+function evidenceView(evidence: any): string {
+  return `<div class="evidence"><div class="card-title"><strong>${h(evidence.label)}</strong>${badge(evidence.role ?? evidence.kind)}</div><p class="mono">${h(evidence.path)}:${h(evidence.startLine)}</p><pre><code>${h(evidence.code)}</code></pre><p>${h(evidence.explanation)}</p></div>`;
+}
+function attackSteps(attackPath: any): string {
+  const steps = Array.isArray(attackPath?.crossFilePath) ? attackPath.crossFilePath : Array.isArray(attackPath?.path) ? attackPath.path : [];
+  if (!steps.length) return "";
+  return `<ol class="detail-list attack-steps">${steps.map((step: any) => {
+    const label = step.step ?? step.label ?? step.kind ?? "Attack step";
+    const location = step.path ? `${step.path}${step.startLine ? `:${step.startLine}` : ""}` : "";
+    return `<li><strong>${h(label)}</strong>${location ? `<span class="mono muted">${h(location)}</span>` : ""}</li>`;
+  }).join("")}</ol>`;
+}
+function remediationHistory(records: any[]): string {
+  if (!records.length) return "";
+  return `<ol class="detail-list" aria-label="Remediation history">${records.map((record: any) => `<li><strong>Version ${h(record.version)} · ${h(String(record.state ?? "unknown").replaceAll("_", " "))}</strong><span class="muted"> · ${h(date(record.updated_at ?? record.updatedAt))}</span>${record.summary ? `<p>${h(record.summary)}</p>` : ""}${record.verification_summary ? `<p class="muted">Verification: ${h(record.verification_summary)}</p>` : ""}</li>`).join("")}</ol>`;
+}
+function trackingHistory(records: any[]): string {
+  if (!records.length) return "";
+  return `<ol class="detail-list" aria-label="Issue tracker history">${records.map((record: any) => { const url = String(record.external_url ?? record.externalUrl ?? ""); return `<li><strong>${h(record.provider)} · ${h(String(record.status ?? "unknown").replaceAll("_", " "))}</strong><span class="muted"> · ${h(date(record.updated_at ?? record.updatedAt))}</span>${record.destination ? `<p>${h(record.destination)}</p>` : ""}${/^https?:\/\/\S+$/i.test(url) ? `<a href="${attr(url)}" target="_blank" rel="noreferrer">Open tracked item</a>` : ""}</li>`; }).join("")}</ol>`;
 }
 function detailView(finding: any): string {
   const sink = finding.locations?.find((item: any) => item.role === "sink") ?? finding.locations?.[0];
-  return `<article class="detail stack">
-    <section class="card"><div class="card-title"><div><div class="badge-row">${severityBadge(finding.severity.level)}${statusBadge(finding.validationStatus)}${badge(finding.confidence.level + " confidence")}</div><h2>${h(finding.title)}</h2></div></div>
-      <p>${h(finding.summary)}</p><p class="mono break-word">${h(sink ? `${sink.path}:${sink.startLine}-${sink.endLine}` : "No location")}</p>
-      <div class="button-row"><button class="primary" data-action="open-source" data-occurrence-id="${attr(finding.occurrenceId)}">Open source</button><button data-action="copy-link" data-occurrence-id="${attr(finding.occurrenceId)}">Copy link</button><button data-action="export-finding" data-occurrence-id="${attr(finding.occurrenceId)}">Export finding JSON</button></div></section>
-    <section class="card"><h3>Evidence</h3>${(finding.codeEvidence ?? []).map((evidence: any) => `<div class="evidence"><div class="card-title"><strong>${h(evidence.label)}</strong>${badge(evidence.role ?? evidence.kind)}</div><p class="mono">${h(evidence.path)}:${h(evidence.startLine)}</p><pre><code>${h(evidence.code)}</code></pre><p>${h(evidence.explanation)}</p></div>`).join("") || "<p class=\"muted\">No evidence recorded.</p>"}</section>
-    <section class="card"><h3>Source-to-sink / attack path</h3>${finding.attackPath ? `<p>${h(finding.attackPath.narrative)}</p><dl><dt>Exploitability</dt><dd>${h(finding.attackPath.exploitability)}</dd><dt>Impact</dt><dd>${h(finding.attackPath.impact)}</dd><dt>Severity rationale</dt><dd>${h(finding.attackPath.severityRationale)}</dd></dl>${jsonBlock(finding.attackPath.path)}` : `<p class="muted">Attack-path analysis is not recorded yet.</p>`}</section>
-    <section class="card"><h3>Validation</h3>${finding.validation ? `<p>${statusBadge(finding.validation.status)} ${h(finding.validation.rationale)}</p><p class="muted">Method: ${h(finding.validation.method)} · ${h(date(finding.validation.createdAt))}</p>` : `<p class="muted">This finding has not been validated.</p><button data-action="validate" data-occurrence-id="${attr(finding.occurrenceId)}">Validate finding</button>`}</section>
-    <section class="card"><h3>Triage</h3><label>Decision note<textarea id="triage-note" data-occurrence-id="${attr(finding.occurrenceId)}" maxlength="4000" placeholder="Required for Accept risk and Won't fix">${h(finding.triage?.note ?? "")}</textarea></label><div class="button-grid">${[["open","Open"],["accepted_risk","Accept risk"],["false_positive","False positive"],["already_fixed","Already fixed"],["wont_fix","Won't fix"]].map(([value,label]) => `<button class="${finding.triageStatus === value ? "selected-action" : ""}" data-action="triage" data-decision="${value}" data-occurrence-id="${attr(finding.occurrenceId)}">${label}</button>`).join("")}</div></section>
-    <section class="card"><h3>Fix workflow and remediation</h3><p>${h(finding.remediation)}</p><button data-action="remediation" data-occurrence-id="${attr(finding.occurrenceId)}">Create remediation guidance</button>${(finding.remediationRecords ?? []).length ? jsonBlock(finding.remediationRecords) : ""}</section>
-    <section class="card"><h3>Send to issue tracker</h3><p class="muted">Copies a prompt for Kiro Agent. Nothing is created without your approval.</p><button data-action="tracking" data-provider="manual" data-occurrence-id="${attr(finding.occurrenceId)}">Copy tracking prompt</button>${(finding.trackingRecords ?? []).length ? jsonBlock(finding.trackingRecords) : ""}</section>
-    <section class="card"><h3>Related findings</h3>${(finding.relatedFindings ?? []).map((related: any) => `<button class="related-finding" data-action="finding" data-occurrence-id="${attr(related.occurrenceId)}"><strong>${h(related.title)}</strong><span>${severityBadge(related.severity.level)} ${h(related.locations?.[0]?.path ?? "")}</span></button>`).join("") || `<p class="muted">No related findings in this scan.</p>`}</section>
-    <section class="card"><h3>Artifact links</h3><ul class="artifact-list">${(finding.artifactLinks ?? []).map((artifact: any) => `<li><button class="link" data-action="artifact" data-path="${attr(artifact.path)}">${h(artifact.kind)}</button><span class="muted mono">${h(String(artifact.sha256 ?? "").slice(0, 12))}</span></li>`).join("") || "<li>No artifacts recorded.</li>"}</ul></section>
-    <section class="card"><h3>Metadata</h3><dl><dt>Finding ID</dt><dd class="mono">${h(finding.findingId)}</dd><dt>Rule</dt><dd>${h(finding.ruleId)}</dd><dt>Category</dt><dd>${h(finding.taxonomy?.category)}</dd><dt>CWE</dt><dd>${h((finding.taxonomy?.cwe ?? []).join(", ") || "—")}</dd><dt>Scan ID</dt><dd class="mono">${h(finding.scanId)}</dd></dl></section>
+  const evidence = finding.codeEvidence ?? [];
+  const related = finding.relatedFindings ?? [];
+  const artifacts = finding.artifactLinks ?? [];
+  const attack = finding.attackPath;
+  const severityRationale = attack?.severityRationale ?? attack?.severity?.rationale;
+  return `<article class="detail card">
+    <header class="card-title"><div><div class="badge-row">${severityBadge(finding.severity.level)}${statusBadge(finding.validationStatus)}${badge(finding.confidence.level + " confidence")}</div><h2>${h(finding.title)}</h2><p>${h(finding.summary)}</p><p class="mono break-word">${h(sink ? `${sink.path}:${sink.startLine}-${sink.endLine}` : "No location")}</p></div>
+      <div class="button-row"><button class="primary" data-action="open-source" data-occurrence-id="${attr(finding.occurrenceId)}">Open source</button><details class="more-menu" id="finding-more-actions"><summary aria-label="More finding actions" title="More finding actions">⋯</summary><div class="more-menu-panel">
+        <button data-action="copy-link" data-occurrence-id="${attr(finding.occurrenceId)}">Copy link</button><button data-action="export-finding" data-occurrence-id="${attr(finding.occurrenceId)}">Export finding JSON</button><button data-action="tracking" data-provider="manual" data-occurrence-id="${attr(finding.occurrenceId)}">Send to issue tracker</button><p class="muted">Copies a Kiro Agent prompt. No issue is created without your approval.</p>
+        ${trackingHistory(finding.trackingRecords ?? [])}
+        ${artifacts.length ? `<h3>Artifacts</h3><ul class="artifact-list">${artifacts.map((artifact: any) => `<li><button class="link" data-action="artifact" data-path="${attr(artifact.path)}">${h(artifact.kind)}</button><span class="muted mono">${h(String(artifact.sha256 ?? "").slice(0, 12))}</span></li>`).join("")}</ul>` : ""}
+        <h3>Metadata</h3><dl><dt>Finding ID</dt><dd class="mono">${h(finding.findingId)}</dd><dt>Rule</dt><dd>${h(finding.ruleId)}</dd><dt>Category</dt><dd>${h(finding.taxonomy?.category)}</dd><dt>CWE</dt><dd>${h((finding.taxonomy?.cwe ?? []).join(", ") || "—")}</dd><dt>Scan ID</dt><dd class="mono">${h(finding.scanId)}</dd></dl>
+      </div></details></div></header>
+    <section class="setup-options"><h3>Evidence</h3>${evidence.length ? evidenceView(evidence[0]) : `<p class="muted">No evidence recorded.</p>`}${evidence.length > 1 ? `<details id="additional-evidence"><summary>${h(evidence.length - 1)} more evidence item${evidence.length === 2 ? "" : "s"}</summary><div class="setup-options-body">${evidence.slice(1).map(evidenceView).join("")}</div></details>` : ""}</section>
+    <section class="setup-options"><h3>Why it matters</h3>${attack ? `<p>${h(attack.narrative)}</p><dl><dt>Exploitability</dt><dd>${h(attack.exploitability)}</dd><dt>Impact</dt><dd>${h(attack.impact)}</dd>${severityRationale ? `<dt>Severity rationale</dt><dd>${h(severityRationale)}</dd>` : ""}</dl>${attackSteps(attack)}` : `<p>${h(finding.summary)}</p><p class="muted">Attack-path analysis is not recorded yet.</p>`}</section>
+    <details class="setup-options" id="finding-status"><summary><span>Status and validation</span>${statusBadge(finding.validationStatus)}</summary><div class="setup-options-body">
+      ${finding.validation ? `<p>${h(finding.validation.rationale)}</p><p class="muted">Method: ${h(finding.validation.method)}${finding.validation.createdAt ? ` · ${h(date(finding.validation.createdAt))}` : ""}</p>` : `<p class="muted">This finding has not been validated.</p><button data-action="validate" data-occurrence-id="${attr(finding.occurrenceId)}">Validate finding</button>`}
+      <div class="stack"><label>Mark as<select id="triage-decision">${[["open","Open"],["accepted_risk","Accept risk"],["false_positive","False positive"],["already_fixed","Already fixed"],["wont_fix","Won't fix"]].map(([value,label]) => `<option value="${value}" ${finding.triageStatus === value ? "selected" : ""}>${label}</option>`).join("")}</select></label><label>Decision note<textarea id="triage-note" data-occurrence-id="${attr(finding.occurrenceId)}" maxlength="4000" placeholder="Required for Accept risk and Won't fix">${h(finding.triage?.note ?? "")}</textarea></label><button data-action="triage" data-occurrence-id="${attr(finding.occurrenceId)}">Apply status</button></div>
+    </div></details>
+    <details class="setup-options" id="finding-remediation"><summary>Remediation</summary><div class="setup-options-body"><p>${h(finding.remediation)}</p><button data-action="remediation" data-occurrence-id="${attr(finding.occurrenceId)}">Create remediation guidance</button>${remediationHistory(finding.remediationRecords ?? [])}</div></details>
+    ${related.length ? `<details class="setup-options" id="related-findings"><summary>Related findings (${h(related.length)})</summary><div class="setup-options-body">${related.map((item: any) => `<button class="related-finding" data-action="finding" data-occurrence-id="${attr(item.occurrenceId)}"><strong>${h(item.title)}</strong><span>${severityBadge(item.severity.level)} ${h(item.locations?.[0]?.path ?? "")}</span></button>`).join("")}</div></details>` : ""}
   </article>`;
-}
-
-function historyView(): string {
-  const dashboard = snapshot?.dashboard;
-  const scans = dashboard?.scans ?? [];
-  return `<div class="stack"><section class="card"><h2>History and recovery</h2><p>All past scans, including ones started from Kiro Agent.</p></section>
-    <section class="history-list">${scans.map((scan: any) => `<article class="card history-item"><div class="card-title"><div><h3>${h(scanLabel(scan))}</h3><p class="mono">${h(scan.id)}</p></div>${statusBadge(scan.status)}</div>
-      <dl class="history-grid"><dt>Scope</dt><dd>${h(scan.scope)}</dd><dt>Phase</dt><dd>${h(scan.phase.replaceAll("_", " "))}</dd><dt>Created</dt><dd>${h(date(scan.created_at))}</dd><dt>Elapsed</dt><dd>${h(elapsed(scan))}</dd><dt>Files</dt><dd>${h(scan.files_completed)}/${h(scan.files_total)}</dd><dt>Error</dt><dd>${h(scan.failure_message ?? "—")}</dd></dl>
-      <div class="button-row"><button data-action="select-scan" data-scan-id="${attr(scan.id)}">Open</button>${["interrupted","failed"].includes(scan.status) ? `<button data-action="resume" data-scan-id="${attr(scan.id)}" ${dashboard?.activeScan ? "disabled" : ""}>Resume</button>` : ""}${scan.status === "running" ? `<button class="danger" data-action="cancel" data-scan-id="${attr(scan.id)}">Cancel</button>` : `<button class="danger" data-action="cleanup" data-scan-id="${attr(scan.id)}">Cleanup</button>`}</div></article>`).join("") || `<div class="empty"><h2>No scans yet</h2></div>`}</section><section class="card"><button data-action="logs">View logs</button></section></div>`;
 }
 
 function render(): void {
@@ -274,8 +290,7 @@ function render(): void {
   const viewState = ui.tab === "setup"
     ? [snapshot?.workspaceRoot, snapshot?.workspaceTrusted, snapshot?.engineStatus, snapshot?.secondarySidebarOnboarded, snapshot?.dashboard?.workspace, snapshot?.dashboard?.engine?.dependencies?.git, snapshot?.agentIntegration]
     : ui.tab === "findings" ? [snapshot?.dashboard?.findings, snapshot?.selectedFinding]
-      : ui.tab === "history" ? [snapshot?.dashboard?.workspace, snapshot?.dashboard?.activeScan?.id, snapshot?.dashboard?.scans]
-        : [snapshot?.dashboard, snapshot?.agentIntegration?.configured];
+      : [snapshot?.dashboard, snapshot?.agentIntegration?.configured];
   const renderKey = JSON.stringify([ui, snapshot?.engineError, viewState]);
   if (app.firstElementChild && renderKey === lastRenderKey) return;
   const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -296,7 +311,7 @@ function render(): void {
     app.innerHTML = `<div class="loading">Connecting to Kiro Security engine…</div>`;
     return;
   }
-  const view = ui.tab === "setup" ? setupView() : ui.tab === "findings" ? findingsView() : ui.tab === "history" ? historyView() : dashboardView();
+  const view = ui.tab === "setup" ? setupView() : ui.tab === "findings" ? findingsView() : dashboardView();
   app.innerHTML = shell(view);
   document.querySelectorAll<HTMLDetailsElement>("details[id]").forEach((detail) => {
     if (setupDisclosureState.has(detail.id)) detail.open = Boolean(setupDisclosureState.get(detail.id));
@@ -414,7 +429,7 @@ async function handleAction(element: HTMLElement): Promise<void> {
   if (action === "open-source") post({ type: "openSource", occurrenceId: element.dataset.occurrenceId });
   if (action === "validate") post({ type: "validateFinding", occurrenceId: element.dataset.occurrenceId });
   if (action === "triage") {
-    const decision = element.dataset.decision;
+    const decision = element.dataset.decision ?? (document.getElementById("triage-decision") as HTMLSelectElement | null)?.value;
     const noteInput = document.getElementById("triage-note") as HTMLTextAreaElement | null;
     const note = noteInput?.value.trim() ?? "";
     if (["accepted_risk", "wont_fix"].includes(String(decision)) && !note) {
@@ -449,7 +464,7 @@ window.addEventListener("message", (event) => {
     if (liveRegion) liveRegion.textContent = `Security event: ${lastEvent.replaceAll(".", " ")}`;
   }
   if (message.type === "navigate" && ["setup", "dashboard", "findings", "history"].includes(String(message.tab))) {
-    ui.tab = message.tab as Tab;
+    ui.tab = message.tab === "history" ? "dashboard" : message.tab as Tab;
     persist();
     render();
   }

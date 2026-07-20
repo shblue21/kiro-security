@@ -16,16 +16,9 @@ const required = [
   "kiroSecurity.refreshThreatModel",
   "kiroSecurity.resumeLastScan",
   "kiroSecurity.cancelActiveScan",
-  "kiroSecurity.openFinding",
-  "kiroSecurity.validateFinding",
   "kiroSecurity.exportReport",
   "kiroSecurity.openLogs",
-  "kiroSecurity.createTrackingHandoff",
   "kiroSecurity.installAgentIntegration",
-  "kiroSecurity.verifyAgentIntegration",
-  "kiroSecurity.removeAgentIntegration",
-  "kiroSecurity.openMcpConfig",
-  "kiroSecurity.retryEngine",
 ];
 
 test("manifest contributes every required command and activation route", () => {
@@ -36,6 +29,7 @@ test("manifest contributes every required command and activation route", () => {
   assert.equal(manifest.contributes.views.kiroSecurity[0].type, "webview");
   assert.equal(manifest.contributes.viewsWelcome, undefined);
   const commandIds = manifest.contributes.commands.map((entry: { command: string }) => entry.command);
+  assert.equal(commandIds.length, 8, "the Command Palette surface stays focused");
   for (const removed of [
     "kiroSecurity.configure",
     "kiroSecurity.revealPowerBundle",

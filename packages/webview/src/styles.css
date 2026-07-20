@@ -84,13 +84,24 @@ button.badge:hover { filter: brightness(1.15); }
 .finding-summary { font-size: 11px; }
 .finding-meta, .finding-path { color: var(--vscode-descriptionForeground); font-size: calc(var(--vscode-font-size) * .85); overflow-wrap: anywhere; }
 .finding-detail { min-width: 0; }
+.detail { display: grid; gap: 0; }
+.detail > .setup-options { padding: 12px 0; }
+.detail > .card-title > div:first-child { min-width: 0; }
+.detail > details > summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-weight: 600; }
 .evidence { margin: 8px 0; padding-top: 8px; border-top: 1px solid var(--vscode-widget-border, var(--vscode-panel-border)); }
+.attack-steps span { display: block; margin-top: 2px; }
+.more-menu { position: relative; }
+.more-menu > summary { list-style: none; min-width: 32px; padding: 5px 9px; cursor: pointer; text-align: center; border: 1px solid var(--vscode-button-border, transparent); border-radius: 3px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+.more-menu > summary::-webkit-details-marker { display: none; }
+.more-menu-panel { position: absolute; z-index: 2; right: 0; display: grid; gap: 7px; width: min(320px, 82vw); margin-top: 4px; padding: 10px; background: var(--vscode-menu-background, var(--vscode-editorWidget-background)); color: var(--vscode-menu-foreground, var(--vscode-foreground)); border: 1px solid var(--vscode-menu-border, var(--vscode-widget-border)); box-shadow: 0 4px 12px var(--vscode-widget-shadow); }
+.more-menu-panel button { width: 100%; text-align: left; }
 pre { max-height: 340px; overflow: auto; padding: 8px; color: var(--vscode-editor-foreground); background: var(--vscode-textCodeBlock-background, var(--vscode-editor-background)); border-radius: 3px; white-space: pre-wrap; overflow-wrap: anywhere; }
 dl { display: grid; grid-template-columns: minmax(80px, auto) 1fr; gap: 4px 8px; margin: 8px 0; }
 dt { color: var(--vscode-descriptionForeground); }
 dd { margin: 0; overflow-wrap: anywhere; }
 .history-list { display: grid; gap: 8px; }
-.history-grid { font-size: 11px; }
+.history-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--vscode-widget-border, transparent); }
+.history-row > .muted { margin-right: auto; }
 .empty { padding: 26px 12px; text-align: center; color: var(--vscode-descriptionForeground); }
 .empty.compact { padding: 14px; }
 .loading { padding: 20px; color: var(--vscode-descriptionForeground); }
@@ -101,7 +112,7 @@ dd { margin: 0; overflow-wrap: anywhere; }
   .filters { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 @media (forced-colors: active) {
-  .card, .finding-card, button, input, select, textarea { border: 1px solid CanvasText; }
+  .card, .finding-card, button, input, select, textarea, .more-menu > summary { border: 1px solid CanvasText; }
   .badge { border: 1px solid CanvasText; }
 }
 .agent-setup { display: grid; gap: 10px; }
@@ -117,4 +128,5 @@ dd { margin: 0; overflow-wrap: anywhere; }
 .detail-list li { margin: 3px 0; overflow-wrap: anywhere; }
 @media (max-width: 420px) {
   .agent-setup .card-title { flex-direction: column; }
+  .detail > .card-title { flex-direction: column; }
 }

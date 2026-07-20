@@ -86,16 +86,6 @@
         "icon": "$(debug-stop)"
       },
       {
-        "command": "kiroSecurity.openFinding",
-        "title": "Open Finding",
-        "category": "Kiro Security"
-      },
-      {
-        "command": "kiroSecurity.validateFinding",
-        "title": "Validate Finding",
-        "category": "Kiro Security"
-      },
-      {
         "command": "kiroSecurity.exportReport",
         "title": "Export Report",
         "category": "Kiro Security",
@@ -107,49 +97,10 @@
         "category": "Kiro Security"
       },
       {
-        "command": "kiroSecurity.showFindingDetails",
-        "title": "Show Finding Details",
-        "category": "Kiro Security"
-      },
-      {
-        "command": "kiroSecurity.createRemediation",
-        "title": "Create Remediation Guidance",
-        "category": "Kiro Security"
-      },
-      {
-        "command": "kiroSecurity.createTrackingHandoff",
-        "title": "Send to Issue Tracker",
-        "category": "Kiro Security"
-      },
-      {
         "command": "kiroSecurity.installAgentIntegration",
         "title": "Install or Repair Agent Integration",
         "category": "Kiro Security",
         "icon": "$(plug)"
-      },
-      {
-        "command": "kiroSecurity.verifyAgentIntegration",
-        "title": "Verify Agent Integration",
-        "category": "Kiro Security",
-        "icon": "$(verified)"
-      },
-      {
-        "command": "kiroSecurity.removeAgentIntegration",
-        "title": "Remove Agent Integration",
-        "category": "Kiro Security",
-        "icon": "$(trash)"
-      },
-      {
-        "command": "kiroSecurity.openMcpConfig",
-        "title": "Open MCP Configuration",
-        "category": "Kiro Security",
-        "icon": "$(json)"
-      },
-      {
-        "command": "kiroSecurity.retryEngine",
-        "title": "Retry Engine",
-        "category": "Kiro Security",
-        "icon": "$(debug-restart)"
       }
     ],
     "viewsContainers": {
