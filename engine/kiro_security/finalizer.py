@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,7 @@ from .coverage import coverage_receipt_digest, expected_coverage_frontier
 from .db import Workbench
 from .errors import EngineError
 from .hardening import render_hardening_proposal
+from .reporting import build_findings_document
 from .schema_validation import validate_against_schema
 from .security import atomic_write, sha256_bytes, sha256_file, utc_now
 
@@ -115,6 +117,141 @@ def _validate_inventory_document(document: dict[str, Any]) -> None:
             )
 
 
+def _validate_durable_finding_projection(
+    workbench: Workbench, scan: dict[str, Any], document: dict[str, Any], writeup_paths: dict[str, str]
+) -> None:
+    durable_findings = [
+        workbench.get_finding(item["occurrenceId"])
+        for item in workbench.list_findings(scan["id"])
+    ]
+    tail_results: dict[str, dict[str, Any]] | None = None
+    if is_model_scan(scan):
+        tail_results = {"validation": {}, "attack_path": {}}
+        connection = workbench._connect()
+        try:
+            rows = connection.execute(
+                """
+                SELECT kind, subject_id, result_json FROM deep_tail_assignments
+                WHERE scan_id=? AND kind IN ('validation', 'attack_path') AND status='completed'
+                ORDER BY attempt
+                """,
+                (scan["id"],),
+            ).fetchall()
+        finally:
+            connection.close()
+        for row in rows:
+            tail_results[str(row["kind"])][str(row["subject_id"])] = json.loads(row["result_json"])
+        expected_validation_ids = {finding["occurrenceId"] for finding in durable_findings}
+        expected_attack_ids = {
+            finding["occurrenceId"]
+            for finding in durable_findings
+            if finding.get("validationStatus") in ("validated", "needs_review")
+        }
+        if set(tail_results["validation"]) != expected_validation_ids or set(tail_results["attack_path"]) != expected_attack_ids:
+            raise EngineError(
+                "canonical_tail_result_mismatch",
+                "Canonical model proof subjects do not match the completed tail assignments.",
+            )
+    expected = build_findings_document(scan["id"], durable_findings, writeup_paths, tail_results)
+    canonical = document.get("findings") or []
+    expected_by_occurrence = {item["occurrenceId"]: item for item in expected["findings"]}
+    if len(canonical) != len(expected_by_occurrence) or any(
+        item.get("occurrenceId") not in expected_by_occurrence
+        or any(
+            item.get(field) != expected_by_occurrence[item["occurrenceId"]].get(field)
+            for field in ("findingId", "ruleId", "identity", "fingerprints")
+        )
+        for item in canonical
+    ):
+        raise EngineError(
+            "canonical_finding_identity_mismatch",
+            "Canonical finding identity does not match the durable occurrence.",
+        )
+    if document != expected:
+        raise EngineError(
+            "canonical_tail_result_mismatch" if is_model_scan(scan) else "canonical_projection_mismatch",
+            "Canonical findings must be the exact durable finding and proof projection.",
+        )
+
+
+def _validate_finding_semantics(
+    scan: dict[str, Any], document: dict[str, Any], inventory: dict[str, Any] | None = None
+) -> None:
+    inventory_paths = {
+        str(path)
+        for row in (inventory or {}).get("files") or []
+        for path in [row.get("path"), *(row.get("diffSupportingPaths") or [])]
+        if path
+    }
+    for finding in document.get("findings") or []:
+        evidence_ids = [evidence.get("id") for evidence in finding.get("codeEvidence") or []]
+        if any(not isinstance(evidence_id, str) or not evidence_id for evidence_id in evidence_ids) or len(
+            evidence_ids
+        ) != len(set(evidence_ids)):
+            raise EngineError(
+                "canonical_evidence_reference_invalid",
+                "Canonical code evidence IDs must be non-empty and unique within each finding.",
+            )
+        root_cause = finding.get("rootCause")
+        if isinstance(root_cause, dict) and "evidenceRefs" in root_cause:
+            refs = root_cause["evidenceRefs"]
+            if any(not isinstance(ref, str) or not ref for ref in refs) or set(refs) - set(evidence_ids):
+                raise EngineError(
+                    "canonical_evidence_reference_invalid",
+                    "Root-cause evidence references must resolve to canonical code evidence IDs.",
+                )
+
+        for proof_name in ("validation", "attackPath"):
+            proof = finding.get(proof_name)
+            if isinstance(proof, dict) and proof.get("findingId") not in (None, finding.get("findingId")):
+                raise EngineError(
+                    "canonical_finding_identity_mismatch",
+                    f"{proof_name}.findingId does not match its canonical finding.",
+                )
+        if is_model_scan(scan):
+            validation = finding.get("validation")
+            attack = finding.get("attackPath")
+            if not isinstance(validation, dict) or validation.get("findingId") != finding.get("findingId"):
+                raise EngineError(
+                    "canonical_deep_proof_incomplete",
+                    "Model findings require the completed validation proof contract.",
+                )
+            extensions = finding.get("extensions") if isinstance(finding.get("extensions"), dict) else {}
+            if validation.get("status") != extensions.get("validationStatus"):
+                raise EngineError(
+                    "canonical_deep_proof_incomplete",
+                    "Model validation proof status must match the canonical finding status.",
+                )
+            if attack is not None and (
+                not isinstance(attack, dict) or attack.get("findingId") != finding.get("findingId")
+            ):
+                raise EngineError(
+                    "canonical_deep_proof_incomplete",
+                    "Model attack-path results must use the completed proof contract.",
+                )
+            if validation.get("status") == "rejected" and attack is not None:
+                raise EngineError(
+                    "canonical_deep_proof_incomplete",
+                    "Rejected model findings cannot carry an attack-path result.",
+                )
+            if validation.get("status") in ("validated", "needs_review") and not isinstance(attack, dict):
+                raise EngineError(
+                    "canonical_deep_proof_incomplete",
+                    "Validated or review-required model findings require completed attack-path proof.",
+                )
+            finding_paths = {
+                str(item.get("path"))
+                for item in [*(finding.get("locations") or []), *(finding.get("codeEvidence") or [])]
+                if item.get("path")
+            }
+            if any(item.get("path") not in finding_paths for item in validation.get("evidence") or []):
+                raise EngineError("canonical_proof_path_invalid", "Validation evidence must use finding evidence paths.")
+            if isinstance(attack, dict) and inventory is not None and any(
+                item.get("path") not in inventory_paths for item in attack.get("crossFilePath") or []
+            ):
+                raise EngineError("canonical_proof_path_invalid", "Attack-path evidence must use inventory paths.")
+
+
 def _validate_coverage_semantics(
     workbench: Workbench,
     scan: dict[str, Any],
@@ -214,7 +351,9 @@ def _validate_coverage_semantics(
 
 
 
-def _validate_auxiliary_documents(documents: dict[str, dict[str, Any]], scan_id: str) -> None:
+def _validate_auxiliary_documents(
+    documents: dict[str, dict[str, Any]], scan_id: str, findings: dict[str, Any] | None = None
+) -> None:
     """Validate sealed supporting JSON that does not yet have a WS-I schema.
 
     WS-A keeps the dependency-light engine and limits schema expansion to
@@ -249,6 +388,28 @@ def _validate_auxiliary_documents(documents: dict[str, dict[str, Any]], scan_id:
                 "canonical_document_invalid",
                 f"{kind}.json {collection_key} must be an array of objects.",
             )
+    if findings is not None:
+        canonical = findings.get("findings") or []
+        expected = {
+            "discovery": [
+                {
+                    "findingId": item["findingId"], "occurrenceId": item["occurrenceId"],
+                    "ruleId": item["ruleId"], "title": item["title"], "locations": item["locations"],
+                }
+                for item in canonical
+            ],
+            "validation": [item["validation"] for item in canonical if item.get("validation")],
+            "attackPath": [
+                {"findingId": item["findingId"], "occurrenceId": item["occurrenceId"], **item["attackPath"]}
+                for item in canonical if item.get("attackPath")
+            ],
+        }
+        for kind, (_, collection_key) in contracts.items():
+            if documents[kind][collection_key] != expected[kind]:
+                raise EngineError(
+                    "canonical_projection_mismatch",
+                    f"{kind}.json must be the exact canonical findings projection.",
+                )
 
 def _validation_mode(scan: dict[str, Any]) -> str:
     if is_model_scan(scan):
@@ -307,13 +468,23 @@ def _derived_descriptors(bundle: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _validate_writeup_artifacts(bundle: dict[str, Any], findings: dict[str, Any]) -> None:
     artifact_dir = Path(bundle["artifactDir"])
-    paths = set((bundle.get("writeupPaths") or {}).values())
-    paths.update(
-        writeup["reportPath"]
-        for finding in findings.get("findings") or []
-        for writeup in [finding.get("writeup")]
-        if isinstance(writeup, dict) and isinstance(writeup.get("reportPath"), str)
-    )
+    owners: dict[str, str] = {}
+    referenced: dict[str, str] = {}
+    for finding in findings.get("findings") or []:
+        finding_id = finding["findingId"]
+        writeup = finding.get("writeup")
+        if not isinstance(writeup, dict) or not isinstance(writeup.get("reportPath"), str):
+            continue
+        relative = writeup["reportPath"]
+        if relative not in (f"writeups/{finding_id}.md", f"findings/{finding_id}/{finding_id}.md"):
+            raise EngineError("canonical_writeup_reference_invalid", "Writeup path does not match its finding ID.")
+        if relative in owners:
+            raise EngineError("canonical_writeup_reference_invalid", "Writeup paths must be unique per finding.")
+        owners[relative] = finding_id
+        referenced[finding_id] = relative
+    if (bundle.get("writeupPaths") or {}) != referenced:
+        raise EngineError("canonical_writeup_reference_invalid", "Durable and canonical writeup paths must match.")
+    paths = set(referenced.values())
     for relative in sorted(paths):
         path = artifact_dir / relative
         if _safe_relative(artifact_dir, path) != Path(relative).as_posix() or not path.is_file():
@@ -410,17 +581,13 @@ def prepare_finalization(workbench: Workbench, bundle: dict[str, Any]) -> dict[s
     validate_against_schema(documents["findings"], schemas / "findings.schema.json", "findings.json")
     if documents["coverage"].get("scanId") != scan_id or documents["findings"].get("scanId") != scan_id:
         raise EngineError("canonical_scan_mismatch", "Canonical document scanId does not match the active scan.")
-    for finding in documents["findings"].get("findings") or []:
-        for proof_name in ("validation", "attackPath"):
-            proof = finding.get(proof_name)
-            if isinstance(proof, dict) and proof.get("findingId") not in (None, finding.get("findingId")):
-                raise EngineError(
-                    "canonical_finding_identity_mismatch",
-                    f"{proof_name}.findingId does not match its canonical finding.",
-                )
+    _validate_finding_semantics(scan, documents["findings"], inventory_document)
+    _validate_durable_finding_projection(
+        workbench, scan, documents["findings"], bundle.get("writeupPaths") or {}
+    )
     _validate_writeup_artifacts(bundle, documents["findings"])
     _validate_coverage_semantics(workbench, scan, documents["coverage"], inventory_document)
-    _validate_auxiliary_documents(documents, scan_id)
+    _validate_auxiliary_documents(documents, scan_id, documents["findings"])
 
     preview_time = utc_now()
     preview_scan = {**scan, "status": "completed"}
@@ -450,7 +617,23 @@ def _projection_findings(findings_document: dict[str, Any]) -> list[dict[str, An
     return result
 
 
-def _project_report(scan: dict[str, Any], findings_document: dict[str, Any], coverage: dict[str, Any]) -> str:
+def _markdown_text(value: Any) -> str:
+    text = " ".join(value.split()) if isinstance(value, str) else ""
+    if re.match(r"^(?:#{1,6}\s|[-+*]\s|>\s|```|\d+\.\s|\|)", text):
+        text = f"Text: {text}"
+    return re.sub(r"([\\`*\[\]<>])", r"\\\1", text)
+
+
+def _report_values(label: str, values: list[Any]) -> list[str]:
+    rendered = [_markdown_text(value) for value in values]
+    rendered = [value for value in rendered if value]
+    return [f"**{label}:** {'; '.join(rendered)}", ""] if rendered else []
+
+
+def _project_report(
+    scan: dict[str, Any], findings_document: dict[str, Any], coverage: dict[str, Any],
+    threat_model: dict[str, Any] | None = None,
+) -> str:
     findings = _projection_findings(findings_document)
     reportable = [
         item
@@ -464,8 +647,8 @@ def _project_report(scan: dict[str, Any], findings_document: dict[str, Any], cov
         "",
         f"- Scan ID: `{scan['id']}`",
         f"- Mode: `{scan['mode']}`",
-        f"- Scope: `{scan['scope']}`",
-        f"- Revision: `{scan.get('target_revision') or 'filesystem snapshot'}`",
+        f"- Scope: {_markdown_text(scan['scope'])}",
+        f"- Revision: {_markdown_text(scan.get('target_revision') or 'filesystem snapshot')}",
         f"- Coverage: `{coverage['completeness']}` ({coverage['closedRowCount']}/{coverage['inScopeRowCount']} rows closed)",
         "",
         "## Executive summary",
@@ -480,22 +663,58 @@ def _project_report(scan: dict[str, Any], findings_document: dict[str, Any], cov
         lines.append(f"The canonical findings document contains {len(reportable)} reportable or review-required finding(s): {summary}.")
     else:
         lines.append("The canonical findings document contains no reportable findings. This does not prove the repository is vulnerability-free.")
-    lines.extend(["", "## Findings", ""])
+    lines.extend([
+        "", "## Threat model", "",
+        _markdown_text((threat_model or {}).get("summary")) or "No canonical threat-model summary was recorded.",
+        "", "**Structural hardening:** [Open portfolio](hardening/hardening.md)",
+        "", "## Findings", "",
+    ])
     for index, item in enumerate(reportable, start=1):
         sink = next((location for location in item.get("locations") or [] if location.get("role") == "sink"), None)
+        writeup = item.get("writeup") if isinstance(item.get("writeup"), dict) else {}
+        root_cause = item.get("rootCause")
+        root_cause_summary = root_cause.get("summary") if isinstance(root_cause, dict) else root_cause
+        validation = item.get("validation") if isinstance(item.get("validation"), dict) else {}
+        attack = item.get("attackPath") if isinstance(item.get("attackPath"), dict) else {}
+        details = []
+        if writeup.get("reportPath"):
+            details = [f"**Detailed writeup:** [Open report]({writeup['reportPath']})", ""]
+        else:
+            for label, value in (
+                ("Root cause", root_cause_summary), ("Validation", validation.get("rationale")),
+                ("Attack path", attack.get("narrative")), ("Impact", attack.get("impact")),
+                ("Residual uncertainty", attack.get("residualUncertainty")),
+                ("Severity rationale", (attack.get("severity") or {}).get("rationale")),
+            ):
+                if _markdown_text(value):
+                    details.extend([f"**{label}:** {_markdown_text(value)}", ""])
+            details.extend(_report_values("Validation evidence", [
+                f"{entry.get('path')}: {entry.get('result')}" for entry in validation.get("evidence") or []
+            ]))
+            for label, values in (
+                ("Counterevidence", validation.get("counterevidence") or []),
+                ("Cross-file trace", validation.get("crossFileTrace") or []),
+                ("Framework controls", validation.get("frameworkControls") or []),
+                ("Proof gaps", validation.get("proofGaps") or []),
+                ("Attack-path steps", [
+                    f"{entry.get('path')}: {entry.get('step')}" for entry in attack.get("crossFilePath") or []
+                ]),
+            ):
+                details.extend(_report_values(label, values))
         lines.extend(
             [
-                f"### {index}. {item['title']}",
+                f"### {index}. {_markdown_text(item['title'])}",
                 "",
                 f"- ID: `{item['findingId']}`",
                 f"- Severity: `{item['severity']['level']}`",
                 f"- Confidence: `{item['confidence']['level']}`",
                 f"- Validation: `{item.get('validationStatus')}`",
-                f"- Location: `{sink['path']}:{sink['startLine']}`" if sink else "- Location: unavailable",
+                f"- Location: {_markdown_text(sink['path'])}:{sink['startLine']}" if sink else "- Location: unavailable",
                 "",
-                item["summary"],
+                _markdown_text(item["summary"]),
                 "",
-                f"**Remediation:** {item['remediation']}",
+                *details,
+                f"**Remediation:** {_markdown_text(item['remediation'])}",
                 "",
             ]
         )
@@ -508,7 +727,7 @@ def _project_report(scan: dict[str, Any], findings_document: dict[str, Any], cov
         ]
     )
     for item in coverage.get("openQuestions") or []:
-        lines.append(f"- {item['question']}")
+        lines.append(f"- {_markdown_text(item['question'])}")
     lines.extend(
         [
             "",
@@ -608,7 +827,7 @@ def finalize_scan(workbench: Workbench, bundle: dict[str, Any]) -> list[dict[str
     # Projection boundary.  These bytes are reproducible from sealed canonical
     # JSON and never enter manifest.scan.artifacts.
     report_path = artifact_dir / ARTIFACT_KINDS["markdownReport"]
-    report_payload = _project_report(scan, findings_document, coverage) + "\n"
+    report_payload = _project_report(scan, findings_document, coverage, bundle.get("threatModel")) + "\n"
     hardening_path = artifact_dir / ARTIFACT_KINDS["hardening"]
     hardening = render_hardening_proposal(scan_id, _projection_findings(findings_document))
     hardening_payload = str(hardening["content"])

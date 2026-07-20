@@ -1229,13 +1229,67 @@ class Workbench:
             )
         return artifact_records
 
-    def upsert_finding(self, scan_id: str, candidate: dict[str, Any]) -> dict[str, Any]:
+    def upsert_finding(
+        self, scan_id: str, candidate: dict[str, Any], *, durable_deep_candidate: bool = False
+    ) -> dict[str, Any]:
         fingerprint = candidate["fingerprint"]
         finding_id = stable_id("kspf", fingerprint)
         occurrence_id = stable_id("occ", scan_id, finding_id)
         timestamp = utc_now()
         severity = candidate["severity"]
         confidence = candidate["confidence"]
+        evidence_rows = []
+        submitted_evidence_ids: dict[str, str] = {}
+        for index, evidence in enumerate(candidate.get("codeEvidence", [])):
+            evidence_id = stable_id("ev", occurrence_id, str(index), evidence["path"], str(evidence["startLine"]))
+            submitted_id = evidence.get("id")
+            if isinstance(submitted_id, str):
+                if not submitted_id or submitted_id in submitted_evidence_ids:
+                    raise EngineError(
+                        "candidate_evidence_reference_invalid",
+                        "Candidate code evidence IDs must be non-empty and unique.",
+                    )
+                submitted_evidence_ids[submitted_id] = evidence_id
+            evidence_rows.append((evidence, evidence_id))
+        details = dict(candidate.get("details") or {})
+        root_cause = details.get("rootCause")
+        if isinstance(root_cause, dict) and isinstance(root_cause.get("evidenceRefs"), list):
+            canonical_ids = {evidence_id for _, evidence_id in evidence_rows}
+            mapped_refs = []
+            unresolved_prior = False
+            for reference in root_cause["evidenceRefs"]:
+                if not isinstance(reference, str) or not reference:
+                    raise EngineError(
+                        "candidate_evidence_reference_invalid",
+                        "Root-cause evidence references must be non-empty strings.",
+                    )
+                mapped = submitted_evidence_ids.get(reference, reference if reference in canonical_ids else None)
+                if mapped is None:
+                    compatible_prior = not submitted_evidence_ids and (
+                        details.get("legacyContract") is True
+                        or candidate.get("sourceRefs") == []
+                        and details.get("discoveryEngine") == "kiro-agent-deep-orchestration"
+                        or durable_deep_candidate
+                        and isinstance(candidate.get("canonicalId"), str)
+                        and bool(candidate["canonicalId"])
+                        and details.get("discoveryEngine") == "kiro-agent-deep-orchestration"
+                    )
+                    if compatible_prior:
+                        details["rootCause"] = {
+                            key: value for key, value in root_cause.items() if key != "evidenceRefs"
+                        }
+                        details["rootCauseEvidenceStatus"] = (
+                            "legacy_unresolved" if details.get("legacyContract") is True else "prior_unresolved"
+                        )
+                        unresolved_prior = True
+                        break
+                    raise EngineError(
+                        "candidate_evidence_reference_invalid",
+                        "Root-cause evidence references must identify submitted code evidence.",
+                    )
+                mapped_refs.append(mapped)
+            if not unresolved_prior:
+                details["rootCause"] = {**root_cause, "evidenceRefs": mapped_refs}
         with self.transaction() as connection:
             connection.execute(
                 """
@@ -1272,7 +1326,7 @@ class Workbench:
                     occurrence_id, finding_id, scan_id, candidate["title"], candidate["summary"], severity["level"],
                     severity.get("score"), severity.get("rationale"), confidence["level"], confidence["rationale"],
                     candidate["taxonomy"]["category"], json.dumps(candidate["taxonomy"].get("cwe", [])),
-                    candidate["remediation"], json.dumps(candidate.get("details", {}), separators=(",", ":")),
+                    candidate["remediation"], json.dumps(details, separators=(",", ":")),
                     created_at, timestamp,
                 ),
             )
@@ -1289,8 +1343,7 @@ class Workbench:
                     ),
                 )
             connection.execute("DELETE FROM finding_evidence WHERE occurrence_id=?", (occurrence_id,))
-            for index, evidence in enumerate(candidate.get("codeEvidence", [])):
-                evidence_id = stable_id("ev", occurrence_id, str(index), evidence["path"], str(evidence["startLine"]))
+            for index, (evidence, evidence_id) in enumerate(evidence_rows):
                 connection.execute(
                     """
                     INSERT INTO finding_evidence(
@@ -1329,8 +1382,12 @@ class Workbench:
         finally:
             connection.close()
 
-    def list_findings(self, scan_id: str, *, search: str | None = None, limit: int = 500) -> list[dict[str, Any]]:
-        rows = self._base_finding_rows(scan_id, search=search)[: max(1, min(limit, 2000))]
+    def list_findings(
+        self, scan_id: str, *, search: str | None = None, limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        rows = self._base_finding_rows(scan_id, search=search)
+        if limit is not None:
+            rows = rows[: max(1, min(limit, 2000))]
         return [self._finding_summary(row) for row in rows]
 
     def _finding_summary(self, row: sqlite3.Row) -> dict[str, Any]:

@@ -274,7 +274,7 @@
         "kind": { "enum": ["validation", "attack_path", "writeup"] },
         "attempt": { "type": "integer", "minimum": 1 },
         "modelProfile": { "$ref": "#/$defs/modelProfile" },
-        "receiptDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+        "receiptDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
       }
     },
     "deepTailProvenance": {

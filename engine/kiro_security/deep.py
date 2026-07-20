@@ -1767,7 +1767,15 @@ class DeepCoordinator:
         root_cause = raw.get("rootCause") if raw.get("rootCause") is not None else raw_details.get("rootCause")
         source_to_sink = raw.get("sourceToSink") if raw.get("sourceToSink") is not None else raw_details.get("sourceToSink")
         boundary = source_to_sink if isinstance(source_to_sink, str) else None
-        security_path = root_cause if isinstance(root_cause, str) and root_cause.strip() else boundary
+        structured_root_cause = root_cause.get("summary") if isinstance(root_cause, dict) else None
+        if structured_root_cause is not None:
+            structured_root_cause = self._bounded(structured_root_cause, "rootCause.summary", 4000)
+            root_cause = {**root_cause, "summary": structured_root_cause}
+        security_path = (
+            root_cause if isinstance(root_cause, str) and root_cause.strip()
+            else structured_root_cause if isinstance(structured_root_cause, str) and structured_root_cause.strip()
+            else boundary
+        )
         if not isinstance(security_path, str) or not security_path.strip():
             raise EngineError(
                 "candidate_incomplete_security_path",
@@ -1798,6 +1806,7 @@ class DeepCoordinator:
                 "Every candidate must submit non-empty codeEvidence; the engine does not generate evidence snippets.",
             )
         evidence = []
+        evidence_ids: set[str] = set()
         roles: set[str] = set()
         for item in supplied_evidence:
             if not isinstance(item, dict):
@@ -1807,6 +1816,14 @@ class DeepCoordinator:
                 raise EngineError("candidate_path_outside_worklist", f"Candidate evidence path is not in the authoritative worklist: {path}")
             start, end = self._parse_lines(item.get("lines"), item.get("startLine"), item.get("endLine"))
             role = self._bounded(item.get("role"), "evidence.role", 100).lower()
+            submitted_id = self._bounded(item.get("id"), "evidence.id", 200) if item.get("id") is not None else None
+            if submitted_id is not None:
+                if submitted_id in evidence_ids:
+                    raise EngineError(
+                        "candidate_evidence_reference_invalid",
+                        "Candidate code evidence IDs must be unique.",
+                    )
+                evidence_ids.add(submitted_id)
             code = item.get("code") or item.get("snippet")
             if not isinstance(code, str) or not code.strip():
                 raise EngineError(
@@ -1824,6 +1841,7 @@ class DeepCoordinator:
             roles.add(role)
             evidence.append(
                 {
+                    **({"id": submitted_id} if submitted_id is not None else {}),
                     "kind": str(item.get("kind") or "code")[:100],
                     "label": str(item.get("label") or "Deep discovery evidence")[:500],
                     "path": path,
@@ -1835,6 +1853,17 @@ class DeepCoordinator:
                     "explanation": explanation[:4000],
                 }
             )
+        if isinstance(root_cause, dict) and "evidenceRefs" in root_cause:
+            references = root_cause["evidenceRefs"]
+            if (
+                not isinstance(references, list)
+                or any(not isinstance(reference, str) or not reference for reference in references)
+                or set(references) - evidence_ids
+            ):
+                raise EngineError(
+                    "candidate_evidence_reference_invalid",
+                    "Structured rootCause evidenceRefs must identify submitted codeEvidence IDs.",
+                )
         if not roles & _ORIGIN_EVIDENCE_ROLES:
             raise EngineError(
                 "candidate_incomplete_security_path",

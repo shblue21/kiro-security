@@ -436,7 +436,7 @@ class ScanRunner:
                 return False
             for candidate in canonical:
                 self._check(scan_id)
-                finding = self.workbench.upsert_finding(scan_id, candidate)
+                finding = self.workbench.upsert_finding(scan_id, candidate, durable_deep_candidate=True)
                 self._emit("finding.discovered", {"scanId": scan_id, "finding": finding})
             terminal_status = status.get("status", "saturated")
             self.workbench.update_progress(

@@ -11,10 +11,13 @@ from kiro_security.constants import ARTIFACT_KINDS, PHASES, PROTOCOL_VERSION
 from kiro_security.coverage import coverage_row_id
 from kiro_security.db import Workbench
 from kiro_security.errors import EngineError
-from kiro_security.finalizer import finalize_scan, prepare_finalization
-from kiro_security.reporting import build_findings_document, write_canonical_documents
+from kiro_security.finalizer import (
+    _project_report, _validate_auxiliary_documents, _validate_finding_semantics, _validate_writeup_artifacts,
+    finalize_scan, prepare_finalization,
+)
+from kiro_security.reporting import _write_writeups, build_findings_document, write_canonical_documents
 from kiro_security.schema_validation import validate_against_schema
-from kiro_security.security import sha256_file
+from kiro_security.security import sha256_file, stable_id, utc_now
 
 
 def _create_reporting_scan(workbench: Workbench) -> dict:
@@ -368,6 +371,100 @@ def test_invalid_findings_document_blocks_seal_and_preserves_partial_state(works
     assert not (artifact_dir / ARTIFACT_KINDS["hardening"]).exists()
 
 
+def test_canonical_documents_include_more_than_the_public_finding_page(workspace: Path) -> None:
+    workbench = Workbench(workspace)
+    scan = _create_reporting_scan(workbench)
+    for index in range(501):
+        workbench.upsert_finding(scan["id"], {
+            "fingerprint": f"kiro-security/v1:sha256:{index:064x}",
+            "ruleId": "test.rule", "identity": {"anchor": "test", "instance": f"sink-{index}"},
+            "title": f"Test finding {index:03d}", "summary": "Test summary.",
+            "severity": {"level": "medium", "score": None, "rationale": "Evidence-backed."},
+            "confidence": {"level": "high", "rationale": "Direct evidence."},
+            "taxonomy": {"category": "security", "cwe": []},
+            "locations": [{"path": "src/app.py", "startLine": 1, "endLine": 1, "role": "sink"}],
+            "codeEvidence": [{"path": "src/app.py", "startLine": 1, "endLine": 1, "role": "sink",
+                              "code": "sink(value)", "explanation": "Sink evidence."}],
+            "remediation": "Validate input.", "details": {},
+        })
+    artifact_dir = Path(scan["artifact_dir"])
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / ARTIFACT_KINDS["threatModel"]).write_text("# Threat model\n", encoding="utf-8")
+    bundle = write_canonical_documents(
+        workbench, scan["id"], _inventory(), {"summary": "Threat model."}, writeup_paths={},
+    )
+
+    assert len(workbench.list_findings(scan["id"], limit=500)) == 500
+    assert len(workbench.list_findings(scan["id"])) == 501
+    assert len(bundle["documents"]["findings"]["findings"]) == 501
+    prepare_finalization(workbench, bundle)
+
+
+def test_model_proof_must_match_durable_tail_result(workspace: Path) -> None:
+    workbench = Workbench(workspace)
+    scan = _create_reporting_scan(workbench)
+    workbench.set_capabilities(scan["id"], {"analysisProfile": "model"})
+    scan = workbench.get_scan(scan["id"])
+    fingerprint = "kiro-security/deep-v1:sha256:" + "a" * 64
+    finding_id = stable_id("kspf", fingerprint)
+    occurrence_id = stable_id("occ", scan["id"], finding_id)
+    receipt = "sha256:" + "b" * 64
+    profile = {
+        "modelId": "model", "agentType": "agent", "reasoningEffort": "high",
+        "hostVersion": "host", "delegationMode": "fresh", "contractVersion": "deep-worker/v2",
+    }
+    finding = workbench.upsert_finding(scan["id"], {
+        "fingerprint": fingerprint, "ruleId": "test.rule", "identity": {"anchor": "test", "instance": "sink"},
+        "title": "Test finding", "summary": "Test summary.",
+        "severity": {"level": "high", "score": None, "rationale": "Evidence-backed."},
+        "confidence": {"level": "high", "rationale": "Direct evidence."},
+        "taxonomy": {"category": "security", "cwe": []},
+        "locations": [{"path": "src/app.py", "startLine": 1, "endLine": 1, "role": "sink"}],
+        "codeEvidence": [{
+            "kind": "code", "label": "Sink", "path": "src/app.py", "startLine": 1, "endLine": 1,
+            "language": "python", "role": "sink", "code": "sink(value)", "explanation": "Sink evidence.",
+        }],
+        "remediation": "Validate input.",
+        "details": {"deepTailProvenance": {"validation": {
+            "assignmentId": "tail-validation", "kind": "validation", "attempt": 1,
+            "modelProfile": profile, "receiptDigest": receipt,
+        }}},
+    })
+    result = {
+        "findingId": finding_id, "status": "rejected", "method": "repository_test",
+        "rationale": "Durable proof.", "evidence": [{"path": "src/app.py", "result": "PASS"}],
+        "counterevidence": [], "crossFileTrace": [], "frameworkControls": ["Control blocks reachability."],
+        "proofGaps": [], "tests": [], "dynamicValidationUnavailableReason": None,
+    }
+    now = utc_now()
+    with workbench.transaction() as connection:
+        connection.execute("UPDATE finding_occurrences SET validation_status='rejected' WHERE id=?", (occurrence_id,))
+        connection.execute(
+            """
+            INSERT INTO deep_tail_assignments(
+                id, scan_id, kind, subject_id, status, attempt, model_id, payload_json,
+                result_json, receipt_digest, created_at, updated_at
+            ) VALUES ('tail-validation', ?, 'validation', ?, 'completed', 1, 'model', '{}', ?, ?, ?, ?)
+            """,
+            (scan["id"], occurrence_id, json.dumps(result, separators=(",", ":")), receipt, now, now),
+        )
+    artifact_dir = Path(scan["artifact_dir"])
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / ARTIFACT_KINDS["threatModel"]).write_text("# Threat model\n", encoding="utf-8")
+    bundle = write_canonical_documents(
+        workbench, scan["id"], _inventory(), {"summary": "Threat model."},
+        tail_results={"validation": {occurrence_id: result}, "attack_path": {}},
+    )
+    prepare_finalization(workbench, bundle)
+    findings_path = Path(bundle["paths"]["findings"])
+    document = json.loads(findings_path.read_text(encoding="utf-8"))
+    document["findings"][0]["validation"]["rationale"] = "Tampered proof."
+    findings_path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(EngineError) as error:
+        prepare_finalization(workbench, bundle)
+    assert error.value.code == "canonical_tail_result_mismatch"
+
+
 def test_canonical_schema_contract_rejects_malformed_mutations(workspace: Path) -> None:
     workbench = Workbench(workspace)
     scan = _create_reporting_scan(workbench)
@@ -403,6 +500,8 @@ def test_canonical_schema_contract_rejects_malformed_mutations(workspace: Path) 
         "attackPath": {"id": "path_" + "e" * 24, "narrative": "Source reaches sink.", "path": [], "exploitability": "high", "impact": "Impact.", "severityRationale": "High impact."},
     }
     standard = build_findings_document(scan["id"], [item], {finding_id: f"writeups/{finding_id}.md"})
+    assert isinstance(standard["findings"][0]["rootCause"], dict)
+    assert standard["findings"][0]["rootCause"]["summary"] == item["summary"]
     valid(standard, "findings.schema.json")
     valid(prepared["documents"]["findings"], "findings.schema.json")
 
@@ -426,7 +525,17 @@ def test_canonical_schema_contract_rejects_malformed_mutations(workspace: Path) 
     deep_item = {
         **item,
         "fingerprint": "kiro-security/deep-v1:sha256:" + "d" * 64,
-        "details": {"rootCause": explicit_root_cause},
+        "details": {
+            "discoveryEngine": "kiro-agent-deep-orchestration", "rootCause": explicit_root_cause,
+            "deepTailProvenance": {"validation": {
+                "assignmentId": "tail-validation", "kind": "validation", "attempt": 1,
+                "modelProfile": {
+                    "modelId": "model", "agentType": "agent", "reasoningEffort": "high",
+                    "hostVersion": "host", "delegationMode": "fresh", "contractVersion": "deep-worker/v2",
+                },
+                "receiptDigest": "sha256:" + "f" * 64,
+            }},
+        },
     }
     deep = build_findings_document(
         scan["id"], [deep_item], {finding_id: f"findings/{finding_id}/{finding_id}.md"},
@@ -434,12 +543,137 @@ def test_canonical_schema_contract_rejects_malformed_mutations(workspace: Path) 
     )
     assert deep["findings"][0]["rootCause"] == explicit_root_cause
     valid(deep, "findings.schema.json")
+    _validate_finding_semantics({"mode": "deep"}, deep, _inventory())
+    for model_scan, proof_name in (
+        ({"mode": "standard", "capabilities": {"analysisProfile": "model"}}, "validation"),
+        ({"mode": "diff", "capabilities": {"analysisProfile": "model"}}, "attackPath"),
+    ):
+        downgraded = deepcopy(deep)
+        downgraded["findings"][0][proof_name] = item[proof_name]
+        with pytest.raises(EngineError) as proof_error:
+            _validate_finding_semantics(model_scan, downgraded, _inventory())
+        assert proof_error.value.code == "canonical_deep_proof_incomplete"
+    status_mismatch = deepcopy(deep)
+    status_mismatch["findings"][0]["validation"]["status"] = "rejected"
+    status_mismatch["findings"][0]["attackPath"] = None
+    rejected_with_attack = deepcopy(deep)
+    rejected_with_attack["findings"][0]["validation"]["status"] = "rejected"
+    rejected_with_attack["findings"][0]["extensions"]["validationStatus"] = "rejected"
+    for mutation in (status_mismatch, rejected_with_attack):
+        with pytest.raises(EngineError) as status_error:
+            _validate_finding_semantics({"mode": "deep"}, mutation, _inventory())
+        assert status_error.value.code == "canonical_deep_proof_incomplete"
+    for proof_name, field in (("validation", "evidence"), ("attackPath", "crossFilePath")):
+        outside = deepcopy(deep)
+        outside["findings"][0][proof_name][field][0]["path"] = "outside.py"
+        with pytest.raises(EngineError) as path_error:
+            _validate_finding_semantics({"mode": "deep"}, outside, _inventory())
+        assert path_error.value.code == "canonical_proof_path_invalid"
     structured_root_cause = {"summary": explicit_root_cause, "evidenceRefs": ["evidence-1"]}
     structured = build_findings_document(
-        scan["id"], [{**deep_item, "details": {"rootCause": structured_root_cause}}]
+        scan["id"], [{**deep_item, "details": {"discoveryEngine": "kiro-agent-deep-orchestration", "rootCause": structured_root_cause}}]
     )
     assert structured["findings"][0]["rootCause"] == structured_root_cause
     valid(structured, "findings.schema.json")
+    _validate_finding_semantics({"mode": "standard"}, structured)
+    invalid_references = []
+    for refs in (["missing-evidence"], [""]):
+        mutation = deepcopy(structured)
+        mutation["findings"][0]["rootCause"]["evidenceRefs"] = refs
+        invalid_references.append(mutation)
+    duplicate_evidence = deepcopy(structured)
+    duplicate_evidence["findings"][0]["codeEvidence"].append(
+        deepcopy(duplicate_evidence["findings"][0]["codeEvidence"][0])
+    )
+    invalid_references.append(duplicate_evidence)
+    for mutation in invalid_references:
+        with pytest.raises(EngineError) as reference_error:
+            _validate_finding_semantics({"mode": "standard"}, mutation)
+        assert reference_error.value.code == "canonical_evidence_reference_invalid"
+    mapping_root = workspace / "evidence-mapping"
+    mapping_root.mkdir()
+    mapping_workbench = Workbench(mapping_root)
+    mapping_scan = _create_reporting_scan(mapping_workbench)
+    mapped_item = deepcopy(deep_item)
+    mapped_item["details"] = {"rootCause": structured_root_cause}
+    mapped_item["codeEvidence"][0]["id"] = "evidence-1"
+    mapped_finding = mapping_workbench.upsert_finding(mapping_scan["id"], mapped_item)
+    mapped_document = build_findings_document(mapping_scan["id"], [mapped_finding])
+    assert mapped_document["findings"][0]["rootCause"]["evidenceRefs"] == [
+        mapped_document["findings"][0]["codeEvidence"][0]["id"]
+    ]
+    prior_item = deepcopy(deep_item)
+    prior_item["fingerprint"] = "kiro-security/deep-v1:sha256:" + "e" * 64
+    prior_item["identity"] = {"anchor": "test", "instance": "prior-sink"}
+    prior_item["canonicalId"] = "deep-candidate_prior"
+    prior_item["sourceRefs"] = []
+    prior_item["details"] = {
+        "discoveryEngine": "kiro-agent-deep-orchestration", "rootCause": structured_root_cause,
+    }
+    prior_item["codeEvidence"][0].pop("id", None)
+    prior_finding = mapping_workbench.upsert_finding(mapping_scan["id"], prior_item)
+    assert prior_finding["details"]["rootCause"] == {"summary": explicit_root_cause}
+    assert prior_finding["details"]["rootCauseEvidenceStatus"] == "prior_unresolved"
+    terminal_item = deepcopy(prior_item)
+    terminal_item["fingerprint"] = "kiro-security/deep-v1:sha256:" + "d" * 64
+    terminal_item["identity"] = {"anchor": "test", "instance": "terminal-prior-sink"}
+    terminal_item["sourceRefs"] = ["r1-w1-c1"]
+    with pytest.raises(EngineError) as untrusted_terminal:
+        mapping_workbench.upsert_finding(mapping_scan["id"], terminal_item)
+    assert untrusted_terminal.value.code == "candidate_evidence_reference_invalid"
+    terminal_finding = mapping_workbench.upsert_finding(
+        mapping_scan["id"], terminal_item, durable_deep_candidate=True,
+    )
+    assert terminal_finding["details"]["rootCauseEvidenceStatus"] == "prior_unresolved"
+    for missing_root_cause in (None, {}):
+        source_to_sink_only = build_findings_document(scan["id"], [{
+            **deep_item,
+            "details": {
+                "discoveryEngine": "kiro-agent-deep-orchestration",
+                "rootCause": missing_root_cause,
+                "sourceToSink": "The submitted source reaches the sink without an intervening control.",
+            },
+        }])
+        assert "rootCause" not in source_to_sink_only["findings"][0]
+        valid(source_to_sink_only, "findings.schema.json")
+    report = _project_report(
+        {**scan, "mode": "deep"}, deep, prepared["documents"]["coverage"],
+        {"summary": "Canonical threat-model marker."},
+    )
+    assert f"](findings/{finding_id}/{finding_id}.md)" in report
+    assert "Canonical threat-model marker." in report
+    assert "hardening/hardening.md" in report
+    inline_deep = deepcopy(deep)
+    inline_deep["findings"][0].pop("writeup")
+    inline_report = _project_report({**scan, "mode": "deep"}, inline_deep, prepared["documents"]["coverage"])
+    assert explicit_root_cause in inline_report
+    assert deep_attack["narrative"] in inline_report
+    for proof in (
+        deep_validation["rationale"], deep_validation["crossFileTrace"][0],
+        deep_validation["frameworkControls"][0], deep_attack["impact"],
+        deep_attack["residualUncertainty"], deep_attack["severity"]["rationale"],
+    ):
+        assert proof in inline_report
+    injected = deepcopy(inline_deep)
+    injected["findings"][0]["summary"] = "# injected\n[link](javascript:alert(1))"
+    injected_report = _project_report({**scan, "mode": "deep"}, injected, prepared["documents"]["coverage"])
+    assert "\n# injected" not in injected_report
+    assert r"\[link\]" in injected_report
+    injected_scope = _project_report(
+        {**scan, "scope": "`\n# injected"}, {"findings": []}, prepared["documents"]["coverage"]
+    )
+    assert "\n# injected" not in injected_scope
+    unsafe_writeup_item = deepcopy(item)
+    unsafe_writeup_item["locations"][0]["path"] = "src/x` ![probe](https://example.invalid/collect)"
+    unsafe_writeups = _write_writeups(Path(prepared["artifactDir"]), [unsafe_writeup_item])
+    assert "![probe](https://example.invalid/collect)" not in (
+        Path(prepared["artifactDir"]) / unsafe_writeups[finding_id]
+    ).read_text(encoding="utf-8")
+    contradictory = deepcopy(prepared["documents"])
+    contradictory["validation"]["records"] = [{"findingId": "ghost"}]
+    with pytest.raises(EngineError) as projection_error:
+        _validate_auxiliary_documents(contradictory, scan["id"], contradictory["findings"])
+    assert projection_error.value.code == "canonical_projection_mismatch"
     findings_path = Path(prepared["paths"]["findings"])
     original_findings = findings_path.read_bytes()
     identity_mismatch = deepcopy(deep)
@@ -465,13 +699,42 @@ def test_canonical_schema_contract_rejects_malformed_mutations(workspace: Path) 
     writeup_path = Path(prepared["artifactDir"]) / writeup_relative
     writeup_path.parent.mkdir(parents=True, exist_ok=True)
     writeup_path.write_text("# Dedicated writeup\n", encoding="utf-8")
-    prepared["writeupPaths"] = {finding_id: writeup_relative}
-    prepared_with_writeup = prepare_finalization(workbench, prepared)
-    writeup_path.unlink()
+    duplicate_writeup = deepcopy(deep)
+    duplicate_finding = deepcopy(duplicate_writeup["findings"][0])
+    duplicate_finding["findingId"] = "kspf_" + "f" * 24
+    duplicate_writeup["findings"].append(duplicate_finding)
+    with pytest.raises(EngineError) as duplicate_writeup_error:
+        _validate_writeup_artifacts(
+            {"artifactDir": prepared["artifactDir"], "writeupPaths": {finding_id: writeup_relative}},
+            duplicate_writeup,
+        )
+    assert duplicate_writeup_error.value.code == "canonical_writeup_reference_invalid"
+    mapped_finding = mapping_workbench.save_validation(mapped_finding["occurrenceId"], {
+        "status": "validated", "method": "static_trace", "rationale": "Still present.", "evidence": [],
+    })
+    mapped_relative = f"findings/{mapped_finding['findingId']}/{mapped_finding['findingId']}.md"
+    mapped_writeup = Path(mapping_scan["artifact_dir"]) / mapped_relative
+    mapped_writeup.parent.mkdir(parents=True, exist_ok=True)
+    mapped_writeup.write_text("# Dedicated writeup\n", encoding="utf-8")
+    (Path(mapping_scan["artifact_dir"]) / ARTIFACT_KINDS["threatModel"]).write_text("# Threat model\n", encoding="utf-8")
+    mapped_bundle = write_canonical_documents(
+        mapping_workbench, mapping_scan["id"], _inventory(), {"summary": "Threat model."},
+        writeup_paths={mapped_finding["findingId"]: mapped_relative},
+    )
+    mapped_findings_path = Path(mapped_bundle["paths"]["findings"])
+    mapped_findings_document = json.loads(mapped_findings_path.read_text(encoding="utf-8"))
+    identity_drift = deepcopy(mapped_findings_document)
+    identity_drift["findings"][0]["findingId"] = "kspf_" + "0" * 24
+    mapped_findings_path.write_text(json.dumps(identity_drift), encoding="utf-8")
+    with pytest.raises(EngineError) as durable_identity_error:
+        prepare_finalization(mapping_workbench, mapped_bundle)
+    assert durable_identity_error.value.code == "canonical_finding_identity_mismatch"
+    mapped_findings_path.write_text(json.dumps(mapped_findings_document), encoding="utf-8")
+    prepared_with_writeup = prepare_finalization(mapping_workbench, mapped_bundle)
+    mapped_writeup.unlink()
     with pytest.raises(EngineError) as missing_writeup:
-        finalize_scan(workbench, prepared_with_writeup)
+        finalize_scan(mapping_workbench, prepared_with_writeup)
     assert missing_writeup.value.code == "artifact_missing"
-    prepared.pop("writeupPaths")
 
     for name, value in (("findingId", "bad"), ("occurrenceId", "bad")):
         mutation = deepcopy(standard)

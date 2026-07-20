@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,13 @@ def _finding_is_reportable(finding: dict[str, Any]) -> bool:
         "false_positive",
         "already_fixed",
     )
+
+
+def _markdown_text(value: Any) -> str:
+    text = " ".join(value.split()) if isinstance(value, str) else ""
+    if re.match(r"^(?:#{1,6}\s|[-+*]\s|>\s|```|\d+\.\s|\|)", text):
+        text = f"Text: {text}"
+    return re.sub(r"([\\`*\[\]<>])", r"\\\1", text)
 
 
 def _finding_references_for_path(
@@ -302,7 +310,7 @@ def build_findings_document(
         sink = next((location for location in locations if location.get("role") == "sink"), None)
         details = item.get("details") or {}
         root_cause = {
-            "summary": f"The {item['taxonomy']['category']} boundary does not establish a safe transition before the privileged sink.",
+            "summary": item["summary"],
             "evidenceRefs": [evidence["id"] for evidence in item.get("codeEvidence", [])],
         }
         provenance = {"source": "kiro_security_power", "engineVersion": __version__}
@@ -342,11 +350,21 @@ def build_findings_document(
             },
         }
         explicit_root_cause = details.get("rootCause")
-        if isinstance(explicit_root_cause, dict) or (
+        structured_root_cause = isinstance(explicit_root_cause, dict) and (
+            set(explicit_root_cause).issubset({"summary", "evidenceRefs"})
+            and isinstance(explicit_root_cause.get("summary"), str)
+            and bool(explicit_root_cause["summary"].strip())
+            and (
+                "evidenceRefs" not in explicit_root_cause
+                or isinstance(explicit_root_cause["evidenceRefs"], list)
+                and all(isinstance(reference, str) for reference in explicit_root_cause["evidenceRefs"])
+            )
+        )
+        if structured_root_cause or (
             isinstance(explicit_root_cause, str) and explicit_root_cause.strip()
         ):
             finding["rootCause"] = explicit_root_cause
-        elif details.get("legacyContract") is not True:
+        elif details.get("legacyContract") is not True and details.get("discoveryEngine") != "kiro-agent-deep-orchestration":
             finding["rootCause"] = root_cause
         if item["findingId"] in writeup_paths:
             finding["writeup"] = {"reportPath": writeup_paths[item["findingId"]]}
@@ -368,7 +386,7 @@ def _write_writeups(artifact_dir: Path, findings: list[dict[str, Any]]) -> dict[
         path = artifact_dir / relative
         locations = item.get("locations", [])
         lines = [
-            f"# {item['title']}",
+            f"# {_markdown_text(item['title'])}",
             "",
             f"- Finding ID: `{item['findingId']}`",
             f"- Severity: **{item['severity']['level']}**",
@@ -377,16 +395,19 @@ def _write_writeups(artifact_dir: Path, findings: list[dict[str, Any]]) -> dict[
             "",
             "## Summary",
             "",
-            item["summary"],
+            _markdown_text(item["summary"]),
             "",
             "## Evidence",
             "",
         ]
         for location in locations:
-            lines.append(f"- `{location['path']}:{location['startLine']}` ({location.get('role', 'evidence')})")
+            lines.append(
+                f"- {_markdown_text(location['path'])}:{location['startLine']} "
+                f"({_markdown_text(location.get('role', 'evidence'))})"
+            )
         if item.get("attackPath"):
-            lines.extend(["", "## Attack path", "", item["attackPath"]["narrative"], "", "## Impact", "", item["attackPath"]["impact"]])
-        lines.extend(["", "## Remediation", "", item["remediation"], "", "## Verification", "", item.get("validation", {}).get("rationale", "Targeted validation has not been run."), ""])
+            lines.extend(["", "## Attack path", "", _markdown_text(item["attackPath"]["narrative"]), "", "## Impact", "", _markdown_text(item["attackPath"]["impact"])])
+        lines.extend(["", "## Remediation", "", _markdown_text(item["remediation"]), "", "## Verification", "", _markdown_text(item.get("validation", {}).get("rationale", "Targeted validation has not been run.")), ""])
         atomic_write(path, "\n".join(lines))
         paths[item["findingId"]] = relative.as_posix()
     return paths

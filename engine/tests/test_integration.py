@@ -309,6 +309,15 @@ def test_deep_two_round_discovery_enforces_worker_merge_and_receipt_contracts(wo
                 {"path": candidate_path, "startLine": sink_line, "endLine": sink_line, "role": "sink", "code": source_lines[sink_line - 1].strip(), "explanation": "The value reaches a shell execution sink."},
             ],
         }
+        duplicate_evidence = json.loads(json.dumps(candidate))
+        duplicate_evidence["rootCause"] = {
+            "summary": candidate["rootCause"], "evidenceRefs": ["duplicate-evidence"],
+        }
+        for evidence in duplicate_evidence["codeEvidence"]:
+            evidence["id"] = "duplicate-evidence"
+        with pytest.raises(EngineError) as error:
+            submit(replacement, candidates=[duplicate_evidence])
+        assert error.value.code == "candidate_evidence_reference_invalid"
         submit(replacement, candidates=[candidate])
         for assignment in round_one[1:]:
             submit(assignment)

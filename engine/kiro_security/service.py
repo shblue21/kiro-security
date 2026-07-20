@@ -760,7 +760,7 @@ class SecurityService:
         scans = self.workbench.list_scans(int(params.get("limit") or 25))
         active = next((scan for scan in scans if scan["status"] in ("queued", "running")), None)
         selected = active or next((scan for scan in scans if scan["status"] == "completed"), scans[0] if scans else None)
-        findings = self.workbench.list_findings(selected["id"]) if selected else []
+        findings = self.workbench.list_findings(selected["id"], limit=500) if selected else []
         return {
             "workspace": self.workspace_record,
             "engine": self.capabilities(),
