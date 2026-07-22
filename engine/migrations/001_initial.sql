@@ -17,16 +17,14 @@ CREATE TABLE scans (
     diff_target_kind TEXT CHECK (diff_target_kind IN ('working_tree','commit','range')),
     diff_base_revision TEXT,
     diff_head_revision TEXT,
-    status TEXT NOT NULL CHECK (status IN ('queued','running','interrupted','completed','cancelled','failed')),
+    status TEXT NOT NULL CHECK (status IN ('running','completed','cancelled','failed')),
     phase TEXT NOT NULL CHECK (phase IN ('preflight','threat_model','discovery','validation','attack_path','reporting')),
     phase_index INTEGER NOT NULL DEFAULT 0 CHECK (phase_index BETWEEN 0 AND 5),
     artifact_dir TEXT NOT NULL UNIQUE,
+    target_identity TEXT,
     target_revision TEXT,
     snapshot_digest TEXT,
-    owner_session_id TEXT,
-    heartbeat_at TEXT,
     cancellation_requested INTEGER NOT NULL DEFAULT 0 CHECK (cancellation_requested IN (0,1)),
-    handoff_state TEXT NOT NULL DEFAULT 'none' CHECK (handoff_state IN ('none','available','claimed')),
     failure_code TEXT,
     failure_message TEXT,
     started_at TEXT,
@@ -42,7 +40,6 @@ CREATE TABLE scan_progress (
     review_items_total INTEGER NOT NULL DEFAULT 0 CHECK (review_items_total >= 0),
     review_items_completed INTEGER NOT NULL DEFAULT 0 CHECK (review_items_completed >= 0),
     reportable_findings_count INTEGER NOT NULL DEFAULT 0 CHECK (reportable_findings_count >= 0),
-    deep_review_pass INTEGER,
     message TEXT,
     updated_at TEXT NOT NULL
 );
@@ -101,9 +98,8 @@ CREATE TABLE finding_locations (
     UNIQUE(occurrence_id, sort_order)
 );
 
-CREATE UNIQUE INDEX scans_one_active_per_workspace
-ON scans(workspace_id)
-WHERE status IN ('queued','running');
-
 CREATE INDEX scans_by_workspace_updated ON scans(workspace_id, updated_at DESC);
+CREATE UNIQUE INDEX scans_one_running_per_workspace
+ON scans(workspace_id)
+WHERE status = 'running';
 CREATE INDEX occurrences_by_scan ON finding_occurrences(scan_id, severity, updated_at DESC);

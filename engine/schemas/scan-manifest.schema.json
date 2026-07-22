@@ -1,16 +1,23 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://kiro-security-power.invalid/schemas/scan-manifest.schema.json",
+  "$comment": "Direct port: upstream codex-security 0.1.11 schemas/scan-manifest.schema.json SHA-256 20d6801775ae1b056d10114c3af5e07c5edfef27468218611411231a95c7c55e; allowed Kiro product/document/snapshot naming only; no semantic changes.",
+  "$id": "https://kiro.dev/security-power/schemas/scan-manifest.schema.json",
   "title": "Kiro Security Power completed scan manifest",
   "type": "object",
-  "additionalProperties": false,
-  "required": ["documentType", "schemaVersion", "scan"],
+  "required": [
+    "documentType",
+    "schemaVersion",
+    "scan"
+  ],
   "properties": {
-    "documentType": { "const": "kiro-security-power.scan-manifest" },
-    "schemaVersion": { "const": "1.0" },
+    "documentType": {
+      "const": "kiro-security-power.scan-manifest"
+    },
+    "schemaVersion": {
+      "const": "1.0"
+    },
     "scan": {
       "type": "object",
-      "additionalProperties": false,
       "required": [
         "id",
         "producer",
@@ -20,140 +27,307 @@
         "sealedAt",
         "target",
         "scope",
-        "threatModel",
-        "hardening",
         "coverageRef",
         "findingsRef",
-        "artifacts",
-        "derivedArtifacts"
+        "artifacts"
       ],
       "properties": {
-        "id": { "type": "string", "pattern": "^scan_[a-f0-9]{24}$" },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
         "producer": {
           "type": "object",
-          "additionalProperties": false,
-          "required": ["name", "version"],
+          "required": [
+            "name",
+            "version"
+          ],
           "properties": {
-            "name": { "const": "kiro-security-power" },
-            "version": { "type": "string", "minLength": 1 }
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "version": {
+              "type": "string",
+              "minLength": 1
+            }
           }
         },
-        "status": { "const": "completed" },
-        "startedAt": { "type": "string", "format": "date-time" },
-        "completedAt": { "type": "string", "format": "date-time" },
-        "sealedAt": { "type": "string", "format": "date-time" },
+        "status": {
+          "const": "completed"
+        },
+        "startedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "completedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "sealedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
         "target": {
           "type": "object",
-          "additionalProperties": false,
-          "required": ["kind", "targetId", "displayName", "revision", "baseRevision", "headRevision", "snapshotDigest"],
+          "required": [
+            "kind",
+            "targetId",
+            "displayName"
+          ],
           "properties": {
-            "kind": { "enum": ["git_revision", "git_worktree", "git_diff", "directory_snapshot"] },
-            "targetId": { "type": "string", "minLength": 1 },
-            "displayName": { "type": "string", "minLength": 1 },
-            "revision": { "type": ["string", "null"] },
-            "baseRevision": { "type": ["string", "null"] },
-            "headRevision": { "type": ["string", "null"] },
-            "snapshotDigest": { "type": ["string", "null"] }
-          }
-        },
-        "scope": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["includePaths", "excludePaths", "summary", "artifactsReviewed", "runtimeStatus", "validationMode", "limitations"],
-          "properties": {
-            "includePaths": { "type": "array", "items": { "type": "string" } },
-            "excludePaths": { "type": "array", "items": { "type": "string" } },
-            "summary": { "type": "string", "minLength": 1 },
-            "artifactsReviewed": {
-              "type": "array",
-              "uniqueItems": true,
-              "items": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
-            },
-            "runtimeStatus": { "enum": ["static-only", "agent-assisted-static"] },
-            "validationMode": {
+            "kind": {
               "enum": [
-                "deterministic-static-analysis",
-                "deterministic-diff-static-analysis",
-                "agent-assisted-discovery+deterministic-static-validation",
-                "agent-assisted-discovery+model-validation"
+                "git_revision",
+                "git_worktree",
+                "git_diff",
+                "directory_snapshot"
               ]
             },
-            "limitations": { "type": "array", "items": { "type": "string" } }
-          }
-        },
-        "threatModel": {
-          "type": "object",
-          "additionalProperties": true,
-          "required": ["summary"]
-        },
-        "hardening": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["portfolioPath"],
-          "properties": {
-            "portfolioPath": { "const": "hardening/hardening.md" }
-          }
-        },
-        "coverageRef": { "const": "coverage.json" },
-        "findingsRef": { "const": "findings.json" },
-        "artifacts": {
-          "type": "array",
-          "minItems": 2,
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["path", "sha256", "mediaType", "role"],
-            "properties": {
-              "path": { "$ref": "#/$defs/safeRelativePath" },
-              "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
-              "mediaType": { "type": "string", "minLength": 1 },
-              "role": { "enum": ["canonical", "supporting"] }
+            "targetId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "displayName": {
+              "type": "string",
+              "minLength": 1
+            },
+            "remote": {
+              "type": "string",
+              "pattern": "^(?![^:/?#]+://[^/?#]*@)[^?#]+$"
+            },
+            "revision": {
+              "type": "string"
+            },
+            "baseRevision": {
+              "type": "string"
+            },
+            "headRevision": {
+              "type": "string"
+            },
+            "snapshotDigest": {
+              "type": "string",
+              "pattern": "^kiro-security-snapshot/v1:sha256:[a-f0-9]{64}$"
             }
           },
           "allOf": [
             {
-              "contains": {
-                "type": "object",
-                "properties": { "path": { "const": "coverage.json" } },
-                "required": ["path"]
+              "if": {
+                "properties": {
+                  "kind": {
+                    "const": "git_revision"
+                  }
+                }
               },
-              "minContains": 1,
-              "maxContains": 1
+              "then": {
+                "required": [
+                  "revision"
+                ]
+              }
             },
             {
-              "contains": {
-                "type": "object",
-                "properties": { "path": { "const": "findings.json" } },
-                "required": ["path"]
+              "if": {
+                "properties": {
+                  "kind": {
+                    "enum": [
+                      "git_worktree",
+                      "git_diff",
+                      "directory_snapshot"
+                    ]
+                  }
+                }
               },
-              "minContains": 1,
-              "maxContains": 1
+              "then": {
+                "required": [
+                  "snapshotDigest"
+                ]
+              }
             }
           ]
         },
-        "derivedArtifacts": {
+        "scope": {
+          "type": "object",
+          "required": [
+            "includePaths",
+            "excludePaths"
+          ],
+          "properties": {
+            "includePaths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "excludePaths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "summary": {
+              "type": "string",
+              "minLength": 1
+            },
+            "artifactsReviewed": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "runtimeStatus": {
+              "type": "string",
+              "minLength": 1
+            },
+            "validationMode": {
+              "type": "string",
+              "minLength": 1
+            },
+            "context": {
+              "type": "string",
+              "minLength": 1
+            },
+            "limitations": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "threatModel": {
+          "type": "object",
+          "required": [
+            "summary"
+          ],
+          "properties": {
+            "summary": {
+              "type": "string",
+              "minLength": 1
+            },
+            "assets": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "trustBoundaries": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "attackerCapabilities": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "securityObjectives": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "assumptions": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "hardening": {
+          "type": "object",
+          "required": [
+            "portfolioPath"
+          ],
+          "properties": {
+            "portfolioPath": {
+              "const": "hardening/hardening.md"
+            }
+          }
+        },
+        "coverageRef": {
+          "const": "coverage.json"
+        },
+        "findingsRef": {
+          "const": "findings.json"
+        },
+        "artifacts": {
           "type": "array",
+          "minItems": 1,
           "items": {
             "type": "object",
-            "additionalProperties": false,
-            "required": ["path", "mediaType", "generatedFrom"],
+            "required": [
+              "path",
+              "sha256",
+              "mediaType"
+            ],
             "properties": {
-              "path": { "$ref": "#/$defs/safeRelativePath" },
-              "mediaType": { "type": "string", "minLength": 1 },
-              "generatedFrom": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/safeRelativePath" } },
-              "findingId": { "type": "string", "pattern": "^kspf_[a-f0-9]{24}$" }
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$"
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              "mediaType": {
+                "type": "string",
+                "minLength": 1
+              }
             }
           }
         }
-      }
-    }
-  },
-  "$defs": {
-    "safeRelativePath": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 4096,
-      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)(?!.*\\x00).+$"
+      },
+      "allOf": [
+        {
+          "properties": {
+            "artifacts": {
+              "contains": {
+                "type": "object",
+                "required": [
+                  "path"
+                ],
+                "properties": {
+                  "path": {
+                    "const": "findings.json"
+                  }
+                }
+              },
+              "minContains": 1,
+              "maxContains": 1
+            }
+          }
+        },
+        {
+          "properties": {
+            "artifacts": {
+              "contains": {
+                "type": "object",
+                "required": [
+                  "path"
+                ],
+                "properties": {
+                  "path": {
+                    "const": "coverage.json"
+                  }
+                }
+              },
+              "minContains": 1,
+              "maxContains": 1
+            }
+          }
+        }
+      ]
     }
   }
 }

@@ -1,24 +1,507 @@
-# Deep security scan
+---
+name: deep-security-scan
+description: Use when the user explicitly requests a deep, exhaustive, multi-pass, or variance-reducing repository-wide or scoped-path Kiro Security Power scan. Run independent discovery rounds, coordinator-owned lossless merge and novelty comparison, then one canonical validation, attack-path, writeup, hardening, and finalization tail. Do not use for a Diff target.
+---
 
-Deep mode is an Agent-orchestrated repeated discovery workflow. It is not the Standard deterministic scanner with extra passes.
+# Deep Security Scan
 
-1. Start with `security_start_scan` using `mode: "deep"`, `analysisProfile: "model"`, the exact requested scope, the selected `modelId`, and the same truthful `deep-worker/v2` host-attested `runtime` profile that every worker claim will use. If the host cannot attest the required delegation capabilities, report the preflight error instead of starting Deep.
-2. Poll `security_deep_get_status`. When `nextAction` is `claim_worker`, claim all six independent discovery workers for the current round before any worker submits its first result.
-3. For each worker, call `security_deep_claim_worker` with:
-   - the same selected model identity for all six workers in a round;
-   - a fresh unique `delegationId`;
-   - a truthful host-attested `runtime` with `contractVersion: "deep-worker/v2"`, `agentType`, `reasoningEffort`, `hostVersion`, `delegationMode: "fresh"`, and `capabilities` (`delegatedAgentAvailable`, `freshContextMode`, `usableWorkerSlots >= 6`, `goalSupport`). These are host attestations, not engine-verified facts — never attest a capability the host does not actually have. Every worker in a round must share one identical `modelId`/`agentType`/`reasoningEffort`/`hostVersion`/`delegationMode` profile; the engine rejects mismatches.
-4. Pass the returned versioned `brief` unchanged as the fresh worker's complete semantic assignment, together with its security guidance and authoritative exhaustive worklist. Do not expose prior workers or merge output to the worker. Do not edit repository files.
-5. Each worker must independently generate a threat model, inspect every worklist row, and return exactly one row-level disposition receipt for every worklist row plus evidence-grounded candidates. Each receipt must use `reportable`, `suppressed`, `not_applicable`, or `deferred`, include a concrete reason, and link reportable rows to submitted candidate IDs. Candidate locations must use `{label, path, lines}`. Every candidate must submit non-empty `codeEvidence` with explicit roles covering at least one origin/control role (`source`, `entrypoint`, `root_control`, `authorization_boundary`, `broken_control`) and one sink/impact role (`sink`, `privileged_operation`, `impact`), each entry with the actual reviewed code excerpt and an explanation, plus `impact`, a root cause or source-to-sink explanation, explicit severity and confidence rationales, and remediation. The engine never fabricates evidence snippets on a worker's behalf.
-6. Submit each completed result with `security_deep_submit_worker_result`, including a truthful host `completionAttestation` (`freshContext: true`, `coordinatorHistoryInherited: false`, `workerState: "completed_idle"`). Include bounded `seedResearch` or `dedupeReport` text only when the worker actually produced it; normalized accepted candidates are projected deterministically as deduped candidates. Do not fabricate receipts, research, dedupe judgments, or attestations. Use `security_deep_retry_worker` only for an incomplete worker; completed worker artifacts are immutable.
-7. After all six workers complete, call `security_deep_claim_merge` and apply the returned versioned `mergeBrief` unchanged. Perform semantic merging neutrally:
-   - consume every current `sourceRef` exactly once;
-   - preserve every prior canonical candidate with its exact fingerprint and `(ruleId, anchor, instance)` identity — no drift, and never re-register a prior identity under a new canonical ID;
-   - merge only when one remediation closes every upstream candidate;
-   - keep independently reachable sibling instances separate;
-   - give every canonical candidate a concrete `mergeRationale`, `identityRationale`, and `remediationSubsumption`.
-8. Submit with `security_deep_submit_merge`. If novelty is non-zero, repeat with six fresh workers in the new round. Stop only when a complete round adds zero new canonical candidates, or when round 10 is explicitly capped.
-9. After saturation/cap, repeatedly claim `security_deep_get_tail_assignment` with the same truthful host profile. Pass `payload.assignmentContract.instruction` unchanged to the fresh worker, then submit its kind-specific structured result with `security_deep_submit_tail_result` plus the same model/runtime/delegation identity and completion attestation. The engine enforces canonical threat model → per-finding validation → eligible attack path → dedicated writeup → hardening ordering; do not substitute coordinator templates or invented proof.
-10. Use `security_deep_retry_writeup` only for the latest incomplete or failed writeup. Completed writeups and their receipts are immutable. When `nextAction` becomes `tail_complete`, poll `security_get_scan` for strict reporting/finalization, then read final evidence with `security_list_findings` and `security_get_finding`. Clearly report capped or deferred coverage.
+## Kiro chat-only scan start
 
-Never substitute Standard scan output when Deep orchestration cannot be completed. Report the orchestration limitation instead.
+Kiro starts Deep scans from chat only. Call `security_get_capabilities`, verify the live `invoke_sub_agent` tool supports `general-task-execution`, then call `security_start_scan` with `mode: "deep"`. Retain the one-time coordinator lease token and generation only in this top-level coordinator, following `POWER.md`; a busy lease makes the returned scan read-only until acquired. Immediately load `security_get_scan_context`. Treat its target, snapshot/revision, SECURITY.md guidance path, rank input, exhaustive deep-review input, artifact root, and canonical outputs as immutable.
+
+Inspect `otherRunningDeepScans` exactly once after this first context load. If another Deep scan is active, ask the user whether to Continue or Cancel before preflight, Goal adoption, worker creation, or source review. Do not repeat the gate later and do not let discovery workers perform it.
+
+Run the bundled Kiro preflight for `deep_security_scan` with verified Kiro runtime facts. It must confirm phase Skills, native delegation, nested delegation, and at least four runtime-observed usable worker slots. A documented or configured default does not satisfy the Deep capacity gate. There is no app setup flow, dashboard start flow, or fallback scanner. If the capability is unavailable, preserve the running scan and report the exact limitation.
+
+## Overview
+
+Deep Security Scan is a higher-recall wrapper around Kiro Security Power's repository-wide and scoped-path scan modes. It preserves the ordinary Kiro Security Power phase model and final report shape, but repeats the most variance-sensitive phase, finding discovery, before centralized judgment.
+
+The wrapper owns orchestration only:
+
+1. resolve one repository-wide or scoped-path scan target using Kiro Security Power's exhaustive-scan semantics
+2. run repeated independent discovery workers, each of which generates its own target-specific threat model before `$kiro-security-power:finding-discovery`
+3. semantically merge discovery outputs into one canonical candidate inventory
+4. synthesize one canonical validation threat model from the worker threat models after discovery reaches a terminal state
+5. run `$kiro-security-power:validation`, `$kiro-security-power:attack-path-analysis`, canonical JSON completion, and generated report finalization once
+
+Do not replace Kiro Security Power's established scan rules with custom shortcuts.
+
+## Required Capabilities
+
+Before substantive work, run the Kiro capability preflight described in `../references/config-preflight.md` for `deep_security_scan`. Continue only when it is ready. A blocked or incomplete result preserves the running scan for recovery; do not fabricate a worker result, reduce the required round size, or claim a Deep scan completed.
+
+Before starting substantive scan phases, confirm that the Kiro Security Power plugin skills needed by this workflow are available:
+
+- `$kiro-security-power:security-scan`
+- `$kiro-security-power:threat-model`
+- `$kiro-security-power:finding-discovery`
+- `$kiro-security-power:validation`
+- `$kiro-security-power:attack-path-analysis`
+
+If any required skill is unavailable, stop and say that this Kiro Security Power installation does not include the required scan skills. Do not silently degrade into a different workflow.
+
+This workflow also requires parallel delegated workers for repeated discovery. Treat explicit invocation of Deep Security Scan as the user's request for this delegated-worker workflow. If delegation is unavailable in the current environment, do not claim Deep Security Scan ran; explain the limitation and offer an ordinary Kiro Security Power scan as the fallback path.
+
+Invoke each delegated discovery worker through `invoke_sub_agent` with agent type `general-task-execution`. The canonical worker brief below is self-contained; do not rely on inherited coordinator history.
+
+## Goal Setup
+
+After the chat-only start has returned an authoritative `scanId`, its context is loaded, and preflight is ready, create or adopt one Kiro goal for the full Deep scan. Do not complete it until all rounds, candidate/coverage ledgers, centralized validation and attack-path closure, canonical JSON, writeups, hardening when applicable, and `security_complete_scan` have completed.
+
+Use objective wording shaped like:
+
+`Run the Kiro Security Power Deep Security Scan for <resolved repository target>; do not stop until the shared exhaustive worklists exist, discovery is saturated, capped, or on the first-round no-plausible-candidates path, canonical discovery artifacts and any candidate ledgers are assembled, centralized validation and attack-path receipts are complete or explicitly deferred when those phases are required, and the final markdown report is written.`
+
+If a compatible active goal already exists in the coordinator thread, continue under it instead of creating a duplicate. If goal tools are unavailable, state the same coverage objective in the first visible scan update and continue.
+
+Every delegated discovery worker must also create or adopt a worker-local Kiro goal before substantive worker discovery if the worker runtime exposes `/goal` or goal tools. Use objective wording shaped like:
+
+`Run Deep Security Scan discovery worker <round id>/<worker id> for <resolved repository target>; do not stop until the worker-specific threat model and discovery artifact set are written, every assigned shared worklist row has a worker-local completion receipt or explicit deferred closure, and the worker summary is returned to the coordinator.`
+
+If a compatible active goal already exists in the worker thread, continue under it instead of creating a duplicate. If goal tools are unavailable inside the worker, the worker must state the same objective in its first visible update and continue.
+
+Worker goals are discovery-worker scoped only. A worker must not mark its worker-local goal complete until its threat model, discovery report, repository-wide ledgers, candidate ledgers, and coordinator-facing summary are saved or returned for the assigned worker artifact paths. The coordinator owns the top-level Deep Security Scan goal and must not mark it complete until:
+
+- the shared `rank_input.jsonl` and exhaustive `deep_review_input.jsonl` exist at the standard discovery paths
+- every completed round has exactly four usable worker outputs, all workers idle, merge records, candidate inventories, and novelty comparison artifacts
+- the discovery loop has a recorded terminal state of `saturated` or `capped`
+- the canonical merged discovery report, deduped candidates, repository coverage ledger, and per-candidate ledgers are aligned
+- for scans that enter the centralized tail, centralized validation and attack-path analysis have written required receipts or explicit deferred reasons for every canonical candidate or closure row that requires them
+- the final markdown report has been written to the resolved final scan path
+
+## User-Facing Contract
+
+- The final answer should feel like an ordinary Kiro Security Power result.
+- Do not expose discovery rounds, recurrence counts, worker-by-worker results, or merge bookkeeping in the final report unless the user explicitly asks.
+- Preserve Kiro Security Power's normal canonical JSON, generated-report, and review-directive contract by using `../references/final-report.md`.
+- Keep intermediate artifacts for auditability, but do not dump them into the user-facing result.
+
+## Non-Negotiable Orchestration Invariants
+
+These invariants are part of the workflow contract. Do not relax, reinterpret, or replace them with coordinator improvisation.
+
+- exactly `4` usable discovery workers per completed round
+- the same canonical discovery brief for every worker, except for mechanical substitutions such as target metadata, round id, worker id, and worker-specific artifact paths
+- no themed lanes, candidate-family hints, prior-round novelty hints, or coordinator-added framing around worker prompts
+- no shared pre-discovery threat model; each worker must generate and use its own worker-specific threat model for the resolved target
+- the coordinator must create one shared authoritative `<discovery_dir>/rank_input.jsonl` plus one exhaustive shared `<discovery_dir>/deep_review_input.jsonl` before the first discovery round, and every discovery worker must consume that same shared worklist pair without regenerating, reranking, or overwriting it
+- collect all round outputs before merge
+- wait for every worker in the round to complete and become idle before any later round is spawned
+- merge only preserved artifacts from completed workers, never live worker state
+- during an active discovery round, the coordinator is orchestration-only: it may resolve paths, create shared worklists, monitor worker progress, verify artifact existence, and check parseability or schema conformance, but it must not perform repository-specific security discovery, sink hunting, candidate generation, or validation prep grounded in target code
+- before all four workers in a round have completed and become idle, the coordinator may inspect worker artifacts only for existence, completeness, parseability, and schema conformance; it must not read substantive candidate content or infer emerging vulnerability families from partial-round outputs
+- the canonical candidate inventory, novelty comparison, and semantic merge may be derived only from preserved completed worker artifacts collected after a round closes; coordinator-originated repo analysis, side notes, or pre-merge hypotheses are not discovery inputs
+- merge candidates only when the merged candidate's remediation would remediate every upstream candidate being merged; if fixing the merged issue would leave any upstream issue independently exploitable, independently reportable, or otherwise materially unresolved, keep them separate
+- maintain Kiro Security Power's standard `finding_discovery_report.md` candidate shape through every merge pass; the merged report is the canonical candidate inventory, not a later summary derived from some other inventory
+- every canonical merged candidate must remain present in the merged discovery report passed to validation unless validation itself later rejects it; no candidate may disappear during artifact synthesis or support-artifact consolidation
+- every canonical merged candidate must have a standard canonical `findings/<candidate_id>/candidate_ledger.jsonl` record that names the absorbed worker candidates and ledgers it subsumes before centralized validation begins
+- do not spawn a later round until the prior round has fully completed its output collection, worker idle transition, merge, and novelty comparison
+- stop only after a fully completed round produces zero new canonical merged discovery candidates
+- an incomplete round, failed spawn, or partial merge is never evidence of saturation
+- if the initial worker spawn batch fails before any worker has started because the host cannot resolve the current sender thread, treat that as a transient orchestration failure and retry the full round cleanly rather than treating it as worker failure or partial progress
+
+## Shared Setup
+
+Start this workflow only after the chat-only start loaded the authoritative scan context and the `deep_security_scan` capability preflight returned `ready`.
+
+1. Read `$kiro-security-power:security-scan` first and follow its repository-wide or scoped-path scan semantics exactly.
+2. Resolve one target once: either the full checked-out repository or a user-specified path, package, folder, or submodule-like scope within it. Deep Security Scan does not support PR diffs, commits, branch diffs, or working-tree diffs; direct those requests to ordinary `$kiro-security-power:security-diff-scan`. Never silently widen a scoped-path target to the repository root.
+3. Create or adopt the coordinator scan goal described in `Goal Setup` for that active scan context.
+4. Resolve the ordinary Kiro Security Power scan paths once using its shared artifact-path rules:
+   - `repo_name`
+   - `security_scans_dir`
+   - `scan_id`
+   - `scan_dir`
+   - `artifacts_dir`
+   - `context_dir`
+   - `discovery_dir`
+   - `coverage_dir`
+   - `reconciliation_dir`
+   - `findings_dir`
+5. Read `../references/security-guidance.md` and compile the resolved scan target's policy to `<context_dir>/security_guidance.md` before creating discovery workers. Each worker reads that file before threat modeling or source review.
+6. Do not generate a shared pre-discovery threat model in the coordinator.
+7. Reserve Kiro Security Power's standard per-scan `<context_dir>/threat_model.md` path for the later canonical validation threat model that will be synthesized only after the discovery loop reaches a terminal state.
+8. Create the fixed parent-provided coverage scope before any discovery worker starts:
+   - use the immutable Engine-generated `<discovery_dir>/rank_input.jsonl`, or the direct `kiro_security.codex_contract.generate_rank_input` helper only when the Engine explicitly delegates its creation
+   - use the repository root as `<scope>` for a repository-wide target and the exact resolved relative or absolute scoped path for a scoped-path target
+   - treat Deep Security Scan as exhaustive for this version: use the direct helper to copy `rank_input.jsonl` to `deep_review_input.jsonl` and declare that worklist pair authoritative and exhaustive for every worker
+   - do not create or require `rank_output.jsonl`; Deep Security Scan does not use ranked truncation in this version
+   - every worker must consume those shared standard-path worklists as parent-provided inputs while writing its own worker-local ledgers, candidates, coverage ledger, and discovery report
+
+Do not let individual discovery workers reinterpret or widen the scan target, but do let them independently generate their own target-specific threat models at worker-specific paths before discovery begins.
+
+## Deep Discovery Loop
+
+Run discovery in synchronous rounds:
+
+- `4` independent discovery workers per round
+- maximum `5` rounds total
+- stop after the first full round that adds no new canonical merged discovery candidates of any kind
+
+For a chat-started scan with a `scanId`, update Kiro Security Power progress at the start of each round and as that round's file-review receipts close. Progress is lifecycle-only and must not carry discovery results.
+
+Always run at least one round.
+
+After each round:
+
+1. collect that round's discovery outputs
+2. confirm every completed discovery worker from that round is idle after its artifacts and summary have been collected
+3. merge the completed round's outputs with every prior round's discovery outputs
+4. update the canonical candidate inventory
+5. compare the canonical inventory against the previous round's canonical inventory
+6. stop if no new canonical candidate clusters of any kind were added
+
+Do not reuse completed discovery workers across rounds. Later rounds should consume only the preserved artifacts, not prior worker state. Before spawning any later round, confirm that every worker from the prior round has completed and become idle; do not interrupt an already completed worker.
+
+While a discovery round is active, keep the coordinator neutral. It may perform orchestration bookkeeping and artifact-health checks, but it must not run its own target-specific discovery lane, form candidate hypotheses, queue likely finding families, or do repository-grounded validation preparation before the round closes.
+
+This stop rule measures discovery saturation only. It does not claim that validated findings or final reportable findings have saturated; validation, canonical JSON completion, and report projection still happen once after the discovery loop completes.
+
+If the first round finds no plausible candidates, write the appropriate canonical no-findings discovery artifact and continue directly to the final Kiro Security Power no-findings assembly path.
+
+### Required Round-Transition Checklist
+
+Execute this checklist in order for every completed round. Do not skip steps.
+
+1. confirm the round has exactly four usable completed discovery workers
+2. confirm every worker artifact needed for this scan type has been collected under its worker-specific path
+3. confirm all four completed workers from the round are idle
+4. confirm no worker from that round remains running
+5. merge the round's preserved artifacts with prior preserved artifacts into Kiro Security Power's standard discovery-report shape
+6. write the merge record, the round-specific candidate inventory, and the canonical merged `finding_discovery_report.md`
+7. compute novelty against the prior canonical candidate inventory
+8. choose exactly one next action:
+   - stop, only if the completed round added zero new canonical clusters of any kind
+   - spawn the next four-worker round, only after every prior checklist step is complete
+
+## Worker Isolation
+
+Each discovery worker must be independent:
+
+- same resolved scan target
+- its own worker-local Kiro goal when the worker runtime exposes `/goal` or goal tools
+- its own independently generated threat model for the resolved target written to its worker-specific artifact path
+- same Kiro Security Power discovery rules
+- same canonical worker brief except for mechanical substitutions such as target metadata, round id, worker id, and output paths
+- the same parent-provided authoritative `<discovery_dir>/rank_input.jsonl` and exhaustive `<discovery_dir>/deep_review_input.jsonl` inputs
+- no access to prior workers' findings or merge outputs
+- no top-level `$kiro-security-power:validation`, no top-level `$kiro-security-power:attack-path-analysis`, and no canonical finalization
+- no file edits
+
+The goal is not shallow parallelism; the goal is independent high-quality discovery diversity from repeated same-brief stochastic passes.
+
+## Discovery Worker Brief
+
+Use this canonical brief for every discovery worker. Do not prepend or append extra coordinator prose, skill-path boilerplate, themed emphasis, candidate-family hints, prior-round novelty hints, or coordinator-invented specialty lanes. Only substitute the resolved target details, round id, worker id, and worker-specific output paths required for the run.
+
+```text
+You are a discovery worker, not the top-level scan coordinator. Follow this self-contained worker-specific assignment as your task. If you cannot complete it, report the problem to the coordinator rather than taking over or terminating the overall scan.
+
+Run the Kiro Security Power threat-model phase and then the finding-discovery phase only.
+
+Before substantive worker work, create or adopt one worker-local Kiro goal if your runtime exposes `/goal` or goal tools. Use this objective:
+`Run Deep Security Scan discovery worker <round id>/<worker id> for <resolved repository target>; do not stop until the worker-specific threat model and discovery artifact set are written, every assigned shared worklist row has a worker-local completion receipt or explicit deferred closure, and the worker summary is returned to the coordinator.`
+
+If a compatible active goal already exists in this worker thread, continue under it instead of creating a duplicate. If goal tools are unavailable, state the same objective in your first visible update and continue. Do not mark the worker-local goal complete until the threat model, finding discovery report, repository-wide ledgers, candidate ledgers, and coordinator-facing summary for your assigned artifact paths are saved or returned.
+
+Use the provided resolved scan target exactly as given.
+Before generating your threat model or inspecting source code, read `<context_dir>/security_guidance.md` in full.
+First generate your own threat model for that resolved target using the ordinary `$kiro-security-power:threat-model` rules, but write it only to your worker-specific threat-model output path. Do not read, reuse, overwrite, or infer a shared coordinator threat model.
+Then run `$kiro-security-power:finding-discovery` using your own worker-specific target threat model as the threat-model source of truth.
+Do not reinterpret the target, run the top-level `$kiro-security-power:validation` phase, run the top-level `$kiro-security-power:attack-path-analysis` phase, author canonical final artifacts, or edit repository files.
+
+Your task is to enumerate technically plausible, distinct security finding candidates as comprehensively as possible for this scope.
+
+Apply the ordinary `$kiro-security-power:finding-discovery` rules in full:
+- stay grounded in the code and your worker-specific threat model
+- preserve separate root causes rather than cosmetic variants
+- keep independently reachable instances separate
+- preserve concrete source, closest-control, sink, impact, and affected-location evidence
+- consume the parent-provided authoritative `<discovery_dir>/rank_input.jsonl` and exhaustive `<discovery_dir>/deep_review_input.jsonl` exactly as supplied; do not regenerate, rerank, overwrite, or reinterpret them
+- treat those standard-path worklists as shared inputs while writing every worker output only to the explicit worker-specific artifact paths supplied for this discovery pass
+- for repository-wide and scoped-path scans, perform the normal Kiro Security Power exhaustive deep-review, seed-research, work-ledger, raw-candidate, candidate-ledger, dedupe, repository-coverage-ledger, and frontier-pass work required by finding discovery
+- for repository-wide and scoped-path scans, preserve any candidate-local validation evidence and candidate-local attack-path facts that the current Kiro Security Power discovery workflow requires before dedupe; those receipts are discovery support artifacts, not permission to run the later centralized top-level phases
+- for repository-wide and scoped-path worker candidate JSONL, use one canonical machine-readable affected-location shape only:
+  - `affected_locations` must be an array of objects
+  - every object must contain `label`, `path`, and `lines`
+  - `detail` may be included when it materially helps later merge or validation
+  - use `lines` as a string even for one line, such as `"154"`
+  - do not emit string-only locations such as `"src/file.py:154"`, alternate `file` or `line` keys, or separate-only `source_locations` / `root_locations` / `sink_locations` fields without also materializing the unified `affected_locations` array
+
+Return your worker-specific threat model plus the normal discovery artifact set for your worker-specific artifact paths, with enough detail for later centralized semantic merging and validation.
+```
+
+## Worker Artifact Layout
+
+Keep the canonical Kiro Security Power scan paths for the final merged pipeline. Put repeated discovery worker artifacts under the canonical `artifacts_dir` without overwriting one another:
+
+```text
+<artifacts_dir>/
+  02_discovery/
+    rank_input.jsonl
+    deep_review_input.jsonl
+  deep_discovery/
+    round-01/
+      worker-01/
+        threat_model.md
+        finding_discovery_report.md
+        seed_research.md
+        work_ledger.jsonl
+        raw_candidates.jsonl
+        dedupe_report.md
+        deduped_candidates.jsonl
+        repository_coverage_ledger.md
+        findings/
+          <candidate_id>/
+            candidate_ledger.jsonl
+      worker-02/
+        ...
+    round-02/
+      ...
+```
+
+Workers write their worker-local exhaustive discovery artifact set to their assigned paths while sharing only the standard-path `<discovery_dir>/rank_input.jsonl` and exhaustive `<discovery_dir>/deep_review_input.jsonl`.
+
+Give each worker explicit worker-specific output paths so the discovery reports and exhaustive-scan ledgers do not overwrite one another.
+
+For repository-wide and scoped-path workers, the machine-readable candidate streams must use this canonical affected-location contract in both `raw_candidates.jsonl` and `deduped_candidates.jsonl`:
+
+```json
+{
+  "affected_locations": [
+    {
+      "label": "root_control",
+      "path": "src/example.py",
+      "lines": "154",
+      "detail": "Optional concise reason this location matters"
+    }
+  ]
+}
+```
+
+Treat this as a schema contract, not presentation guidance:
+
+- `affected_locations` is always an array of objects
+- `label`, `path`, and `lines` are required on every item
+- `detail` is optional
+- `lines` is always a string, including single-line locations
+- do not substitute string-only locations, `file`, `line`, or parallel source/root/sink-only arrays in place of the canonical array
+
+## Semantic Merge After Each Round
+
+Merge at the level of the underlying actionable candidate, not at the level of title similarity.
+
+Treat two candidates as the same cluster only when a careful security reviewer would consider them the same underlying issue, or when one is a narrower or more specific restatement of the other and keeping both would double-count the same candidate.
+
+Do not merge merely because candidates:
+
+- mention the same subsystem
+- share a broad CWE or vulnerability family
+- involve the same route family, file family, or helper family
+- reuse similar attack language
+- have overlapping but materially different exploit paths, broken controls, or affected instances
+
+Remediation-subsumption is required for merge eligibility:
+
+- a merge is valid only when fixing the merged candidate would also fix every upstream candidate being merged
+- a merge is invalid when any upstream source/control/sink/impact tuple would remain materially unresolved after the proposed merged fix
+- related findings may be cross-referenced or grouped thematically later, but they must remain separate canonical candidates unless they share remediation closure
+- example: an authentication bypass and an unsafe path-construction or file-impact bug remain separate if the auth fix does not eliminate the file-impact issue and the file-impact fix does not eliminate the auth bypass
+
+When candidates truly merge:
+
+- keep the strongest title or synthesize a better one
+- preserve complementary evidence from every merged member
+- preserve distinct affected locations that are part of the same proof tuple
+- preserve source/control/sink distinctions that make the claim legible
+- keep uncertainty explicit rather than inflating confidence
+- produce one stronger canonical candidate than any single member when possible
+
+Use a preserving merge, not a lossy summary:
+
+- the merged candidate should retain any materially useful non-redundant detail from each upstream candidate, including narrower exploit framings, affected subpaths, meaningful preconditions, distinct source/control/sink nuances, and remediation-relevant subcases
+- do not reduce dimensionality merely because the topline title becomes broader; if an upstream framing helps validation, advisory/CVE matching, or the later final report, keep that detail visible inside the merged candidate
+- synthesize the upstream evidence into one coherent candidate rather than concatenating raw worker prose
+- omit only detail that is genuinely duplicative, superseded by a more precise shared framing, or irrelevant after the remediation-subsumption test
+- when useful, make the merged candidate explicit that the broader root issue also includes narrower implicated behaviors or subcases inherited from the upstream candidates
+
+When candidates overlap but remain materially distinct, keep them separate.
+
+## Canonical Discovery Outputs
+
+After each merge pass, retain:
+
+- a merge record showing which worker candidates were grouped
+- the current canonical candidate inventory
+- the canonical merged `finding_discovery_report.md` in Kiro Security Power's normal discovery-report shape
+- the novelty comparison against the previous canonical inventory
+- the canonical merged candidate set at Kiro Security Power's standard `<reconciliation_dir>/deduped_candidates.jsonl` path
+- a canonical dedupe report at Kiro Security Power's standard `<reconciliation_dir>/dedupe_report.md` path
+- one standard canonical `<findings_dir>/<candidate_id>/candidate_ledger.jsonl` per merged candidate, recording the discovery provenance, absorbed worker candidate ids, and absorbed worker-ledger paths that justify that canonical candidate
+- per-candidate internal provenance:
+  - first-seen round
+  - contributing workers and source candidate ids
+  - later rounds that repeated the same canonical candidate
+  - whether later evidence strengthened, narrowed, contradicted, or merely repeated the canonical candidate
+
+Suggested placement:
+
+```text
+<artifacts_dir>/deep_merge/
+  round-01_merge_record.md
+  round-01_candidate_inventory.md
+  round-02_merge_record.md
+  round-02_candidate_inventory.md
+  canonical_candidate_inventory.md
+```
+
+Also write and continuously update the canonical merged discovery report at Kiro Security Power's standard final discovery path:
+
+```text
+<discovery_dir>/finding_discovery_report.md
+```
+
+This report is not a selective promotion list, triage summary, or second consolidation layer. It is the lossless canonical merged candidate set in the same artifact shape that ordinary `$kiro-security-power:finding-discovery` would hand to validation.
+
+Validation and later phases must consume this canonical merged discovery report, not the raw per-worker discovery outputs and not a hand-pruned rewrite of the merged set.
+
+Invariant:
+
+- every candidate present in `canonical_candidate_inventory.md` must also appear substantively in `finding_discovery_report.md`
+- every candidate present in `canonical_candidate_inventory.md` must also appear in `<reconciliation_dir>/deduped_candidates.jsonl` and have a canonical `<findings_dir>/<candidate_id>/candidate_ledger.jsonl`
+- `finding_discovery_report.md` may improve wording, synthesize complementary evidence, and normalize candidate formatting, but it may not drop, suppress, or silently collapse a canonical candidate
+- a canonical merged candidate ledger may consolidate worker provenance, but it may not erase the absorbed worker candidate ids, worker-ledger references, or remediation-subsumption decision that explains why the canonical candidate exists
+- if the merge layer determines that a prior candidate was semantically subsumed, that merge must already be represented in the canonical merge artifacts; it may not be re-decided during final discovery-report assembly
+
+## Exhaustive Scan Support Artifact Assembly
+
+For repository-wide and scoped-path scans, assemble the worker discovery support artifacts into canonical artifacts before validation. This is exhaustive-scan workflow plumbing for Kiro Security Power's normal downstream phases, not a second semantic merge, candidate triage layer, or reportability filter.
+
+- `<discovery_dir>/rank_input.jsonl`
+  - preserve the shared parent-provided deterministic in-scope source inventory without worker rewrite
+- `<discovery_dir>/deep_review_input.jsonl`
+  - preserve the shared parent-provided exhaustive review scope without worker rewrite
+- `<context_dir>/seed_research.md`
+  - merge authoritative sources searched, candidate anchors, and failed lookup attempts when seed research applies
+- `<discovery_dir>/work_ledger.jsonl`
+  - aggregate worker file-review receipts conservatively while preserving worker provenance; do not claim a file was reviewed without an actual worker receipt
+- `<discovery_dir>/raw_candidates.jsonl`
+  - aggregate worker-local raw candidate objects with round, worker, and source-candidate provenance intact
+- `<reconciliation_dir>/dedupe_report.md`
+  - record the canonical Deep Security Scan dedupe outcome in Kiro Security Power's standard reconciliation location
+- `<reconciliation_dir>/deduped_candidates.jsonl`
+  - write the Deep Security Scan canonical merged candidate set in Kiro Security Power's standard post-dedupe location
+- `<findings_dir>/<candidate_id>/candidate_ledger.jsonl`
+  - write one canonical merged ledger per canonical candidate, preserving absorbed worker candidate ids and worker-ledger references so later centralized phases can append validation and attack-path receipts to the canonical record
+- `<coverage_dir>/repository_coverage_ledger.md`
+  - merge semantically equivalent ledger rows conservatively
+  - preserve distinct shards and families separately
+  - if worker dispositions disagree, keep the more conservative unresolved or open state for centralized validation to settle
+
+Write the canonical consolidated versions back to the numbered standard paths above so `$kiro-security-power:validation` receives the normal exhaustive-scan inputs it expects.
+
+These support-artifact assemblies are mechanical context assembly only:
+
+- they may union, deduplicate, normalize, and conservatively reconcile support-state metadata
+- they may preserve open or unresolved coverage rows for validation to settle
+- they must not add a second candidate-selection stage
+- they must not suppress, downgrade, or silently omit candidates from the canonical merged `finding_discovery_report.md`
+- they must not treat a support-ledger omission or weaker worker disposition as permission to remove a canonical discovery candidate
+- if the assembled exhaustive-scan support artifacts conflict with the canonical merged `finding_discovery_report.md`, treat that as a consistency problem to repair before validation, not as authority to drop the candidate
+
+## Centralized Tail
+
+Enter the centralized tail only after the discovery loop has a recorded terminal state:
+
+- **saturated**: a fully completed round added zero new canonical clusters of any kind
+- **capped**: the maximum round count was reached while novelty was still appearing
+
+It is not valid to continue into validation, attack-path analysis, or canonical finalization merely because:
+
+- the first round produced a strong-looking candidate set
+- the coordinator believes the merged inventory is "good enough"
+- validation work has already started opportunistically
+- the final report would be useful even without a terminal discovery-loop state
+
+Before the centralized tail begins, ensure the discovery artifacts contain the terminal evidence needed to justify it:
+
+- the final completed round's merge record
+- the final completed round's candidate inventory
+- the canonical candidate inventory after that round
+- the canonical merged `finding_discovery_report.md`, with a one-to-one substantive correspondence to the final canonical candidate inventory
+- the canonical `<reconciliation_dir>/deduped_candidates.jsonl` plus canonical `<findings_dir>/<candidate_id>/candidate_ledger.jsonl` records aligned one-to-one with the final canonical candidate inventory
+- an explicit internal note that the loop ended because it was `saturated` or `capped`
+
+If those artifacts or that terminal state are missing, continue the discovery loop and repair the missing evidence. Do not finalize or fail the scan merely because discovery is incomplete.
+
+Once the recorded terminal state is present:
+
+1. sanity-check the canonical candidate inventory and canonical merged `finding_discovery_report.md` against the underlying discovery evidence
+   - remove accidental overclaims
+   - repair merges that collapsed distinct issues
+   - ensure affected locations and proof tuples remain concrete
+   - confirm no canonical candidate disappeared while producing the standard discovery artifact
+   - confirm `<reconciliation_dir>/deduped_candidates.jsonl` and the canonical per-candidate ledgers match the same merged candidate set and preserve worker provenance
+2. synthesize one canonical validation threat model from the worker threat models and write it to Kiro Security Power's standard per-scan `<context_dir>/threat_model.md` path
+   - preserve distinct attacker models, trust boundaries, privileged surfaces, and risk framings that remain relevant to canonical merged candidates
+   - normalize contradictions conservatively rather than erasing plausible but materially useful threat-model distinctions
+   - treat this canonical validation threat model as downstream context for validation and attack-path analysis, not as a retroactive filter over the discovery candidate set
+3. confirm `<context_dir>/threat_model.md` exists, then run `$kiro-security-power:validation` once over the canonical merged discovery inputs
+4. run `$kiro-security-power:attack-path-analysis` once over the surviving validated findings and closure rows that require it
+5. populate the complete canonical manifest, findings, and coverage JSON once using `../references/final-report.md`
+   - for every reportable child finding, set `extensions.candidateId` to its canonical merged candidate id, `extensions.ledgerRowId` to its originating closure-row id, and `extensions.reportId` to a unique, stable human-readable id for that final child report; keep the vulnerability title human-readable and do not rely on a title suffix as the only copy of any id
+   - for every reportable finding, run `$kiro-security-power:vulnerability-writeup` with exactly one dedicated write-up sub-agent, write `findings/<slug>/<slug>.md` plus any `findings/<slug>/poc/` files, verify the report exists, and set the safe relative `writeup.reportPath`
+   - after every write-up is ready, run `$kiro-security-power:propose-security-hardening` once over the complete finding collection, write-ups, threat model, coverage, and relevant source; write `hardening/hardening.md`, `hardening/hardening.json`, and any proposals and diagrams below `hardening/`; verify the portfolio is a regular file and set `scan.hardening.portfolioPath` to `hardening/hardening.md`; skip this step when there are no reportable findings
+   - keep every write-up and hardening document derived and unsealed, then complete the scan once with the current coordinator lease token and generation so finalization generates the markdown report projection and links; in a standalone runtime without `security_complete_scan`, run `python -m kiro_security.codex_contract.finalize_scan_contract --scan-dir <scan_dir> --source-root <repo_root>` directly
+
+Do not bypass validation simply because a candidate recurred across multiple discovery workers. Recurrence is search evidence, not reportability proof.
+
+## Final Output Rules
+
+- Emit only the ordinary Kiro Security Power generated report output and review directives expected for the resolved scan target.
+- Do not author `report.md`. Populate scan-level semantics in canonical JSON, generate one detailed write-up per reportable finding, run the hardening analysis once over the complete collection, record the safe derived-document paths, call scan completion once, and include the generated markdown report path in the response.
+- Populate the optional structured details in `../references/finding-detail-fields.md` from the same validated evidence used in the generated report.
+- Keep priorities, severities, confidence, affected locations, validation reasoning, reachability, attack paths, and remediation in the normal Kiro Security Power style.
+- Do not mention:
+  - number of discovery workers
+  - number of rounds
+  - candidate recurrence
+  - semantic cluster ids
+  - raw novelty metrics
+- If no findings survive the centralized pipeline, produce the ordinary Kiro Security Power no-findings report.
+
+## Failure Handling
+
+- Incomplete discovery with preserved partial artifacts is a continuation condition, not a terminal state. Do not call `security_fail_scan` because a round, turn, context window, or goal run ends with work remaining. Record meaningful progress, leave the durable scan running, and continue or hand off from the saved artifacts. Reserve terminal failure for an unrecoverable blocker after the recovery steps below are exhausted or for an explicit cancellation path.
+- If Kiro Security Power dependencies are missing, stop early and explain the dependency.
+- If delegated workers are unavailable, stop early and explain that Deep Security Scan requires the parallel delegated-worker workflow.
+- If a worker fails, preserve its partial artifacts when available, note the failure internally, and retry or replace only that worker until the round has four usable completed discovery passes.
+- Do not count an incomplete round as a no-novelty round.
+- Do not reduce the round below four usable workers to keep moving.
+- Do not proceed to merge or novelty comparison on partial worker completion.
+- Do not reinterpret failed spawning, worker crashes, or missing artifacts as evidence that the candidate space is exhausted.
+- Do not enter validation, attack-path analysis, or canonical finalization until the discovery loop has recorded a terminal state of `saturated` or `capped`.
+- If the first discovery round adds any new canonical clusters, a later round is mandatory unless the maximum round cap has already somehow been reached.
+- Do not stop simply because a new candidate looks weak, low-confidence, non-reportable, or likely to close in validation. Any genuinely new canonical discovery candidate keeps the loop open until the next merge determines whether novelty persists.
+- Missing or inconsistent discovery artifacts are recoverable workflow defects, not terminal scan failures. Repair them before merge, validation, or finalization. If repair cannot finish in the current turn, preserve the artifacts, leave the durable scan running, and hand off. Do not call `security_fail_scan` for these defects.
+- Treat missing per-round merge records, missing per-round candidate inventories, or missing terminal-state bookkeeping as a repairable bookkeeping defect, not as permission to finalize early.
+- Treat any mismatch between `canonical_candidate_inventory.md` and `finding_discovery_report.md` as a repairable consistency defect. Align them before validation; the discovery report may refine merged prose, but it may not omit canonical candidates.
+- Treat any mismatch among `canonical_candidate_inventory.md`, `<discovery_dir>/finding_discovery_report.md`, `<reconciliation_dir>/deduped_candidates.jsonl`, and canonical per-candidate ledgers as a repairable consistency defect. Centralized validation must receive one coherent canonical candidate set.
+- For repository-wide and scoped-path scans, treat malformed worker `affected_locations` output as a worker-artifact defect that must be repaired before semantic merge. Lossless mechanical normalization is acceptable only for trivial equivalent variants such as `line` -> `lines` or `file` -> `path`; string-only locations or alternate location inventories that cannot be mapped without interpretation are incomplete worker outputs, not merge inputs.
+- Treat coordinator-authored target-specific candidate hypotheses, sink hunts, or partial-round substantive worker-result interpretation as orchestration drift to stop and correct before merge; those outputs are not eligible discovery evidence and must not influence novelty, dedupe, or validation inputs.
+- Do not mutate later worker prompts based on prior findings, suspected blind spots, or earlier novelty observations.
+- If the first worker-spawn batch fails before any worker starts with a sender-thread lookup error such as `no thread with id`, preserve the clean pre-round state, retry the full round once with the same canonical worker brief, and do not count the failed attempt toward round progress.
+- If a later round cannot spawn because worker capacity is exhausted, first wait for running workers to finish and collect their artifacts, then retry the spawn once. Completed `invoke_sub_agent` workers are idle and do not need interruption; stop only a still-running worker that must be abandoned before retrying.
+- If the thread-capacity retry still cannot produce a complete four-worker round, preserve the gathered state and explain that Deep Security Scan could not complete the configured discovery loop normally. Do not silently reduce the round size or claim novelty collapse occurred.
+- If the maximum of five rounds is reached while new candidate clusters are still appearing, continue to the centralized validation pipeline with the best canonical inventory gathered so far. Do not claim novelty collapse occurred.
+
+## Guardrails
+
+- Do not edit repository files during scanning.
+- After the chat-only start has provided a `scanId`, create or adopt the coordinator goal and worker-local discovery goals described in `Goal Setup` only after the capability preflight has returned `ready` and when goal tools are available. Keep their completion boundaries separate.
+- Do not widen or reinterpret a scoped-path target after it has been resolved.
+- Do not collapse the Kiro Security Power phases together.
+- Do not let discovery workers see one another's results.
+- Do not let repeated speculative phrasing turn into a reportable issue without centralized validation.
+- Do not merge away independently reachable vulnerable instances that Kiro Security Power would normally keep separate.

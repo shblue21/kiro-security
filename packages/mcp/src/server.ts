@@ -47,6 +47,13 @@ function requiredString(params: Record<string, unknown>, name: string, max = 409
   if (!boundedString(value, max)) throw new Error(`${name} must be a non-empty bounded string.`);
   return value;
 }
+function requiredInteger(params: Record<string, unknown>, name: string, minimum = 1): number {
+  const value = params[name];
+  if (typeof value !== "number" || !Number.isInteger(value) || value < minimum) {
+    throw new Error(`${name} must be an integer of at least ${minimum}.`);
+  }
+  return value;
+}
 
 class EngineProcess {
   private child: ChildProcessWithoutNullStreams | undefined;
@@ -235,121 +242,43 @@ function engineFor(params: Record<string, unknown>): EngineProcess {
 const toolDefinitions = [
   {
     name: "security_get_capabilities",
-    description: "Check the shared Kiro Security Power engine, Python, SQLite, Git, scan modes, phases, and export capabilities.",
+    description: "Report deterministic Engine, Python, SQLite, Git, workspace, supported-mode, and canonical-finalizer facts only.",
     inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" } }, required: ["workspaceRoot"], additionalProperties: false },
   },
   {
     name: "security_start_scan",
-    description: "Start a model Standard, Deep, or Git-diff scan with explicit analysisProfile=model and truthful model/runtime host attestation. VSIX Fast is separate.",
-    inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, mode: { type: "string", enum: ["standard", "deep", "diff"] }, analysisProfile: { type: "string", const: "model" }, scope: { type: "string", minLength: 1, default: "." }, diffTargetKind: { type: "string", enum: ["working_tree", "commit", "range"] }, diffBaseRevision: { type: "string" }, diffHeadRevision: { type: "string" }, modelId: { type: "string" }, runtime: { type: "object" } }, required: ["workspaceRoot", "mode", "analysisProfile", "modelId", "runtime"], additionalProperties: false },
+    description: "Start a chat-coordinated Skill-driven Standard, Deep, or Git-diff scan and create deterministic context and worklists.",
+    inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, mode: { type: "string", enum: ["standard", "deep", "diff"] }, scope: { type: "string", minLength: 1, default: "." }, diffTargetKind: { type: "string", enum: ["working_tree", "commit", "range"] }, diffBaseRevision: { type: "string" }, diffHeadRevision: { type: "string" }, userContext: { type: "string", maxLength: 4000 } }, required: ["workspaceRoot", "mode"], additionalProperties: false },
   },
-  { name: "security_list_scans", description: "List recent scans, including scans started by the VSIX or another MCP session.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, limit: { type: "integer", minimum: 1, maximum: 200 } }, required: ["workspaceRoot"], additionalProperties: false } },
-  { name: "security_resume_scan", description: "Resume an interrupted or failed scan using durable handoff state.", inputSchema: idSchema("scanId") },
-  { name: "security_cancel_scan", description: "Request cooperative cancellation of an active scan.", inputSchema: idSchema("scanId") },
+  { name: "security_acquire_scan_coordinator", description: "Acquire an available or expired transient coordinator lease for a durable running scan.", inputSchema: idSchema("scanId") },
+  { name: "security_renew_scan_coordinator", description: "Renew the current transient coordinator lease with generation-based CAS.", inputSchema: leaseSchema() },
+  { name: "security_release_scan_coordinator", description: "Release coordinator execution authority without changing scan lifecycle state.", inputSchema: leaseSchema() },
+  { name: "security_cancel_scan", description: "Cancel a running scan while atomically releasing its coordinator lease.", inputSchema: leaseSchema() },
   { name: "security_get_scan", description: "Get scan lifecycle, progress, coverage, and artifact records.", inputSchema: idSchema("scanId") },
   { name: "security_get_progress", description: "Get the latest progress record for a scan.", inputSchema: idSchema("scanId") },
-  { name: "security_deep_get_status", description: "Get durable Deep Scan round, worker, novelty, and next-action state. Deep does not use the Standard deterministic fallback.", inputSchema: idSchema("scanId") },
-  {
-    name: "security_deep_claim_worker",
-    description: "Claim one of exactly six independent model discovery workers for the active Deep round and pass the returned versioned brief unchanged. Use a fresh delegationId and the currently selected model identity. Requires a host-attested runtime (contractVersion deep-worker/v2, delegationMode fresh, capability flags, usableWorkerSlots >= 6); all six workers in a round must share one modelId/agentType/reasoningEffort/hostVersion profile, and all six must be claimed before the first result is submitted.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        workspaceRoot: { type: "string" },
-        scanId: { type: "string" },
-        modelId: { type: "string", maxLength: 256 },
-        delegationId: { type: "string", maxLength: 256 },
-        runtime: {
-          type: "object",
-          description: "Host-attested worker runtime profile.",
-          properties: {
-            contractVersion: { type: "string", const: "deep-worker/v2" },
-            agentType: { type: "string" },
-            reasoningEffort: { type: "string" },
-            hostVersion: { type: "string" },
-            delegationMode: { type: "string", const: "fresh" },
-            capabilities: {
-              type: "object",
-              properties: {
-                delegatedAgentAvailable: { type: "boolean" },
-                freshContextMode: { type: "boolean" },
-                usableWorkerSlots: { type: "integer", minimum: 6 },
-                goalSupport: { type: "boolean" },
-              },
-              required: ["delegatedAgentAvailable", "freshContextMode", "usableWorkerSlots", "goalSupport"],
-              additionalProperties: true,
-            },
-          },
-          required: ["contractVersion", "agentType", "reasoningEffort", "hostVersion", "delegationMode", "capabilities"],
-          additionalProperties: true,
-        },
-      },
-      required: ["workspaceRoot", "scanId", "modelId", "delegationId", "runtime"],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "security_deep_submit_worker_result",
-    description: "Submit one completed independent discovery worker with one auditable disposition receipt per worklist row, a worker threat model, evidence-grounded candidates (non-empty codeEvidence with explicit origin/control and sink/impact roles, impact, root cause, severity/confidence rationales), and a host completionAttestation. All six workers of the round must already be claimed before the first submit.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        workspaceRoot: { type: "string" },
-        scanId: { type: "string" },
-        workerId: { type: "string" },
-        claimToken: { type: "string" },
-        completionAttestation: {
-          type: "object",
-          description: "Host-attested worker completion state.",
-          properties: {
-            freshContext: { type: "boolean", const: true },
-            coordinatorHistoryInherited: { type: "boolean", const: false },
-            workerState: { type: "string", const: "completed_idle" },
-          },
-          required: ["freshContext", "coordinatorHistoryInherited", "workerState"],
-          additionalProperties: true,
-        },
-        rowReceipts: { type: "array", items: { type: "object", properties: { rowId: { type: "string" }, disposition: { type: "string", enum: ["reportable", "suppressed", "not_applicable", "deferred"] }, reason: { type: "string" }, evidenceRefs: { type: "array", items: { type: "string" } }, candidateIds: { type: "array", items: { type: "string" } }, entrypoint: { type: "string" }, rootControl: { type: "string" }, sink: { type: "string" } }, required: ["rowId", "disposition", "reason"], additionalProperties: false } },
-        threatModel: { type: "string" },
-        summary: { type: "string" },
-        seedResearch: { type: "string" },
-        dedupeReport: { type: "string" },
-        candidates: { type: "array", items: { type: "object" } },
-      },
-      required: ["workspaceRoot", "scanId", "workerId", "claimToken", "rowReceipts", "threatModel", "candidates", "completionAttestation"],
-      additionalProperties: false,
-    },
-  },
-  { name: "security_deep_retry_worker", description: "Replace only an incomplete Deep worker. Completed worker artifacts are immutable.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, scanId: { type: "string" }, workerIndex: { type: "integer", minimum: 1, maximum: 6 }, reason: { type: "string", maxLength: 4000 } }, required: ["workspaceRoot", "scanId", "workerIndex"], additionalProperties: false } },
-  { name: "security_deep_claim_merge", description: "Claim semantic merge only after all six workers in the round are complete. Apply the returned mergeBrief unchanged.", inputSchema: idSchema("scanId") },
-  { name: "security_deep_submit_merge", description: "Submit the canonical semantic merge. Every current sourceRef must be consumed exactly once and all prior canonical candidates preserved. Every canonical candidate requires mergeRationale, identityRationale, and remediationSubsumption; retained canonical IDs must keep their fingerprint and semantic identity, and prior identities cannot be re-registered under new IDs. A new round is created until a full round adds zero new candidates or round 10 is reached.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, scanId: { type: "string" }, claimToken: { type: "string" }, canonicalCandidates: { type: "array", items: { type: "object" } } }, required: ["workspaceRoot", "scanId", "claimToken", "canonicalCandidates"], additionalProperties: false } },
-  { name: "security_deep_get_tail_assignment", description: "Claim the next eligible fresh-context Deep tail assignment and pass payload.assignmentContract.instruction unchanged.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, scanId: { type: "string" }, modelId: { type: "string" }, delegationId: { type: "string" }, runtime: { type: "object" } }, required: ["workspaceRoot", "scanId", "modelId", "delegationId", "runtime"], additionalProperties: false } },
-  { name: "security_deep_submit_tail_result", description: "Submit one kind-checked Deep tail result with the same claim profile and a truthful completion attestation.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, scanId: { type: "string" }, assignmentId: { type: "string" }, claimToken: { type: "string" }, modelId: { type: "string" }, delegationId: { type: "string" }, runtime: { type: "object" }, completionAttestation: { type: "object" }, result: { type: "object" } }, required: ["workspaceRoot", "scanId", "assignmentId", "claimToken", "modelId", "delegationId", "runtime", "completionAttestation", "result"], additionalProperties: false } },
-  { name: "security_deep_retry_writeup", description: "Retry only the latest incomplete or failed Deep writeup attempt; completed writeups are immutable.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, scanId: { type: "string" }, assignmentId: { type: "string" }, reason: { type: "string", maxLength: 4000 } }, required: ["workspaceRoot", "scanId", "assignmentId"], additionalProperties: false } },
-  { name: "security_list_findings", description: "List normalized findings for a scan.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, scanId: { type: "string" }, search: { type: "string", minLength: 1, maxLength: 200 }, limit: { type: "integer", minimum: 1, maximum: 2000 } }, required: ["workspaceRoot", "scanId"], additionalProperties: false } },
+  { name: "security_get_scan_context", description: "Get immutable target identity, phase artifact paths, deterministic worklists, canonical output paths, lifecycle, and other running Deep scans.", inputSchema: idSchema("scanId") },
+  { name: "security_update_scan_progress", description: "Update user-visible lifecycle progress under the current coordinator lease; accepts no result or receipt bodies.", inputSchema: leaseSchema({ phase: { type: "string", enum: ["preflight", "threat_model", "discovery", "validation", "attack_path", "reporting"] }, phasePercent: { type: "number", minimum: 0, maximum: 100 }, itemsTotal: { type: "integer", minimum: 0 }, itemsCompleted: { type: "integer", minimum: 0 }, reportableFindingsCount: { type: "integer", minimum: 0 }, message: { type: "string", maxLength: 1000 } }) },
+  { name: "security_complete_scan", description: "One-shot validate, index, project, and seal fixed Agent-authored canonical artifacts under the current coordinator lease.", inputSchema: leaseSchema() },
+  { name: "security_fail_scan", description: "Fail a running scan and atomically release its coordinator lease.", inputSchema: leaseSchema({ reason: { type: "string", minLength: 1, maxLength: 4000 } }, ["reason"]) },
+  { name: "security_list_findings", description: "List findings indexed from the sealed canonical document.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, scanId: { type: "string" }, search: { type: "string", minLength: 1, maxLength: 200 }, limit: { type: "integer", minimum: 1, maximum: 2000 } }, required: ["workspaceRoot", "scanId"], additionalProperties: false } },
   { name: "security_get_finding", description: "Get one finding with evidence, validation, attack path, triage, and remediation records.", inputSchema: idSchema("occurrenceId") },
-  { name: "security_validate_finding", description: "Validate a finding and produce an attack-path record where applicable.", inputSchema: idSchema("occurrenceId") },
   { name: "security_triage_finding", description: "Record an auditable triage decision for a finding.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, occurrenceId: { type: "string" }, decision: { type: "string", enum: ["open", "accepted_risk", "false_positive", "already_fixed", "wont_fix"] }, note: { type: "string", maxLength: 4000 } }, required: ["workspaceRoot", "occurrenceId", "decision"], additionalProperties: false } },
   { name: "security_create_remediation", description: "Create finding-specific remediation guidance in the shared artifact directory.", inputSchema: idSchema("occurrenceId") },
   { name: "security_prepare_remediation_patch", description: "Prepare and drift-check a bounded existing-file unified diff without changing the workspace.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, occurrenceId: { type: "string" }, patch: { type: "string", maxLength: 600000 }, plan: { type: "string", maxLength: 12000 }, verificationPlan: { type: "array", minItems: 1, maxItems: 50, items: { type: "string", maxLength: 2000 } } }, required: ["workspaceRoot", "occurrenceId", "patch", "plan", "verificationPlan"], additionalProperties: false } },
   { name: "security_apply_remediation_patch", description: "Apply exactly one prepared patch after digest, revision, file-drift, and state revalidation.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, remediationId: { type: "string" }, expectedVersion: { type: "integer", minimum: 1 } }, required: ["workspaceRoot", "remediationId", "expectedVersion"], additionalProperties: false } },
   { name: "security_verify_remediation_patch", description: "Record bounded Agent verification proof; incomplete gates cannot become verified.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, remediationId: { type: "string" }, expectedVersion: { type: "integer", minimum: 1 }, verification: { type: "object" } }, required: ["workspaceRoot", "remediationId", "expectedVersion", "verification"], additionalProperties: false } },
-  { name: "security_create_triage_intake", description: "Persist one bounded untrusted external finding intake.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, occurrenceId: { type: "string" }, sourceType: { type: "string", enum: ["sarif", "cve", "advisory", "scanner_ticket", "bug_bounty", "codex_security_finding", "freeform", "unknown"] }, inputId: { type: "string", maxLength: 512 }, input: { type: "object" } }, required: ["workspaceRoot", "sourceType", "inputId", "input"], additionalProperties: false } },
+  { name: "security_create_triage_intake", description: "Persist one bounded untrusted external finding intake.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, occurrenceId: { type: "string" }, sourceType: { type: "string", enum: ["sarif", "cve", "advisory", "scanner_ticket", "bug_bounty", "kiro_security_finding", "freeform", "unknown"] }, inputId: { type: "string", maxLength: 512 }, input: { type: "object" } }, required: ["workspaceRoot", "sourceType", "inputId", "input"], additionalProperties: false } },
   { name: "security_submit_triage_assessment", description: "Complete one pending intake with a static proof-chain result.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, assessmentId: { type: "string" }, result: { type: "object" } }, required: ["workspaceRoot", "assessmentId", "result"], additionalProperties: false } },
   { name: "security_create_tracking_handoff", description: "Seal an approved connector/destination/duplicate-search proof without an external write.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, occurrenceId: { type: "string" }, provider: { type: "string", enum: ["manual", "github", "linear", "jira"] }, destination: { type: "string", maxLength: 512 }, stableLink: { type: "string", maxLength: 4096 }, trackingProof: { type: "object" } }, required: ["workspaceRoot", "occurrenceId", "provider", "trackingProof"], additionalProperties: false } },
   { name: "security_record_tracking_result", description: "Record sanitized connector readback for an approved handoff; performs no provider network write.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, recordId: { type: "string" }, payloadSha256: { type: "string", pattern: "^[a-f0-9]{64}$" }, outcome: { type: "string", enum: ["created", "updated", "reused", "blocked", "failed", "uncertain"] }, externalMutationPerformed: { type: "boolean" }, externalId: { type: "string", maxLength: 512 }, externalUrl: { type: "string", maxLength: 4096 }, reason: { type: "string", maxLength: 4000 }, approval: { type: "object", properties: { approved: { const: true }, approvedPreviewDigest: { type: "string", pattern: "^[a-f0-9]{64}$" }, approvedPayloadSha256: { type: "string", pattern: "^[a-f0-9]{64}$" }, approvedBy: { type: "string", maxLength: 512 }, approvedAt: { type: "string", maxLength: 128 }, scope: { type: "string", maxLength: 2000 } }, required: ["approved", "approvedPreviewDigest", "approvedPayloadSha256", "approvedBy", "approvedAt", "scope"], additionalProperties: false }, readback: { type: "object" } }, required: ["workspaceRoot", "recordId", "payloadSha256", "outcome", "externalMutationPerformed"], additionalProperties: false } },
-  { name: "security_create_hardening_proposal", description: "Create a structural hardening proposal for a scan.", inputSchema: idSchema("scanId") },
-  { name: "security_create_threat_model", description: "Create or refresh a workspace threat model.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, scope: { type: "string", minLength: 1, default: "." } }, required: ["workspaceRoot"], additionalProperties: false } },
   { name: "security_export_report", description: "Export a scan or one finding as Markdown, JSON, CSV, or SARIF.", inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, scanId: { type: "string" }, occurrenceId: { type: "string" }, format: { type: "string", enum: ["markdown", "json", "csv", "sarif"] }, destination: { type: "string" } }, required: ["workspaceRoot", "scanId", "format"], additionalProperties: false } },
 ];
 
 const TOOL_STRING_LIMITS: Record<string, number> = {
-  workspaceRoot: 8192, mode: 16, analysisProfile: 16, scope: 4096,
+  workspaceRoot: 8192, mode: 16, scope: 4096,
   diffTargetKind: 32, diffBaseRevision: 256, diffHeadRevision: 256,
-  modelId: 256, delegationId: 256, scanId: 256, workerId: 256,
-  claimToken: 256, threatModel: 200000, summary: 20000,
-  seedResearch: 200000, dedupeReport: 200000, reason: 4000,
-  assignmentId: 256, search: 200, occurrenceId: 256, findingId: 256,
+  userContext: 4000, scanId: 256, coordinatorToken: 128, reason: 4000, phase: 32, message: 1000,
+  search: 200, occurrenceId: 256, findingId: 256,
   decision: 32, sourceType: 64, inputId: 512, assessmentId: 256,
   patch: 600000, plan: 12000, remediationId: 256, recordId: 256,
   payloadSha256: 64, outcome: 32, externalId: 512, externalUrl: 4096,
@@ -367,6 +296,27 @@ function idSchema(name: string): Record<string, unknown> {
   return { type: "object", properties: { workspaceRoot: { type: "string" }, [name]: { type: "string" } }, required: ["workspaceRoot", name], additionalProperties: false };
 }
 
+function leaseSchema(extra: Record<string, unknown> = {}, requiredExtra: string[] = []): Record<string, unknown> {
+  return {
+    type: "object",
+    properties: {
+      workspaceRoot: { type: "string" }, scanId: { type: "string" },
+      coordinatorToken: { type: "string", minLength: 64, maxLength: 128 },
+      coordinatorGeneration: { type: "integer", minimum: 1 }, ...extra,
+    },
+    required: ["workspaceRoot", "scanId", "coordinatorToken", "coordinatorGeneration", ...requiredExtra],
+    additionalProperties: false,
+  };
+}
+
+function leaseRequest(params: Record<string, unknown>): Record<string, unknown> {
+  return {
+    scanId: requiredString(params, "scanId", 256),
+    coordinatorToken: requiredString(params, "coordinatorToken", 128),
+    coordinatorGeneration: requiredInteger(params, "coordinatorGeneration"),
+  };
+}
+
 async function callTool(name: string, rawArguments: unknown): Promise<unknown> {
   if (!isObject(rawArguments)) throw new Error("Tool arguments must be an object.");
   const params = rawArguments;
@@ -381,37 +331,28 @@ async function callTool(name: string, rawArguments: unknown): Promise<unknown> {
     case "security_start_scan": {
       const mode = requiredString(params, "mode", 16);
       if (!["standard", "deep", "diff"].includes(mode)) throw new Error("mode must be standard, deep, or diff.");
-      if (params.analysisProfile !== "model") throw new Error("Agent Standard, Diff, and Deep starts require analysisProfile=model.");
-      if (!isObject(params.runtime)) throw new Error("Model scan start requires a host-attested runtime object.");
       const scope = params.scope === undefined ? "." : requiredString(params, "scope");
       return engine.request("start_scan", {
         mode,
-        analysisProfile: "model",
         scope,
-        modelId: requiredString(params, "modelId", 256),
-        runtime: params.runtime,
+        userContext: params.userContext === undefined ? undefined : requiredString(params, "userContext", 4000),
         diffTargetKind: mode === "diff" ? (params.diffTargetKind ?? "working_tree") : undefined,
         diffBaseRevision: mode === "diff" ? safeGitRef(params.diffBaseRevision, "diffBaseRevision") : undefined,
         diffHeadRevision: mode === "diff" ? safeGitRef(params.diffHeadRevision, "diffHeadRevision") : undefined,
       });
     }
-    case "security_list_scans": return engine.request("list_scans", { limit: params.limit });
-    case "security_resume_scan": return engine.request("resume_scan", { scanId: requiredString(params, "scanId", 256) });
-    case "security_cancel_scan": return engine.request("cancel_scan", { scanId: requiredString(params, "scanId", 256) });
+    case "security_acquire_scan_coordinator": return engine.request("acquire_scan_coordinator", { scanId: requiredString(params, "scanId", 256) });
+    case "security_renew_scan_coordinator": return engine.request("renew_scan_coordinator", leaseRequest(params));
+    case "security_release_scan_coordinator": return engine.request("release_scan_coordinator", leaseRequest(params));
+    case "security_cancel_scan": return engine.request("cancel_scan", leaseRequest(params));
     case "security_get_scan": return engine.request("get_scan", { scanId: requiredString(params, "scanId", 256) });
     case "security_get_progress": return engine.request("get_progress", { scanId: requiredString(params, "scanId", 256) });
-    case "security_deep_get_status": return engine.request("deep_get_status", { scanId: requiredString(params, "scanId", 256) });
-    case "security_deep_claim_worker": return engine.request("deep_claim_worker", { scanId: requiredString(params, "scanId", 256), modelId: requiredString(params, "modelId", 256), delegationId: requiredString(params, "delegationId", 256), runtime: params.runtime });
-    case "security_deep_submit_worker_result": return engine.request("deep_submit_worker", { scanId: requiredString(params, "scanId", 256), workerId: requiredString(params, "workerId", 256), claimToken: requiredString(params, "claimToken", 256), rowReceipts: params.rowReceipts, threatModel: params.threatModel, summary: params.summary, seedResearch: params.seedResearch, dedupeReport: params.dedupeReport, candidates: params.candidates, completionAttestation: params.completionAttestation }, 120_000);
-    case "security_deep_retry_worker": return engine.request("deep_retry_worker", { scanId: requiredString(params, "scanId", 256), workerIndex: params.workerIndex, reason: params.reason });
-    case "security_deep_claim_merge": return engine.request("deep_claim_merge", { scanId: requiredString(params, "scanId", 256) }, 120_000);
-    case "security_deep_submit_merge": return engine.request("deep_submit_merge", { scanId: requiredString(params, "scanId", 256), claimToken: requiredString(params, "claimToken", 256), canonicalCandidates: params.canonicalCandidates }, 120_000);
-    case "security_deep_get_tail_assignment": return engine.request("deep_get_tail_assignment", { scanId: requiredString(params, "scanId", 256), modelId: requiredString(params, "modelId", 256), delegationId: requiredString(params, "delegationId", 256), runtime: params.runtime });
-    case "security_deep_submit_tail_result": return engine.request("deep_submit_tail_result", { scanId: requiredString(params, "scanId", 256), assignmentId: requiredString(params, "assignmentId", 256), claimToken: requiredString(params, "claimToken", 256), modelId: requiredString(params, "modelId", 256), delegationId: requiredString(params, "delegationId", 256), runtime: params.runtime, completionAttestation: params.completionAttestation, result: params.result }, 120_000);
-    case "security_deep_retry_writeup": return engine.request("deep_retry_writeup", { scanId: requiredString(params, "scanId", 256), assignmentId: requiredString(params, "assignmentId", 256), reason: params.reason });
+    case "security_get_scan_context": return engine.request("get_scan_context", { scanId: requiredString(params, "scanId", 256) });
+    case "security_update_scan_progress": return engine.request("update_scan_progress", { ...leaseRequest(params), phase: params.phase, phasePercent: params.phasePercent, itemsTotal: params.itemsTotal, itemsCompleted: params.itemsCompleted, reportableFindingsCount: params.reportableFindingsCount, message: params.message });
+    case "security_complete_scan": return engine.request("complete_scan", leaseRequest(params), 120_000);
+    case "security_fail_scan": return engine.request("fail_scan", { ...leaseRequest(params), reason: requiredString(params, "reason", 4000) });
     case "security_list_findings": return engine.request("list_findings", { scanId: requiredString(params, "scanId", 256), search: params.search === undefined ? undefined : requiredString(params, "search", 200), limit: params.limit });
     case "security_get_finding": return engine.request("get_finding", { occurrenceId: requiredString(params, "occurrenceId", 256) });
-    case "security_validate_finding": return engine.request("validate_finding", { occurrenceId: requiredString(params, "occurrenceId", 256) });
     case "security_triage_finding": {
       const decision = requiredString(params, "decision", 32);
       if (!["open", "accepted_risk", "false_positive", "already_fixed", "wont_fix"].includes(decision)) throw new Error("Invalid triage decision.");
@@ -431,8 +372,6 @@ async function callTool(name: string, rawArguments: unknown): Promise<unknown> {
       return engine.request("create_tracking_handoff", { occurrenceId: requiredString(params, "occurrenceId", 256), provider, destination, stableLink, trackingProof: params.trackingProof });
     }
     case "security_record_tracking_result": return engine.request("record_tracking_result", { recordId: requiredString(params, "recordId", 256), payloadSha256: requiredString(params, "payloadSha256", 64), outcome: requiredString(params, "outcome", 32), externalMutationPerformed: params.externalMutationPerformed, externalId: params.externalId, externalUrl: params.externalUrl, reason: params.reason, approval: params.approval, readback: params.readback });
-    case "security_create_hardening_proposal": return engine.request("create_hardening_proposal", { scanId: requiredString(params, "scanId", 256) });
-    case "security_create_threat_model": return engine.request("refresh_threat_model", { scope: params.scope === undefined ? "." : requiredString(params, "scope") });
     case "security_export_report": {
       const format = requiredString(params, "format", 16);
       if (!["markdown", "json", "csv", "sarif"].includes(format)) throw new Error("Invalid export format.");

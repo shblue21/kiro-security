@@ -50,18 +50,20 @@ test("RPC envelope validation rejects version mismatches and malformed notificat
 });
 
 test("webview messages are allowlisted and bounded", () => {
-  assert.deepEqual(validateWebviewMessage({ type: "startScan", mode: "deep", scope: "src" }), { type: "startScan", mode: "deep", scope: "src" });
   assert.deepEqual(validateWebviewMessage({ type: "openSource", occurrenceId: "occ_123" }), { type: "openSource", occurrenceId: "occ_123" });
   assert.deepEqual(validateWebviewMessage({ type: "createTrackingHandoff", occurrenceId: "occ_123", provider: "github" }), { type: "createTrackingHandoff", occurrenceId: "occ_123", provider: "github" });
   assert.deepEqual(validateWebviewMessage({ type: "cleanupScan", scanId: "scan_123" }), { type: "cleanupScan", scanId: "scan_123" });
   assert.deepEqual(validateWebviewMessage({ type: "exportFinding", occurrenceId: "occ_123", format: "json" }), { type: "exportFinding", occurrenceId: "occ_123", format: "json" });
   assert.deepEqual(validateWebviewMessage({ type: "installAgentIntegration", scope: "workspace", autoApprovePolicy: "read_only" }), { type: "installAgentIntegration", scope: "workspace", autoApprovePolicy: "read_only" });
   assert.deepEqual(validateWebviewMessage({ type: "openMcpConfig", scope: "user" }), { type: "openMcpConfig", scope: "user" });
+  assert.deepEqual(validateWebviewMessage({ type: "copyPowerPath" }), { type: "copyPowerPath" });
   assert.equal(validateWebviewMessage({ type: "installAgentIntegration", scope: "workspace", autoApprovePolicy: "all" }), undefined);
   assert.equal(validateWebviewMessage({ type: "installAgentIntegration", scope: "outside", autoApprovePolicy: "none" }), undefined);
   assert.equal(validateWebviewMessage({ type: "installAgentIntegration", scope: "system", autoApprovePolicy: "all" }), undefined);
   assert.equal(validateWebviewMessage({ type: "createTrackingHandoff", occurrenceId: "occ_123", provider: "unknown" }), undefined);
-  assert.equal(validateWebviewMessage({ type: "startScan", mode: "shell", scope: "." }), undefined);
+  assert.equal(validateWebviewMessage({ type: "startScan", mode: "deep", scope: "src" }), undefined);
+  assert.equal(validateWebviewMessage({ type: "resumeScan", scanId: "scan_123" }), undefined);
+  assert.equal(validateWebviewMessage({ type: "cancelScan", scanId: "scan_123" }), undefined);
   assert.equal(validateWebviewMessage({ type: "openArtifact", path: "x\0y" }), undefined);
   assert.equal(validateWebviewMessage({ type: "prototype", __proto__: { polluted: true } }), undefined);
 });

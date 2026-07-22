@@ -80,10 +80,38 @@ def _id_schema(name: str) -> dict[str, Any]:
     }
 
 
+def _lease_schema(*, extra: dict[str, Any] | None = None, required_extra: list[str] | None = None) -> dict[str, Any]:
+    properties: dict[str, Any] = {
+        "workspaceRoot": {"type": "string"},
+        "scanId": {"type": "string"},
+        "coordinatorToken": {"type": "string", "minLength": 64, "maxLength": 128},
+        "coordinatorGeneration": {"type": "integer", "minimum": 1},
+    }
+    properties.update(extra or {})
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": ["scanId", "coordinatorToken", "coordinatorGeneration", *(required_extra or [])],
+        "additionalProperties": False,
+    }
+
+
+def _lease_request(params: dict[str, Any]) -> dict[str, Any]:
+    if "coordinatorGeneration" not in params:
+        raise ValueError("coordinatorGeneration is required.")
+    return {
+        "scanId": _bounded_string(params.get("scanId"), "scanId", 256),
+        "coordinatorToken": _bounded_string(params.get("coordinatorToken"), "coordinatorToken", 128),
+        "coordinatorGeneration": _integer(
+            params.get("coordinatorGeneration"), "coordinatorGeneration", 0, 1, 2_147_483_647
+        ),
+    }
+
+
 TOOLS: list[dict[str, Any]] = [
     {
         "name": "security_get_capabilities",
-        "description": "Check the shared Kiro Security Power engine, Python, SQLite, Git, modes, phases, and export capabilities.",
+        "description": "Report deterministic Engine, Python, SQLite, Git, workspace, supported-mode, and canonical-finalizer facts only.",
         "inputSchema": {
             "type": "object",
             "properties": {"workspaceRoot": {"type": "string"}},
@@ -92,171 +120,48 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "security_start_scan",
-        "description": "Start a model Standard, Deep, or Git-diff scan. Agent starts require analysisProfile=model and truthful model/runtime host attestation; VSIX Fast is separate.",
+        "description": "Start a chat-coordinated Skill-driven Standard, Deep, or Git-diff scan and create its deterministic context and worklists.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "workspaceRoot": {"type": "string", "description": "Optional. Defaults to the workspace bound by the VSIX installer."},
                 "mode": {"type": "string", "enum": ["standard", "deep", "diff"]},
-                "analysisProfile": {"type": "string", "const": "model"},
                 "scope": {"type": "string", "minLength": 1, "default": "."},
                 "diffTargetKind": {"type": "string", "enum": ["working_tree", "commit", "range"]},
                 "diffBaseRevision": {"type": "string"},
                 "diffHeadRevision": {"type": "string"},
-                "modelId": {"type": "string", "description": "Selected model identity for model workflow preflight."},
-                "runtime": {"type": "object", "description": "Truthful deep-worker/v2 host attestation reused by model claims."},
+                "userContext": {"type": "string", "description": "Optional bounded user-supplied scan context."},
             },
-            "required": ["mode", "analysisProfile", "modelId", "runtime"],
+            "required": ["mode"],
             "additionalProperties": False,
         },
     },
-    {
-        "name": "security_list_scans",
-        "description": "List recent scans, including scans started by the VSIX or another MCP session.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"workspaceRoot": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}},
-            "additionalProperties": False,
-        },
-    },
-    {"name": "security_resume_scan", "description": "Resume an interrupted or failed scan using durable handoff state.", "inputSchema": _id_schema("scanId")},
-    {"name": "security_cancel_scan", "description": "Request cooperative cancellation of an active scan.", "inputSchema": _id_schema("scanId")},
+    {"name": "security_acquire_scan_coordinator", "description": "Acquire an available or expired transient coordinator lease for a durable running scan.", "inputSchema": _id_schema("scanId")},
+    {"name": "security_renew_scan_coordinator", "description": "Renew the current transient coordinator lease with generation-based CAS.", "inputSchema": _lease_schema()},
+    {"name": "security_release_scan_coordinator", "description": "Release coordinator execution authority without changing scan lifecycle state.", "inputSchema": _lease_schema()},
+    {"name": "security_cancel_scan", "description": "Cancel a running scan while atomically releasing its coordinator lease.", "inputSchema": _lease_schema()},
     {"name": "security_get_scan", "description": "Get scan lifecycle, progress, coverage, and artifact records.", "inputSchema": _id_schema("scanId")},
     {"name": "security_get_progress", "description": "Get the latest progress record for a scan.", "inputSchema": _id_schema("scanId")},
-    {"name": "security_deep_get_status", "description": "Get durable Deep round, worker, novelty, and next-action state.", "inputSchema": _id_schema("scanId")},
     {
-        "name": "security_deep_claim_worker",
-        "description": (
-            "Claim one of exactly six independent model discovery workers for the active Deep round. "
-            "Pass the returned versioned brief unchanged as the fresh worker's complete semantic assignment. "
-            "Requires a host-attested runtime (contractVersion deep-worker/v2, delegationMode fresh, capability flags, "
-            "usableWorkerSlots >= 6). All six workers in a round must share one modelId/agentType/reasoningEffort/"
-            "hostVersion profile, and all six must be claimed before the first result is submitted."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "workspaceRoot": {"type": "string"},
-                "scanId": {"type": "string"},
-                "modelId": {"type": "string"},
-                "delegationId": {"type": "string"},
-                "runtime": {
-                    "type": "object",
-                    "description": "Host-attested worker runtime profile.",
-                    "properties": {
-                        "contractVersion": {"type": "string", "const": "deep-worker/v2"},
-                        "agentType": {"type": "string"},
-                        "reasoningEffort": {"type": "string"},
-                        "hostVersion": {"type": "string"},
-                        "delegationMode": {"type": "string", "const": "fresh"},
-                        "capabilities": {
-                            "type": "object",
-                            "properties": {
-                                "delegatedAgentAvailable": {"type": "boolean"},
-                                "freshContextMode": {"type": "boolean"},
-                                "usableWorkerSlots": {"type": "integer", "minimum": 6},
-                                "goalSupport": {"type": "boolean"},
-                            },
-                            "required": ["delegatedAgentAvailable", "freshContextMode", "usableWorkerSlots", "goalSupport"],
-                            "additionalProperties": True,
-                        },
-                    },
-                    "required": ["contractVersion", "agentType", "reasoningEffort", "hostVersion", "delegationMode", "capabilities"],
-                    "additionalProperties": True,
-                },
-            },
-            "required": ["scanId", "modelId", "delegationId", "runtime"],
-            "additionalProperties": False,
-        },
+        "name": "security_get_scan_context",
+        "description": "Get immutable target identity, phase artifact paths, deterministic worklists, canonical output paths, lifecycle, and other running Deep scans.",
+        "inputSchema": _id_schema("scanId"),
     },
     {
-        "name": "security_deep_submit_worker_result",
-        "description": (
-            "Submit a completed independent Deep discovery worker with one auditable disposition receipt per worklist "
-            "row, evidence-grounded candidates (non-empty codeEvidence with explicit origin/control and sink/impact "
-            "roles, impact, root cause, severity/confidence rationales), and a host completionAttestation. All six "
-            "workers of the round must already be claimed before the first submit."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "workspaceRoot": {"type": "string"},
-                "scanId": {"type": "string"},
-                "workerId": {"type": "string"},
-                "claimToken": {"type": "string"},
-                "completionAttestation": {
-                    "type": "object",
-                    "description": "Host-attested worker completion state.",
-                    "properties": {
-                        "freshContext": {"type": "boolean", "const": True},
-                        "coordinatorHistoryInherited": {"type": "boolean", "const": False},
-                        "workerState": {"type": "string", "const": "completed_idle"},
-                    },
-                    "required": ["freshContext", "coordinatorHistoryInherited", "workerState"],
-                    "additionalProperties": True,
-                },
-                "rowReceipts": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "rowId": {"type": "string"},
-                            "disposition": {"type": "string", "enum": ["reportable", "suppressed", "not_applicable", "deferred"]},
-                            "reason": {"type": "string"},
-                            "evidenceRefs": {"type": "array", "items": {"type": "string"}},
-                            "candidateIds": {"type": "array", "items": {"type": "string"}},
-                            "entrypoint": {"type": "string"},
-                            "rootControl": {"type": "string"},
-                            "sink": {"type": "string"},
-                        },
-                        "required": ["rowId", "disposition", "reason"],
-                        "additionalProperties": False,
-                    },
-                },
-                "threatModel": {"type": "string"},
-                "summary": {"type": "string"},
-                "seedResearch": {"type": "string"},
-                "dedupeReport": {"type": "string"},
-                "candidates": {"type": "array", "items": {"type": "object"}},
-            },
-            "required": ["scanId", "workerId", "claimToken", "rowReceipts", "threatModel", "candidates", "completionAttestation"],
-            "additionalProperties": False,
-        },
+        "name": "security_update_scan_progress",
+        "description": "Update user-visible lifecycle progress only; this is not workflow authority and accepts no result or receipt bodies.",
+        "inputSchema": _lease_schema(extra={
+            "phase": {"type": "string", "enum": ["preflight", "threat_model", "discovery", "validation", "attack_path", "reporting"]},
+            "phasePercent": {"type": "number", "minimum": 0, "maximum": 100},
+            "itemsTotal": {"type": "integer", "minimum": 0}, "itemsCompleted": {"type": "integer", "minimum": 0},
+            "reportableFindingsCount": {"type": "integer", "minimum": 0}, "message": {"type": "string", "maxLength": 1000}
+        }),
     },
-    {
-        "name": "security_deep_retry_worker",
-        "description": "Replace only an incomplete Deep worker. Completed worker artifacts are immutable.",
-        "inputSchema": {"type": "object", "properties": {"workspaceRoot": {"type": "string"}, "scanId": {"type": "string"}, "workerIndex": {"type": "integer", "minimum": 1, "maximum": 6}, "reason": {"type": "string"}}, "required": ["scanId", "workerIndex"], "additionalProperties": False},
-    },
-    {"name": "security_deep_claim_merge", "description": "Claim semantic merge after all six workers are complete and apply the returned mergeBrief unchanged.", "inputSchema": _id_schema("scanId")},
-    {
-        "name": "security_deep_submit_merge",
-        "description": (
-            "Submit canonical merge, consume every current sourceRef exactly once, preserve prior candidates, and "
-            "continue rounds until zero novelty or round 10. Every canonical candidate requires mergeRationale, "
-            "identityRationale, and remediationSubsumption; retained canonical IDs must keep their fingerprint and "
-            "semantic identity, and prior identities cannot be re-registered under new IDs."
-        ),
-        "inputSchema": {"type": "object", "properties": {"workspaceRoot": {"type": "string"}, "scanId": {"type": "string"}, "claimToken": {"type": "string"}, "canonicalCandidates": {"type": "array", "items": {"type": "object"}}}, "required": ["scanId", "claimToken", "canonicalCandidates"], "additionalProperties": False},
-    },
-    {
-        "name": "security_deep_get_tail_assignment",
-        "description": "Claim the next eligible fresh-context Deep tail assignment and pass payload.assignmentContract.instruction unchanged.",
-        "inputSchema": {"type": "object", "properties": {"workspaceRoot": {"type": "string"}, "scanId": {"type": "string"}, "modelId": {"type": "string"}, "delegationId": {"type": "string"}, "runtime": {"type": "object"}}, "required": ["scanId", "modelId", "delegationId", "runtime"], "additionalProperties": False},
-    },
-    {
-        "name": "security_deep_submit_tail_result",
-        "description": "Submit one kind-checked Deep tail result with the same claim profile and a truthful completion attestation.",
-        "inputSchema": {"type": "object", "properties": {"workspaceRoot": {"type": "string"}, "scanId": {"type": "string"}, "assignmentId": {"type": "string"}, "claimToken": {"type": "string"}, "modelId": {"type": "string"}, "delegationId": {"type": "string"}, "runtime": {"type": "object"}, "completionAttestation": {"type": "object"}, "result": {"type": "object"}}, "required": ["scanId", "assignmentId", "claimToken", "modelId", "delegationId", "runtime", "completionAttestation", "result"], "additionalProperties": False},
-    },
-    {
-        "name": "security_deep_retry_writeup",
-        "description": "Retry only the latest incomplete or failed Deep writeup attempt; completed writeups are immutable.",
-        "inputSchema": {"type": "object", "properties": {"workspaceRoot": {"type": "string"}, "scanId": {"type": "string"}, "assignmentId": {"type": "string"}, "reason": {"type": "string"}}, "required": ["scanId", "assignmentId"], "additionalProperties": False},
-    },
+    {"name": "security_complete_scan", "description": "One-shot validate, index, project, and seal fixed Agent-authored canonical artifacts under the current coordinator lease.", "inputSchema": _lease_schema()},
+    {"name": "security_fail_scan", "description": "Fail a running scan with an explicit reason and atomically release its coordinator lease.", "inputSchema": _lease_schema(extra={"reason": {"type": "string", "minLength": 1, "maxLength": 4000}}, required_extra=["reason"])},
     {
         "name": "security_list_findings",
-        "description": "List normalized findings for a scan.",
+        "description": "List findings indexed from the sealed canonical document.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -270,7 +175,6 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {"name": "security_get_finding", "description": "Get one finding with evidence, validation, attack path, triage, remediation, and tracking records.", "inputSchema": _id_schema("occurrenceId")},
-    {"name": "security_validate_finding", "description": "Validate a finding and produce an attack-path record where applicable.", "inputSchema": _id_schema("occurrenceId")},
     {
         "name": "security_triage_finding",
         "description": "Record an auditable triage decision for a finding.",
@@ -298,7 +202,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {"name": "security_apply_remediation_patch", "description": "Apply exactly one prepared patch after digest, revision, touched-file, and state revalidation.", "inputSchema": {"type": "object", "properties": {"workspaceRoot": {"type": "string"}, "remediationId": {"type": "string"}, "expectedVersion": {"type": "integer", "minimum": 1}}, "required": ["remediationId", "expectedVersion"], "additionalProperties": False}},
     {"name": "security_verify_remediation_patch", "description": "Record a bounded Agent-submitted verification receipt; incomplete proof cannot become verified.", "inputSchema": {"type": "object", "properties": {"workspaceRoot": {"type": "string"}, "remediationId": {"type": "string"}, "expectedVersion": {"type": "integer", "minimum": 1}, "verification": {"type": "object"}}, "required": ["remediationId", "expectedVersion", "verification"], "additionalProperties": False}},
-    {"name": "security_create_triage_intake", "description": "Persist one bounded untrusted external finding intake without inventing scan finding fields.", "inputSchema": {"type": "object", "properties": {"workspaceRoot": {"type": "string"}, "occurrenceId": {"type": "string"}, "sourceType": {"type": "string", "enum": ["sarif", "cve", "advisory", "scanner_ticket", "bug_bounty", "codex_security_finding", "freeform", "unknown"]}, "inputId": {"type": "string", "maxLength": 512}, "input": {"type": "object"}}, "required": ["sourceType", "inputId", "input"], "additionalProperties": False}},
+    {"name": "security_create_triage_intake", "description": "Persist one bounded untrusted external finding intake without inventing scan finding fields.", "inputSchema": {"type": "object", "properties": {"workspaceRoot": {"type": "string"}, "occurrenceId": {"type": "string"}, "sourceType": {"type": "string", "enum": ["sarif", "cve", "advisory", "scanner_ticket", "bug_bounty", "kiro_security_finding", "freeform", "unknown"]}, "inputId": {"type": "string", "maxLength": 512}, "input": {"type": "object"}}, "required": ["sourceType", "inputId", "input"], "additionalProperties": False}},
     {"name": "security_submit_triage_assessment", "description": "Complete one pending intake with a static source/control/sink/boundary proof chain.", "inputSchema": {"type": "object", "properties": {"workspaceRoot": {"type": "string"}, "assessmentId": {"type": "string"}, "result": {"type": "object"}}, "required": ["assessmentId", "result"], "additionalProperties": False}},
     {
         "name": "security_create_tracking_handoff",
@@ -318,16 +222,6 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {"name": "security_record_tracking_result", "description": "Record sanitized same-connector readback for an approved handoff; this tool performs no provider network write.", "inputSchema": {"type": "object", "properties": {"workspaceRoot": {"type": "string"}, "recordId": {"type": "string"}, "payloadSha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "outcome": {"type": "string", "enum": ["created", "updated", "reused", "blocked", "failed", "uncertain"]}, "externalMutationPerformed": {"type": "boolean"}, "externalId": {"type": "string", "maxLength": 512}, "externalUrl": {"type": "string", "maxLength": 4096}, "reason": {"type": "string", "maxLength": 4000}, "approval": {"type": "object", "properties": {"approved": {"const": True}, "approvedPreviewDigest": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "approvedPayloadSha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}, "approvedBy": {"type": "string", "maxLength": 512}, "approvedAt": {"type": "string", "maxLength": 128}, "scope": {"type": "string", "maxLength": 2000}}, "required": ["approved", "approvedPreviewDigest", "approvedPayloadSha256", "approvedBy", "approvedAt", "scope"], "additionalProperties": False}, "readback": {"type": "object"}}, "required": ["recordId", "payloadSha256", "outcome", "externalMutationPerformed"], "additionalProperties": False}},
-    {"name": "security_create_hardening_proposal", "description": "Create a structural hardening proposal for a scan.", "inputSchema": _id_schema("scanId")},
-    {
-        "name": "security_create_threat_model",
-        "description": "Create or refresh a workspace threat model.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"workspaceRoot": {"type": "string"}, "scope": {"type": "string", "minLength": 1, "default": "."}},
-            "additionalProperties": False,
-        },
-    },
     {
         "name": "security_export_report",
         "description": "Export a scan or one finding as Markdown, JSON, CSV, or SARIF.",
@@ -347,12 +241,10 @@ TOOLS: list[dict[str, Any]] = [
 ]
 
 _TOOL_STRING_LIMITS = {
-    "workspaceRoot": 8192, "mode": 16, "analysisProfile": 16, "scope": 4096,
+    "workspaceRoot": 8192, "mode": 16, "scope": 4096,
     "diffTargetKind": 32, "diffBaseRevision": 256, "diffHeadRevision": 256,
-    "modelId": 256, "delegationId": 256, "scanId": 256, "workerId": 256,
-    "claimToken": 256, "threatModel": 200000, "summary": 20000,
-    "seedResearch": 200000, "dedupeReport": 200000, "reason": 4000,
-    "assignmentId": 256, "search": 200, "occurrenceId": 256, "findingId": 256,
+    "userContext": 4000, "scanId": 256, "reason": 4000, "phase": 32, "message": 1000,
+    "search": 200, "occurrenceId": 256, "findingId": 256,
     "decision": 32, "sourceType": 64, "inputId": 512, "assessmentId": 256,
     "patch": 600000, "plan": 12000, "remediationId": 256, "recordId": 256,
     "payloadSha256": 64, "outcome": 32, "externalId": 512, "externalUrl": 4096,
@@ -488,15 +380,9 @@ class McpServer:
             if mode not in ("standard", "deep", "diff"):
                 raise ValueError("mode must be standard, deep, or diff.")
             scope = _bounded_string(params["scope"], "scope") if "scope" in params else "."
-            if params.get("analysisProfile") != "model":
-                raise ValueError("Agent Standard, Diff, and Deep starts require analysisProfile=model.")
-            runtime = params.get("runtime")
-            if not isinstance(runtime, dict):
-                raise ValueError("Model scan start requires a host-attested runtime object.")
-            request = {
-                "mode": mode, "scope": scope, "analysisProfile": "model",
-                "modelId": _bounded_string(params.get("modelId"), "modelId", 256), "runtime": runtime,
-            }
+            request = {"mode": mode, "scope": scope}
+            if "userContext" in params:
+                request["userContext"] = _bounded_string(params.get("userContext"), "userContext", 4000)
             if mode == "diff":
                 kind = params.get("diffTargetKind") or "working_tree"
                 if kind not in ("working_tree", "commit", "range"):
@@ -509,94 +395,43 @@ class McpServer:
                     }
                 )
             return service.start_scan(request)
-        if name == "security_list_scans":
-            return service.list_scans({"limit": _integer(params.get("limit"), "limit", 50, 1, 200)})
-        if name == "security_resume_scan":
-            return service.resume_scan({"scanId": _bounded_string(params.get("scanId"), "scanId", 256)})
+        if name == "security_acquire_scan_coordinator":
+            return service.acquire_scan_coordinator({"scanId": _bounded_string(params.get("scanId"), "scanId", 256)})
+        if name == "security_renew_scan_coordinator":
+            return service.renew_scan_coordinator(_lease_request(params))
+        if name == "security_release_scan_coordinator":
+            return service.release_scan_coordinator(_lease_request(params))
         if name == "security_cancel_scan":
-            return service.cancel_scan({"scanId": _bounded_string(params.get("scanId"), "scanId", 256)})
+            return service.cancel_scan(_lease_request(params))
         if name == "security_get_scan":
             return service.get_scan({"scanId": _bounded_string(params.get("scanId"), "scanId", 256)})
         if name == "security_get_progress":
             return service.get_progress({"scanId": _bounded_string(params.get("scanId"), "scanId", 256)})
-        if name == "security_deep_get_status":
-            return service.deep_get_status({"scanId": _bounded_string(params.get("scanId"), "scanId", 256)})
-        if name == "security_deep_claim_worker":
-            runtime = params.get("runtime")
-            if not isinstance(runtime, dict):
-                raise ValueError("runtime must be a host-attested object (contractVersion deep-worker/v2).")
-            return service.deep_claim_worker({
-                "scanId": _bounded_string(params.get("scanId"), "scanId", 256),
-                "modelId": _bounded_string(params.get("modelId"), "modelId", 256),
-                "delegationId": _bounded_string(params.get("delegationId"), "delegationId", 256),
-                "runtime": runtime,
-            })
-        if name == "security_deep_submit_worker_result":
-            row_receipts = params.get("rowReceipts")
-            candidates = params.get("candidates")
-            if not isinstance(row_receipts, list) or not isinstance(candidates, list):
-                raise ValueError("rowReceipts and candidates must be arrays.")
-            completion_attestation = params.get("completionAttestation")
-            if not isinstance(completion_attestation, dict):
-                raise ValueError("completionAttestation must be a host-attested object.")
-            return service.deep_submit_worker({
-                "scanId": _bounded_string(params.get("scanId"), "scanId", 256),
-                "workerId": _bounded_string(params.get("workerId"), "workerId", 256),
-                "claimToken": _bounded_string(params.get("claimToken"), "claimToken", 256),
-                "rowReceipts": row_receipts,
-                "threatModel": _bounded_string(params.get("threatModel"), "threatModel", 200000),
-                "summary": _bounded_string(params.get("summary"), "summary", 20000, required=False) or "",
-                "seedResearch": _bounded_string(params.get("seedResearch"), "seedResearch", 200000, required=False) or "",
-                "dedupeReport": _bounded_string(params.get("dedupeReport"), "dedupeReport", 200000, required=False) or "",
-                "candidates": candidates,
-                "completionAttestation": completion_attestation,
-            })
-        if name == "security_deep_retry_worker":
-            return service.deep_retry_worker({
-                "scanId": _bounded_string(params.get("scanId"), "scanId", 256),
-                "workerIndex": _integer(params.get("workerIndex"), "workerIndex", 1, 1, 6),
-                "reason": _bounded_string(params.get("reason"), "reason", 4000, required=False) or "Worker replacement requested",
-            })
-        if name == "security_deep_claim_merge":
-            return service.deep_claim_merge({"scanId": _bounded_string(params.get("scanId"), "scanId", 256)})
-        if name == "security_deep_submit_merge":
-            candidates = params.get("canonicalCandidates")
-            if not isinstance(candidates, list):
-                raise ValueError("canonicalCandidates must be an array.")
-            return service.deep_submit_merge({
-                "scanId": _bounded_string(params.get("scanId"), "scanId", 256),
-                "claimToken": _bounded_string(params.get("claimToken"), "claimToken", 256),
-                "canonicalCandidates": candidates,
-            })
-        if name == "security_deep_get_tail_assignment":
-            runtime = params.get("runtime")
-            if not isinstance(runtime, dict):
-                raise ValueError("runtime must be a host-attested object.")
-            return service.deep_get_tail_assignment({
-                "scanId": _bounded_string(params.get("scanId"), "scanId", 256),
-                "modelId": _bounded_string(params.get("modelId"), "modelId", 256),
-                "delegationId": _bounded_string(params.get("delegationId"), "delegationId", 256),
-                "runtime": runtime,
-            })
-        if name == "security_deep_submit_tail_result":
-            runtime = params.get("runtime")
-            completion = params.get("completionAttestation")
-            result = params.get("result")
-            if not isinstance(runtime, dict) or not isinstance(completion, dict) or not isinstance(result, dict):
-                raise ValueError("runtime, completionAttestation, and result must be objects.")
-            return service.deep_submit_tail_result({
-                "scanId": _bounded_string(params.get("scanId"), "scanId", 256),
-                "assignmentId": _bounded_string(params.get("assignmentId"), "assignmentId", 256),
-                "claimToken": _bounded_string(params.get("claimToken"), "claimToken", 256),
-                "modelId": _bounded_string(params.get("modelId"), "modelId", 256),
-                "delegationId": _bounded_string(params.get("delegationId"), "delegationId", 256),
-                "runtime": runtime, "completionAttestation": completion, "result": result,
-            })
-        if name == "security_deep_retry_writeup":
-            return service.deep_retry_writeup({
-                "scanId": _bounded_string(params.get("scanId"), "scanId", 256),
-                "assignmentId": _bounded_string(params.get("assignmentId"), "assignmentId", 256),
-                "reason": _bounded_string(params.get("reason"), "reason", 4000, required=False) or "Incomplete writeup retry requested.",
+        if name == "security_get_scan_context":
+            return service.get_scan_context({"scanId": _bounded_string(params.get("scanId"), "scanId", 256)})
+        if name == "security_update_scan_progress":
+            request: dict[str, Any] = _lease_request(params)
+            if "phase" in params:
+                phase = _bounded_string(params.get("phase"), "phase", 32)
+                if phase not in ("preflight", "threat_model", "discovery", "validation", "attack_path", "reporting"):
+                    raise ValueError("Unsupported progress phase.")
+                request["phase"] = phase
+            if "phasePercent" in params:
+                percent = params["phasePercent"]
+                if isinstance(percent, bool) or not isinstance(percent, (int, float)) or not 0 <= percent <= 100:
+                    raise ValueError("phasePercent must be a number between 0 and 100.")
+                request["phasePercent"] = percent
+            for field in ("itemsTotal", "itemsCompleted", "reportableFindingsCount"):
+                if field in params:
+                    request[field] = _integer(params[field], field, 0, 0, 2_147_483_647)
+            if "message" in params:
+                request["message"] = _bounded_string(params.get("message"), "message", 1000)
+            return service.update_scan_progress(request)
+        if name == "security_complete_scan":
+            return service.complete_scan(_lease_request(params))
+        if name == "security_fail_scan":
+            return service.fail_scan({
+                **_lease_request(params), "reason": _bounded_string(params.get("reason"), "reason", 4000),
             })
         if name == "security_list_findings":
             search = _bounded_string(params["search"], "search", 200) if "search" in params else None
@@ -609,8 +444,6 @@ class McpServer:
             )
         if name == "security_get_finding":
             return service.get_finding({"occurrenceId": _bounded_string(params.get("occurrenceId"), "occurrenceId", 256)})
-        if name == "security_validate_finding":
-            return service.validate_finding({"occurrenceId": _bounded_string(params.get("occurrenceId"), "occurrenceId", 256)})
         if name == "security_triage_finding":
             decision = _bounded_string(params.get("decision"), "decision", 32)
             if decision not in ("open", "accepted_risk", "false_positive", "already_fixed", "wont_fix"):
@@ -687,11 +520,6 @@ class McpServer:
                 "reason": params.get("reason"), "approval": params.get("approval"),
                 "readback": params.get("readback"),
             })
-        if name == "security_create_hardening_proposal":
-            return service.create_hardening_proposal({"scanId": _bounded_string(params.get("scanId"), "scanId", 256)})
-        if name == "security_create_threat_model":
-            scope = _bounded_string(params["scope"], "scope") if "scope" in params else "."
-            return service.refresh_threat_model({"scope": scope})
         if name == "security_export_report":
             export_format = _bounded_string(params.get("format"), "format", 16)
             if export_format not in ("markdown", "json", "csv", "sarif"):

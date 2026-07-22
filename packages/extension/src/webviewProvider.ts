@@ -104,15 +104,6 @@ export class SecurityWebviewProvider implements vscode.WebviewViewProvider, Secu
       case "refresh":
         await this.controller.refresh();
         return;
-      case "startScan":
-        await this.controller.startScan(message.mode, message);
-        return;
-      case "resumeScan":
-        await this.controller.resumeScan(message.scanId);
-        return;
-      case "cancelScan":
-        await this.controller.cancelScan(message.scanId);
-        return;
       case "selectScan":
         await this.controller.selectScan(message.scanId);
         return;
@@ -122,9 +113,6 @@ export class SecurityWebviewProvider implements vscode.WebviewViewProvider, Secu
       case "openSource":
         await this.controller.openFinding(message.occurrenceId, true);
         return;
-      case "validateFinding":
-        await this.controller.validateFinding(message.occurrenceId);
-        return;
       case "triageFinding":
         await this.controller.triageFinding(message.occurrenceId, message.decision, message.note);
         return;
@@ -133,9 +121,6 @@ export class SecurityWebviewProvider implements vscode.WebviewViewProvider, Secu
         return;
       case "createTrackingHandoff":
         await this.controller.createTrackingHandoff(message.occurrenceId, message.provider);
-        return;
-      case "createHardening":
-        await this.controller.createHardening(message.scanId);
         return;
       case "cleanupScan":
         await this.controller.cleanupScan(message.scanId);
@@ -160,6 +145,9 @@ export class SecurityWebviewProvider implements vscode.WebviewViewProvider, Secu
         return;
       case "copyMcpConfig":
         await this.controller.copyMcpConfig();
+        return;
+      case "copyPowerPath":
+        await this.controller.copyPowerPath();
         return;
       case "installAgentIntegration":
         await this.controller.installAgentIntegration(message.scope, message.autoApprovePolicy);

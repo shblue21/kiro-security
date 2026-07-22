@@ -1,5 +1,7 @@
 # Cloud verification record
 
+> Historical pre-parity record for version 0.2.0. It is not evidence for the current 0.3.0 Skill-driven model-scan contract and does not satisfy the Kiro Desktop gate. Use `local-kiro-smoke-test.md` and `migration-matrix.md` for the current acceptance state.
+
 Verification date: 2026-07-14
 
 This record separates repository/cloud checks from Kiro desktop checks. The current environment has no `kiro` executable, no `KIRO_CLI`, and no `/Applications/Kiro.app`, so installation, Activity Bar rendering, Secondary Side Bar placement, Kiro Agent reconnection, source navigation inside Kiro, and interactive lifecycle checks are not marked complete here.
@@ -47,6 +49,6 @@ The integration suite also starts a scan through MCP and observes the same scan 
 
 ## Broader coverage represented by the checks
 
-The automated suite covers scan state transitions; mode and phase handling; schema and RPC validation; malformed messages and protocol version mismatch; SQLite migrations, backup, locking, corruption reporting, cancellation, interrupted recovery and resume; Standard, Deep, and Diff scans over a real fixture Git repository; threat-model, discovery, validation, attack-path, report, hardening, writeup, tracking, and export artifacts; JSON, CSV, SARIF, Markdown, and per-finding export; source URI/range mapping; diagnostic routing; Webview loading, error, empty, filter, Agent Setup, detail action, theme, CSP, keyboard, and basic accessibility behavior; and MCP/extension-like clients sharing one SQLite workbench in both directions.
+The automated suite covers scan state transitions; mode and phase handling; schema and RPC validation; malformed messages and protocol version mismatch; SQLite migrations, backup, locking, corruption reporting, cancellation, durable running scans across Engine shutdown, and transient coordinator lease arbitration; Standard, Deep, and Diff scans over a real fixture Git repository; threat-model, discovery, validation, attack-path, report, hardening, writeup, tracking, and export artifacts; JSON, CSV, SARIF, Markdown, and per-finding export; source URI/range mapping; diagnostic routing; Webview loading, error, empty, filter, Agent Setup, detail action, theme, CSP, keyboard, and basic accessibility behavior; and MCP/extension-like clients sharing one SQLite workbench in both directions.
 
 The Webview tests use a JSDOM harness. They are not evidence of Kiro desktop rendering. The repository does not contain a Kiro or VS Code desktop binary, so desktop-host execution was not performed in this environment.

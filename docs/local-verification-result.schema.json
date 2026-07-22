@@ -51,12 +51,10 @@
         "nativePowerPrepared",
         "agentCapabilities",
         "agentSetupVerified",
-        "fastScan",
-        "modelStandardScan",
-        "modelDiffScan",
-        "deepSixWorker",
+        "standardScan",
+        "diffScan",
+        "deepFourWorker",
         "deepMultiRound",
-        "deepTail",
         "canonicalSeal",
         "liveProgress",
         "realFinding",
@@ -64,7 +62,7 @@
         "problemsDiagnostic",
         "exports",
         "historyAfterRestart",
-        "resumeInterruptedScan",
+        "coordinatorLeaseHandoff",
         "mcpToVsix",
         "vsixToMcp",
         "disableAndUninstall"
@@ -79,22 +77,16 @@
         "secondarySideBar": {
           "$ref": "#/$defs/check"
         },
-        "fastScan": {
+        "standardScan": {
           "$ref": "#/$defs/check"
         },
-        "modelStandardScan": {
+        "diffScan": {
           "$ref": "#/$defs/check"
         },
-        "modelDiffScan": {
-          "$ref": "#/$defs/check"
-        },
-        "deepSixWorker": {
+        "deepFourWorker": {
           "$ref": "#/$defs/check"
         },
         "deepMultiRound": {
-          "$ref": "#/$defs/check"
-        },
-        "deepTail": {
           "$ref": "#/$defs/check"
         },
         "canonicalSeal": {
@@ -118,7 +110,7 @@
         "historyAfterRestart": {
           "$ref": "#/$defs/check"
         },
-        "resumeInterruptedScan": {
+        "coordinatorLeaseHandoff": {
           "$ref": "#/$defs/check"
         },
         "mcpToVsix": {

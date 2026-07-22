@@ -19,33 +19,27 @@ const MAX_CONFIG_BYTES = 2 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const READ_ONLY_TOOLS = [
   "security_get_capabilities",
-  "security_list_scans",
   "security_get_scan",
   "security_get_progress",
-  "security_deep_get_status",
+  "security_get_scan_context",
   "security_list_findings",
   "security_get_finding",
 ] as const;
 const REQUIRED_TOOLS = [
   "security_get_capabilities",
   "security_start_scan",
-  "security_list_scans",
-  "security_resume_scan",
+  "security_acquire_scan_coordinator",
+  "security_renew_scan_coordinator",
+  "security_release_scan_coordinator",
   "security_cancel_scan",
   "security_get_scan",
   "security_get_progress",
-  "security_deep_get_status",
-  "security_deep_claim_worker",
-  "security_deep_submit_worker_result",
-  "security_deep_retry_worker",
-  "security_deep_claim_merge",
-  "security_deep_submit_merge",
-  "security_deep_get_tail_assignment",
-  "security_deep_submit_tail_result",
-  "security_deep_retry_writeup",
+  "security_get_scan_context",
+  "security_update_scan_progress",
+  "security_complete_scan",
+  "security_fail_scan",
   "security_list_findings",
   "security_get_finding",
-  "security_validate_finding",
   "security_triage_finding",
   "security_create_remediation",
   "security_prepare_remediation_patch",
@@ -55,8 +49,6 @@ const REQUIRED_TOOLS = [
   "security_submit_triage_assessment",
   "security_create_tracking_handoff",
   "security_record_tracking_result",
-  "security_create_hardening_proposal",
-  "security_create_threat_model",
   "security_export_report",
 ] as const;
 
@@ -95,7 +87,8 @@ interface IntegrationState {
   configPath?: string;
   configDigest?: string;
   steeringPath?: string;
-  powerImportedConfirmed?: boolean;
+  powerConfigDigest?: string;
+  powerVerifiedAt?: string;
   autoApprovePolicy?: AgentAutoApprovePolicy;
 }
 
@@ -219,7 +212,7 @@ export function buildAgentSteering(version: string): string {
   return `---
 inclusion: auto
 name: kiro-security-power
-description: Use Kiro Security Power for repository security scans, deep or Git-diff scans, threat modeling, finding validation and triage, remediation guidance, hardening proposals, and JSON, CSV, SARIF, or Markdown exports.
+description: Use Kiro Security Power for Skill-driven repository, deep, or Git-diff security scans, triage, remediation, tracking, and exports.
 ---
 ${MANAGED_STEERING_MARKER}
 
@@ -227,18 +220,21 @@ ${MANAGED_STEERING_MARKER}
 
 Use the MCP server named \`${AGENT_MCP_SERVER_NAME}\` for repository security work. The MCP tools and the installed VSIX share the same durable SQLite workbench at \`<workspace>/.kiro/security-power/workbench.sqlite\`.
 
+This auto steering is only an activation and safety bridge; it is not the scan methodology. MCP availability alone does not make scans ready. Do not start Standard, Diff, or Deep unless Kiro has activated the installed native Power and the current context contains its \`POWER.md\` plus the selected mode steering. If those instructions are absent, stop before \`security_start_scan\` and tell the user to import the prepared folder from Powers → Add Custom Power → Import power from a folder.
+
 ## Workflow
 
 1. Pass the canonical current workspace as \`workspaceRoot\` to every security tool.
 2. Call \`security_get_capabilities\` before substantive work.
-3. Start model Standard/Diff/Deep scans only with \`security_start_scan\`, \`analysisProfile: "model"\`, the selected \`modelId\`, and truthful \`deep-worker/v2\` host-attested \`runtime\`. VSIX Fast Scan is the explicitly deterministic heuristic path.
-4. Use \`security_deep_get_status\`, run exactly six independent workers per round through \`security_deep_claim_worker\` and \`security_deep_submit_worker_result\`, and use the merge tools. Standard/Diff close after one semantic merge; Deep repeats until a complete round adds zero new canonical candidates or round 10 is explicitly capped. Never substitute Fast results. Claim all six workers before the first result is submitted, with one identical host-attested runtime profile per round (\`contractVersion: "deep-worker/v2"\`, \`delegationMode: "fresh"\`, capability flags, \`usableWorkerSlots >= 6\`). Submit each result with a truthful host \`completionAttestation\` (\`freshContext\`, no inherited coordinator history, \`workerState: "completed_idle"\`) and evidence-grounded candidates only: non-empty \`codeEvidence\` with explicit origin/control and sink/impact roles, impact, root cause, and severity/confidence rationales — the engine never fabricates evidence, seed research, or dedupe judgments. Each canonical merge candidate requires \`mergeRationale\`, \`identityRationale\`, and \`remediationSubsumption\`, and must not drift or re-register prior canonical identities.
-5. Poll \`security_get_scan\` until a terminal or resumable state; never invent progress or results.
-6. Read evidence with \`security_list_findings\` and \`security_get_finding\`.
-7. For VSIX Fast findings, use \`security_validate_finding\` before calling them verified. Model scans already carry authoritative tail validation and attack-path proof from \`security_get_finding\`; never overwrite it with the deterministic validation tool.
-8. Record user-directed triage through \`security_triage_finding\`; never silently suppress a finding.
-9. Use remediation, tracking-handoff, and export tools for durable artifacts. Use deterministic hardening only for Fast scans; model scans already materialize immutable tail hardening.
-10. Do not create a second scanner, database, or fixture-backed result path.
+3. Start Standard, Diff, and Deep only with \`security_start_scan\`; every mode is owned by its mode-specific Power workflow. Keep the one-time coordinator lease token only in the top-level coordinator context and never pass it to a subagent or artifact.
+4. A scan returned with a busy lease is read-only. Acquire an available or expired lease through \`security_acquire_scan_coordinator\`, renew it at phase boundaries through \`security_renew_scan_coordinator\`, and release unfinished work through \`security_release_scan_coordinator\`. Engine shutdown never changes scan status.
+5. Load \`security_get_scan_context\`, then follow the mode-specific Power steering one phase at a time. The coordinator owns native \`invoke_sub_agent\` calls, phase barriers, semantic merge, novelty, validation, attack paths, writeups, hardening, and canonical assembly. The Engine owns no worker jobs or next-action plan. Do not substitute another analysis path if delegation is unavailable.
+6. Use \`security_update_scan_progress\` only for user-visible progress and always provide the current lease token and generation. After fixed canonical artifacts are complete, call \`security_complete_scan\` once with that credential. Use \`security_fail_scan\` for explicit failure and \`security_cancel_scan\` for cooperative cancellation; both require and atomically release the lease.
+7. Read evidence with \`security_list_findings\` and \`security_get_finding\`.
+8. Validation, attack-path evidence, writeups, and collection hardening are Agent-authored phase artifacts sealed by canonical completion.
+9. Record user-directed triage through \`security_triage_finding\`; never silently suppress a finding.
+10. Use remediation, tracking-handoff, and export tools only after reading the sealed canonical finding.
+11. Do not create a second scanner, database, or fixture-backed result path.
 
 ## Safety
 
@@ -760,8 +756,12 @@ export class AgentIntegrationManager {
 
   private async sourcePackaged(): Promise<boolean> {
     try {
-      const [power, steering] = await Promise.all([fs.stat(path.join(this.sourcePowerPath, "POWER.md")), fs.stat(path.join(this.sourcePowerPath, "steering"))]);
-      return power.isFile() && steering.isDirectory();
+      const [power, steering, references] = await Promise.all([
+        fs.stat(path.join(this.sourcePowerPath, "POWER.md")),
+        fs.stat(path.join(this.sourcePowerPath, "steering")),
+        fs.stat(path.join(this.sourcePowerPath, "references")),
+      ]);
+      return power.isFile() && steering.isDirectory() && references.isDirectory();
     } catch {
       return false;
     }
@@ -783,6 +783,12 @@ export class AgentIntegrationManager {
       ...await collectTrustedPayloadTree(
         path.join(this.sourcePowerPath, "steering"),
         "steering",
+        this.extensionRoot,
+        (relative) => relative.toLowerCase().endsWith(".md"),
+      ),
+      ...await collectTrustedPayloadTree(
+        path.join(this.sourcePowerPath, "references"),
+        "references",
         this.extensionRoot,
         (relative) => relative.toLowerCase().endsWith(".md"),
       ),
@@ -893,10 +899,12 @@ export class AgentIntegrationManager {
         path.join(this.powerPath, "POWER.md"),
         path.join(this.powerPath, "mcp.json"),
         path.join(this.powerPath, "steering"),
+        path.join(this.powerPath, "references"),
         path.join(this.powerPath, "runtime", "engine", "kiro_security", "mcp_server.py"),
       ];
       const info = await Promise.all(required.map((entry) => fs.lstat(entry)));
-      const shapeValid = info[0].isFile() && info[1].isFile() && info[2].isDirectory() && info[3].isFile()
+      const shapeValid = info[0].isFile() && info[1].isFile() && info[2].isDirectory()
+        && info[3].isDirectory() && info[4].isFile()
         && !info.some((entry) => entry.isSymbolicLink());
       if (!shapeValid) return { prepared: true, valid: false };
       await this.verifyPreparedPayload(this.powerPath, expectedPython, expectedPolicy);
@@ -920,7 +928,7 @@ export class AgentIntegrationManager {
     const direct = configs.find((entry) => entry.direct && !entry.direct.disabled);
     const anyDirect = configs.find((entry) => entry.direct);
     const managed = configs.find((entry) => entry.powerManaged && !entry.powerManaged.disabled);
-    const active = direct?.direct ?? managed?.powerManaged;
+    const active = managed?.powerManaged ?? direct?.direct;
     const expectedEngine = path.join(this.powerPath, "runtime", "engine");
     const directDigestMismatch = Boolean(anyDirect?.direct && state?.configDigest && state.configDigest !== configDigest(anyDirect.direct));
     const versionStale = Boolean(anyDirect?.direct && state?.productVersion && state.productVersion !== this.productVersion);
@@ -936,7 +944,14 @@ export class AgentIntegrationManager {
     ));
     const parseFailure = configs.find((entry) => entry.parseError);
     const configured = Boolean(active);
-    const verified = Boolean(configured && prepared.valid && !stale && active && state?.verifiedAt && state.configDigest === configDigest(active) && state.productVersion === this.productVersion);
+    const verified = Boolean(
+      managed?.powerManaged
+      && prepared.valid
+      && !stale
+      && state?.powerVerifiedAt
+      && state.powerConfigDigest === configDigest(managed.powerManaged)
+      && state.productVersion === this.productVersion
+    );
     let stateName: AgentIntegrationStatus["state"] = "not_configured";
     if (parseFailure || (configured && (!runtime.probe.available || !runtime.probe.supported))) stateName = "error";
     else if (stale || (prepared.prepared && !prepared.valid) || (configured && !prepared.prepared)) stateName = "needs_repair";
@@ -950,8 +965,8 @@ export class AgentIntegrationManager {
     else if (stale) details.push(`The managed MCP entry does not match this VSIX version${directShapeIssue ? ` (${directShapeIssue})` : ""}; run Repair Agent Integration.`);
     if (configured && !prepared.prepared) details.push("The managed MCP entry points to a missing prepared runtime; run Repair Agent Integration.");
     else if (prepared.prepared && !prepared.valid) details.push("The prepared Agent runtime failed its integrity check; run Repair Agent Integration before using it.");
-    if (managed) details.push("A Kiro-managed native Power MCP entry was detected.");
-    else if (prepared.prepared) details.push("Agent tools and steering are active. Native Powers-panel import is optional.");
+    if (managed) details.push("A Kiro-managed native Power registration was detected and its MCP runtime can be verified.");
+    else if (prepared.prepared) details.push("MCP runtime preparation passed, but scans are not ready until the prepared folder is imported from Kiro's Powers panel.");
     const steering = state?.steeringPath;
     return {
       packaged,
@@ -970,11 +985,11 @@ export class AgentIntegrationManager {
         prepared: prepared.prepared,
         preparedPath: prepared.prepared ? this.powerPath : undefined,
         manifestValid: prepared.valid,
-        registration: managed ? "detected" : state?.powerImportedConfirmed ? "user_confirmed" : prepared.prepared ? "import_required" : "not_prepared",
+        registration: managed ? "detected" : prepared.prepared ? "import_required" : "not_prepared",
         importRequiresKiroConfirmation: !managed,
       },
       autoApprovePolicy: state?.autoApprovePolicy,
-      lastVerifiedAt: verified ? state?.verifiedAt : undefined,
+      lastVerifiedAt: verified ? state?.powerVerifiedAt : undefined,
       lastError: parseFailure?.parseError,
       details,
     };
@@ -998,6 +1013,7 @@ export class AgentIntegrationManager {
     try {
       await copyTrustedFile(path.join(this.sourcePowerPath, "POWER.md"), path.join(staging, "POWER.md"), this.extensionRoot);
       await copyTrustedTree(path.join(this.sourcePowerPath, "steering"), path.join(staging, "steering"), this.extensionRoot, (relative) => relative.toLowerCase().endsWith(".md"));
+      await copyTrustedTree(path.join(this.sourcePowerPath, "references"), path.join(staging, "references"), this.extensionRoot, (relative) => relative.toLowerCase().endsWith(".md"));
       try { await copyTrustedFile(path.join(this.sourcePowerPath, "NOTICE.md"), path.join(staging, "NOTICE.md"), this.extensionRoot); } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
@@ -1008,10 +1024,10 @@ export class AgentIntegrationManager {
       const entry = buildServerConfig(invocation, pythonPath, engineRoot, undefined, policy);
       await atomicWrite(path.join(staging, "mcp.json"), `${JSON.stringify({ mcpServers: { [POWER_MCP_SERVER_NAME]: entry } }, null, 2)}\n`);
       await atomicWrite(path.join(staging, "INSTALL.md"), [
-        "# Optional native Kiro Power registration",
+        "# Required native Kiro Power registration",
         "",
-        "The VSIX Setup already installed verified MCP tools and auto-activation steering.",
-        "To also show this integration in Kiro's Powers panel:",
+        "The VSIX Setup prepared and probed the MCP runtime. Standard, Diff, and Deep scans remain unavailable until Kiro installs the Power and can load POWER.md plus phase steering.",
+        "To enable the Skill-driven scan workflows:",
         "",
         "1. Open Powers → Add Custom Power.",
         "2. Choose Import power from a folder.",
@@ -1166,7 +1182,6 @@ export class AgentIntegrationManager {
         configPath,
         configDigest: configDigest(config),
         steeringPath,
-        powerImportedConfirmed: previousState?.powerImportedConfirmed,
         autoApprovePolicy: options.autoApprovePolicy,
       });
       if (previousPower) await fs.rm(previousPower, { recursive: true, force: true });
@@ -1202,20 +1217,34 @@ export class AgentIntegrationManager {
     const runtime = await this.resolveRuntime(pythonPath);
     if (!runtime.probe.available || !runtime.probe.supported) throw new AgentIntegrationError("python_incompatible", runtime.probe.error ?? "Python 3.10+ with sqlite3 is required.");
     const inspections = await Promise.all(this.configCandidates().map((candidate) => this.inspectConfig(candidate)));
-    const selected = inspections.find((entry) => entry.direct && !entry.direct.disabled) ?? inspections.find((entry) => entry.powerManaged && !entry.powerManaged.disabled);
-    const config = selected?.direct ?? selected?.powerManaged;
-    if (!config) throw new AgentIntegrationError("mcp_not_configured", "Kiro Security Power is not present in Kiro's MCP configuration.");
-    const expectedWorkspace = selected?.direct && selected.scope === "workspace" ? this.workspaceRoot : undefined;
-    const result = await this.verifyServer(config, runtime.probe.executable, expectedWorkspace, selected?.path);
+    const direct = inspections.find((entry) => entry.direct);
+    if (direct?.direct) {
+      const expectedWorkspace = direct.scope === "workspace" ? this.workspaceRoot : undefined;
+      this.assertTrustedServer(direct.direct, runtime.probe.executable, expectedWorkspace);
+      const prior = await this.readState();
+      if (prior?.configDigest && prior.configDigest !== configDigest(direct.direct)) {
+        throw new AgentIntegrationError("managed_config_changed", "The VSIX-managed MCP entry changed after setup. Run Repair Agent Integration.");
+      }
+    }
+    const selected = inspections.find((entry) => entry.powerManaged && !entry.powerManaged.disabled);
+    const config = selected?.powerManaged;
+    if (!config) {
+      throw new AgentIntegrationError(
+        "power_not_registered",
+        `Import the prepared folder from Kiro's Powers panel before verifying scan readiness: ${this.powerPath}`,
+      );
+    }
+    const result = await this.verifyServer(config, runtime.probe.executable, undefined, selected?.path);
     const previous = await this.readState();
     await this.writeState({
       schemaVersion: 1,
       productVersion: this.productVersion,
       verifiedAt: result.verifiedAt,
-      configPath: selected?.path,
-      configDigest: configDigest(config),
+      configPath: previous?.configPath,
+      configDigest: previous?.configDigest,
       steeringPath: previous?.steeringPath,
-      powerImportedConfirmed: previous?.powerImportedConfirmed,
+      powerConfigDigest: configDigest(config),
+      powerVerifiedAt: result.verifiedAt,
       autoApprovePolicy: previous?.autoApprovePolicy,
     });
     return result;

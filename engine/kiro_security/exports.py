@@ -56,7 +56,7 @@ def build_sarif(findings: list[dict[str, Any]]) -> dict[str, Any]:
                 "message": {"text": item["summary"]},
                 "locations": locations[:1],
                 "relatedLocations": locations[1:],
-                "partialFingerprints": {"primaryLocationLineHash": item["fingerprint"]},
+                "partialFingerprints": {"kiroSecurity/v1": item["fingerprint"]},
                 "properties": {
                     "findingId": item["findingId"],
                     "occurrenceId": item["occurrenceId"],

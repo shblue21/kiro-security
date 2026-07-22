@@ -1,6 +1,6 @@
 # Kiro Security Power
 
-Kiro Security Power is a VSIX-first security workbench for Kiro IDE. Version 0.3.0 separates local deterministic **Fast Scan** pre-screening from Kiro Agent model workflows for **Standard**, **Diff**, and six-worker iterative **Deep** scans. It provides durable SQLite state; snapshot-bound repository security context; coverage receipts and sealed canonical findings; model validation, attack paths, dedicated writeups, and hardening; Problems diagnostics; approval-gated remediation, triage, and tracking records; scan history, cleanup, and resume; and JSON, CSV, SARIF, Markdown, and per-finding exports.
+Kiro Security Power is a VSIX-first security workbench for Kiro IDE. Standard, Diff, and four-worker iterative Deep scans are Skill-driven workflows coordinated from Kiro Agent chat. The Engine provides deterministic target inventory, immutable snapshots, lifecycle storage, canonical validation/projection/sealing, and finding indexing; it performs no heuristic analysis. The workbench retains results, diagnostics, triage, remediation, tracking, history, cleanup, durable coordinator handoff, and JSON, CSV, SARIF, Markdown, and per-finding exports.
 
 The VSIX is the product. The companion Power and MCP server delegate to the same Python engine and `<workspace>/.kiro/security-power/workbench.sqlite`, so scans started through either surface are visible in the other.
 
@@ -11,10 +11,11 @@ Version 0.3.0 provides an approval-driven one-click Agent integration:
 1. Open a trusted repository and select **Kiro Security → Setup**.
 2. Review the detected Python/SQLite runtime, workspace or user scope, and read-only approval policy.
 3. Select **Install and verify** and approve the exact MCP and steering paths shown.
-4. Wait for **Verified**. The installer checks the copied runtime against the VSIX, launches the packaged Python MCP server, and verifies its tools and shared workbench before reporting success.
-5. Start a new Kiro Agent conversation or refresh MCP servers, then ask it to run a Standard, Diff, or Deep model scan. The VSIX starts only the deterministic Fast profile because it cannot truthfully provide Kiro Agent model/runtime attestation.
+4. Copy the prepared Power folder, then in Kiro choose **Powers → Add Custom Power → Import power from a folder** and install it.
+5. Return to Setup and select **Verify after import**. Setup reports **Verified** only after it detects and probes Kiro's native Power registration.
+6. Start a new Kiro Agent conversation, then ask it to run a Standard, Diff, or Deep scan. Scan starts are chat-only and Power-coordinated; the Dashboard consumes lifecycle and sealed results.
 
-The functional setup does not require a separate Node installation. An optional native custom-Power folder is prepared for import through Kiro's Powers panel; Kiro's own permission confirmation is intentionally not bypassed. Details and rollback behavior are documented in `docs/agent-integration.md`.
+The functional setup does not require a separate Node installation. Native Power import is required because `POWER.md` and phase steering—not the MCP runtime—own Standard, Diff, and Deep semantics. Kiro's own permission confirmation is intentionally not bypassed. Details and rollback behavior are documented in `docs/agent-integration.md`.
 
 ## Build and verify
 
@@ -30,7 +31,7 @@ python3 -m compileall engine
 
 The package command writes `dist/kiro-security-power-<version>.vsix` and `dist/SHA256SUMS`.
 
-Model workers and connectors remain separate trust boundaries. The engine validates bounded model results and can apply only an explicitly prepared remediation patch after revision and drift checks; it does not execute model-submitted commands. Tracking creates an exact, digest-bound handoff and stores sanitized connector readback, while provider credentials and network writes remain the responsibility of a separately authorized connector.
+Native workers and connectors remain separate trust boundaries. The Engine validates bounded Agent-authored canonical artifacts and can apply only an explicitly prepared remediation patch after revision and drift checks; it does not execute Agent-submitted commands. Tracking creates an exact, digest-bound handoff and stores sanitized connector readback, while provider credentials and network writes remain the responsibility of a separately authorized connector.
 
 ## Publisher
 

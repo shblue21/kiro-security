@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 MODES = ("diff", "standard", "deep")
-ANALYSIS_PROFILES = ("fast", "model")
 PHASES = ("preflight", "threat_model", "discovery", "validation", "attack_path", "reporting")
-SCAN_STATUSES = ("queued", "running", "interrupted", "completed", "cancelled", "failed")
-ACTIVE_SCAN_STATUSES = ("queued", "running")
+SCAN_STATUSES = ("running", "completed", "cancelled", "failed")
+ACTIVE_SCAN_STATUSES = ("running",)
 TERMINAL_SCAN_STATUSES = ("completed", "cancelled", "failed")
 SEVERITIES = ("critical", "high", "medium", "low", "informational")
 CONFIDENCES = ("high", "medium", "low")
@@ -19,10 +18,6 @@ ARTIFACT_KINDS = {
     "coverage": "coverage.json",
     "findings": "findings.json",
     "markdownReport": "report.md",
-    "threatModel": "threat-model.md",
-    "discovery": "discovery.json",
-    "validation": "validation.json",
-    "attackPath": "attack-path.json",
     "hardening": "hardening/hardening.md",
 }
 DEFAULT_IGNORES = {
@@ -34,14 +29,3 @@ SOURCE_EXTENSIONS = {
     ".py", ".pyw", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".java", ".go",
     ".rb", ".php", ".cs", ".rs", ".sh", ".bash", ".zsh", ".kt", ".kts", ".scala",
 }
-
-
-def analysis_profile(scan: dict) -> str:
-    if scan.get("mode") == "deep":
-        return "model"
-    capabilities = scan.get("capabilities") or {}
-    return "model" if capabilities.get("analysisProfile") == "model" else "fast"
-
-
-def is_model_scan(scan: dict) -> bool:
-    return analysis_profile(scan) == "model"

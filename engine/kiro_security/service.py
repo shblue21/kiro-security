@@ -10,29 +10,25 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import __version__
-from .constants import ARTIFACT_KINDS, EXPORT_FORMATS, MODES, PHASES, PROTOCOL_VERSION, TRIAGE_DECISIONS, is_model_scan
+from .constants import ARTIFACT_KINDS, MODES, PROTOCOL_VERSION
 from .db import Workbench
 from .errors import EngineError
 from .exports import export_report
-from .hardening import create_hardening_proposal
 from .remediation import (
     MAX_PATCH_BYTES, create_remediation_artifact, current_git_revision, load_patch_artifact,
     expected_post_apply_digests, normalize_verification_receipt, parse_remediation_patch, prepare_patch_artifact,
     reconcile_patch_application, touched_file_digests, verify_patch_inputs, verify_unmodified_files,
 )
-from .runner import ScanRunner
-from .scanner import _git_filter_overrides, build_inventory
+from .model import complete_model_scan, get_model_context, revalidate_model_target, setup_model_scan
+from .git_safety import git_filter_overrides
 from .security import (
     atomic_write, canonical_workspace, random_id, redact, resolve_within, run_process,
     sha256_bytes, sha256_file, write_json,
 )
-from .threat_model import build_threat_model
 from .tracking import (
     TRACKING_PROVIDERS, create_tracking_handoff, normalize_tracking_readback,
     normalize_triage_intake, normalize_triage_result,
 )
-from .validator import validate_finding
-from .attack_path import build_attack_path
 
 EventEmitter = Callable[[str, dict[str, Any]], None]
 
@@ -45,9 +41,6 @@ class SecurityService:
         self.workbench = Workbench(self.workspace)
         self.session_id = random_id("session")
         self.workbench.register_session(self.session_id, os.getpid(), client_kind, PROTOCOL_VERSION)
-        self.recovered_scans = self.workbench.recover_stale_sessions()
-        # Stale running scans are already downgraded to interrupted above, so
-        # this reconciliation never races an actively finalizing session.
         self.integrity_issues = self.workbench.reconcile_finalization_integrity()
         for issue in self.integrity_issues:
             emit("engine.log", {
@@ -58,7 +51,6 @@ class SecurityService:
             })
         self.workspace_record = self.workbench.register_workspace(self.workspace)
         self._reconcile_verifying_remediations()
-        self.runner = ScanRunner(self.workbench, self.session_id, emit)
         self._closing = threading.Event()
         self._heartbeat = threading.Thread(target=self._heartbeat_loop, name="kiro-security-heartbeat", daemon=True)
         self._heartbeat.start()
@@ -85,6 +77,9 @@ class SecurityService:
                 path.parent.rmdir()
             except OSError:
                 pass
+
+    def _require_scan(self, scan_id: str) -> dict[str, Any]:
+        return self.workbench.get_scan(scan_id)
 
     def _require_sealed_reportable_finding(self, finding: dict[str, Any]) -> dict[str, Any]:
         scan = self.workbench.get_scan(finding["scanId"])
@@ -184,38 +179,13 @@ class SecurityService:
     def capabilities(self) -> dict[str, Any]:
         return {
             "product": "Kiro Security Power",
-            "engineVersion": __version__,
-            "protocolVersion": PROTOCOL_VERSION,
-            "modes": list(MODES),
-            "phases": list(PHASES),
-            "exports": list(EXPORT_FORMATS),
-            "triageDecisions": list(TRIAGE_DECISIONS),
-            "supports": {
-                "resume": True,
-                "cancellation": True,
-                "durableRecovery": True,
-                "mcpSharedState": True,
-                "threatModel": True,
-                "validation": True,
-                "attackPath": True,
-                "remediation": True,
-                "hardening": True,
-                "trackingHandoffs": True,
-                "trackingAdapters": False,
-                "scanCleanup": True,
-                "deepAgentOrchestration": True,
-                "deepIndependentWorkers": 6,
-                "deepMaxRounds": 10,
-                "deepModelTailAssignments": True,
-            },
-            "workspaceRoot": str(self.workspace),
-            "stateDirectory": str(self.workbench.state_dir),
-            "database": self.workbench.database_info(),
-            "dependencies": {
-                "python": {"available": True, "version": sys.version.split()[0], "executable": sys.executable},
-                "sqlite": {"available": True, "version": sqlite3.sqlite_version},
-                "git": {"available": shutil.which("git") is not None, "executable": shutil.which("git")},
-            },
+            "engine": {"available": True, "version": __version__, "protocolVersion": PROTOCOL_VERSION},
+            "python": {"available": True, "version": sys.version.split()[0]},
+            "sqlite": {"available": True, "version": sqlite3.sqlite_version},
+            "git": {"available": shutil.which("git") is not None},
+            "workspace": {"root": str(self.workspace), "stateDirectory": str(self.workbench.state_dir)},
+            "supportedModes": list(MODES),
+            "canonicalFinalizer": True,
         }
 
     def initialize(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -224,7 +194,6 @@ class SecurityService:
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": self.capabilities(),
             "workspace": self.workspace_record,
-            "recoveredScanIds": self.recovered_scans,
             "integrityIssues": self.integrity_issues,
         }
 
@@ -246,110 +215,94 @@ class SecurityService:
 
     def start_scan(self, params: dict[str, Any]) -> dict[str, Any]:
         mode = params["mode"]
-        analysis_profile = "model" if mode == "deep" else str(params.get("analysisProfile") or "fast")
-        if analysis_profile not in ("fast", "model") or (mode == "deep" and analysis_profile != "model"):
-            raise EngineError("invalid_analysis_profile", "Deep requires model analysis; Standard/Diff accept fast or model.")
-        scope = params.get("scope") or "."
-        resolve_within(self.workspace, scope, must_exist=True)
-        deep_host = (
-            self.runner.deep.preflight_host(params.get("modelId"), params.get("runtime"))
-            if analysis_profile == "model"
-            else None
-        )
+        requested_scope = params.get("scope") or "."
+        scope_path = resolve_within(self.workspace, requested_scope, must_exist=True)
+        scope = "." if scope_path == self.workspace else scope_path.relative_to(self.workspace).as_posix()
         max_files = int(params.get("maxFiles") or 10_000)
         max_file_bytes = int(params.get("maxFileBytes") or 1_048_576)
-        scan = self.workbench.create_scan(
+        diff_target_kind = (params.get("diffTargetKind") or "working_tree") if mode == "diff" else None
+        diff_base_revision = params.get("diffBaseRevision") if mode == "diff" else None
+        diff_head_revision = params.get("diffHeadRevision") if mode == "diff" else None
+        start_contract = {
+            "mode": mode,
+            "scope": scope,
+            "diffTargetKind": diff_target_kind,
+            "diffBaseRevision": diff_base_revision,
+            "diffHeadRevision": diff_head_revision,
+            "maxFiles": max_files,
+            "maxFileBytes": max_file_bytes,
+            "userContext": params.get("userContext"),
+        }
+        capabilities = {
+            "maxFiles": max_files,
+            "maxFileBytes": max_file_bytes,
+            "userContext": params.get("userContext"),
+            "startContract": start_contract,
+        }
+        scan, _created = self.workbench.create_scan(
             workspace_id=self.workspace_record["id"],
             mode=mode,
             scope=scope,
             artifact_dir=None,
             session_id=self.session_id,
-            diff_target_kind=params.get("diffTargetKind") if mode == "diff" else None,
-            diff_base_revision=params.get("diffBaseRevision") if mode == "diff" else None,
-            diff_head_revision=params.get("diffHeadRevision") if mode == "diff" else None,
+            capabilities=capabilities,
+            setup_scan=lambda draft: setup_model_scan(self.workbench, draft),
+            diff_target_kind=diff_target_kind,
+            diff_base_revision=diff_base_revision,
+            diff_head_revision=diff_head_revision,
         )
-        Path(scan["artifact_dir"]).mkdir(parents=True, exist_ok=True)
-        capabilities = {
-            "analysisProfile": analysis_profile,
-            "maxFiles": max_files,
-            "maxFileBytes": max_file_bytes,
-        }
-        if deep_host is not None:
-            capabilities["deepHost"] = deep_host
-        self.workbench.set_capabilities(scan["id"], capabilities)
-        self.runner.start(scan["id"])
-        return self.workbench.get_scan(scan["id"])
-
-    def resume_scan(self, params: dict[str, Any]) -> dict[str, Any]:
-        scan_id = params["scanId"]
-        scan = self.workbench.resume_scan(
-            scan_id,
-            self.session_id,
-            recover_tail_artifacts=lambda assignments: self.runner.tail.clean_resume_writeups(scan_id, assignments),
-        )
-        self.runner.start(scan["id"], resuming=True)
         return scan
 
+    def acquire_scan_coordinator(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self.workbench.acquire_coordinator_lease(params["scanId"], self.session_id)
+
+    def renew_scan_coordinator(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self.workbench.renew_coordinator_lease(
+            params["scanId"], params["coordinatorToken"],
+            params["coordinatorGeneration"], self.session_id,
+        )
+
+    def release_scan_coordinator(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self.workbench.release_coordinator_lease(
+            params["scanId"], params["coordinatorToken"], params["coordinatorGeneration"]
+        )
+
     def cancel_scan(self, params: dict[str, Any]) -> dict[str, Any]:
-        scan_id = params["scanId"]
-        requested = self.workbench.request_cancel(scan_id)
-        # Agent-orchestrated model handoffs intentionally have no local runner
-        # while they await worker, merge, or tail receipts, so cancel them here.
-        if (
-            is_model_scan(requested)
-            and requested.get("status") == "running"
-            and scan_id not in self.runner.active_scan_ids()
-        ):
-            return self.workbench.cancel_scan(scan_id)
-        return requested
-
-    def deep_get_status(self, params: dict[str, Any]) -> dict[str, Any]:
-        status = self.runner.deep.status(params["scanId"])
-        if status.get("status") in ("saturated", "capped"):
-            tail = self.runner.tail.status(params["scanId"])
-            status["tail"] = tail
-            if tail["nextAction"] != "await_discovery_completion":
-                status["nextAction"] = tail["nextAction"]
-        return status
-
-    def deep_claim_worker(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self.runner.deep.claim_worker(
-            params["scanId"], params["modelId"], params["delegationId"], params.get("runtime")
+        return self.workbench.cancel_scan(
+            params["scanId"], params["coordinatorToken"], params["coordinatorGeneration"]
         )
 
-    def deep_submit_worker(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self.runner.deep.submit_worker(params)
+    def get_scan_context(self, params: dict[str, Any]) -> dict[str, Any]:
+        self._require_scan(params["scanId"])
+        revalidate_model_target(self.workbench, params["scanId"])
+        return get_model_context(self.workbench, params["scanId"])
 
-    def deep_retry_worker(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self.runner.deep.retry_worker(
-            params["scanId"], int(params["workerIndex"]), str(params.get("reason") or "Worker replacement requested")
+    def update_scan_progress(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self.workbench.update_scan_progress(
+            params["scanId"],
+            token=params["coordinatorToken"],
+            generation=params["coordinatorGeneration"],
+            phase=params.get("phase"),
+            phase_percent=params.get("phasePercent"),
+            review_items_total=params.get("itemsTotal"),
+            review_items_completed=params.get("itemsCompleted"),
+            reportable_findings_count=params.get("reportableFindingsCount"),
+            message=params.get("message"),
         )
 
-    def deep_claim_merge(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self.runner.deep.claim_merge(params["scanId"])
+    def complete_scan(self, params: dict[str, Any]) -> dict[str, Any]:
+        self._require_scan(params["scanId"])
+        return complete_model_scan(
+            self.workbench, params["scanId"],
+            params["coordinatorToken"], params["coordinatorGeneration"],
+        )
 
-    def deep_submit_merge(self, params: dict[str, Any]) -> dict[str, Any]:
-        status = self.runner.deep.submit_merge(params)
-        if status.get("status") in ("saturated", "capped"):
-            scan_id = params["scanId"]
-            scan = self.workbench.get_scan(scan_id)
-            if scan["status"] == "running":
-                self.runner.resume_when_idle(scan_id)
-        return status
-
-    def deep_get_tail_assignment(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self.runner.tail.claim(params)
-
-    def deep_submit_tail_result(self, params: dict[str, Any]) -> dict[str, Any]:
-        result = self.runner.tail.submit(params)
-        scan_id = params["scanId"]
-        scan = self.workbench.get_scan(scan_id)
-        if scan["status"] == "running":
-            self.runner.resume_when_idle(scan_id)
-        return result
-
-    def deep_retry_writeup(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self.runner.tail.retry_writeup(params)
+    def fail_scan(self, params: dict[str, Any]) -> dict[str, Any]:
+        self._require_scan(params["scanId"])
+        return self.workbench.fail_scan(
+            params["scanId"], "scan_failed", params["reason"],
+            params["coordinatorToken"], params["coordinatorGeneration"],
+        )
 
     def get_scan(self, params: dict[str, Any]) -> dict[str, Any]:
         return self.workbench.get_scan(params["scanId"])
@@ -371,20 +324,6 @@ class SecurityService:
 
     def get_finding(self, params: dict[str, Any]) -> dict[str, Any]:
         return self.workbench.get_finding(self._finding_key(params))
-
-    def validate_finding(self, params: dict[str, Any]) -> dict[str, Any]:
-        finding = self.workbench.get_finding(self._finding_key(params))
-        if is_model_scan(self.workbench.get_scan(finding["scanId"])):
-            raise EngineError(
-                "model_tail_result_immutable",
-                "Model validation and attack-path results are managed by immutable tail assignments.",
-            )
-        result = validate_finding(self.workspace, finding)
-        updated = self.workbench.save_validation(finding["occurrenceId"], result)
-        if result["status"] in ("validated", "needs_review"):
-            updated = self.workbench.save_attack_path(updated["occurrenceId"], build_attack_path(updated))
-        self.emit("finding.updated", {"scanId": updated["scanId"], "finding": updated, "change": "validation"})
-        return updated
 
     def triage_finding(self, params: dict[str, Any]) -> dict[str, Any]:
         updated = self.workbench.triage_finding(params["occurrenceId"], params["decision"], params.get("note"))
@@ -449,7 +388,7 @@ class SecurityService:
         except UnicodeDecodeError as exc:
             raise EngineError("remediation_patch_changed", "The prepared remediation patch is not UTF-8 text.") from exc
         run_process(
-            "git", [*_git_filter_overrides(self.workspace), "apply",
+            "git", [*git_filter_overrides(self.workspace), "apply",
                     *(["--no-index"] if metadata.get("baseRevision") is None else []),
                     "--check", "--whitespace=nowarn", "-"],
             cwd=self.workspace, input_bytes=patch_bytes,
@@ -472,7 +411,7 @@ class SecurityService:
             if touched_file_digests(self.workspace, metadata) != (metadata.get("touchedFiles") or []):
                 raise EngineError("remediation_code_drift", "A touched file changed before patch application.")
             run_process(
-                "git", [*_git_filter_overrides(self.workspace), "apply",
+                "git", [*git_filter_overrides(self.workspace), "apply",
                         *(["--no-index"] if metadata.get("baseRevision") is None else []),
                         "--whitespace=nowarn", "-"],
                 cwd=self.workspace, input_bytes=patch_bytes,
@@ -630,21 +569,6 @@ class SecurityService:
             self.emit("artifact.created", {"scanId": scan["id"], "artifact": artifact})
         return completed
 
-    def create_hardening_proposal(self, params: dict[str, Any]) -> dict[str, Any]:
-        scan = self.workbench.get_scan(params["scanId"])
-        if is_model_scan(scan):
-            raise EngineError(
-                "model_tail_result_immutable",
-                "Model hardening results are managed by immutable tail assignments.",
-            )
-        findings = [self.workbench.get_finding(item["occurrenceId"]) for item in self.workbench.list_findings(scan["id"])]
-        path = Path(scan["artifact_dir"]) / "hardening" / "hardening.md"
-        proposal = create_hardening_proposal(scan["id"], findings, path)
-        saved = self.workbench.save_hardening(scan["id"], proposal["title"], proposal["summary"], path)
-        artifact = self.workbench.add_artifact(scan["id"], "hardening", path, "text/markdown")
-        self.emit("artifact.created", {"scanId": scan["id"], "artifact": artifact})
-        return saved
-
     def export_report(self, params: dict[str, Any]) -> dict[str, Any]:
         record = export_report(
             self.workbench,
@@ -740,25 +664,9 @@ class SecurityService:
         })
         return result
 
-    def refresh_threat_model(self, params: dict[str, Any]) -> dict[str, Any]:
-        scope = params.get("scope") or "."
-        inventory = build_inventory(
-            self.workspace,
-            mode="standard",
-            scope=scope,
-            diff_target_kind=None,
-            diff_base_revision=None,
-            diff_head_revision=None,
-            max_files=10_000,
-            max_file_bytes=1_048_576,
-        )
-        path = self.workbench.state_dir / "threat-model.md"
-        model = build_threat_model(self.workspace, inventory, path)
-        return {"path": str(path), "model": model}
-
     def get_dashboard(self, params: dict[str, Any]) -> dict[str, Any]:
         scans = self.workbench.list_scans(int(params.get("limit") or 25))
-        active = next((scan for scan in scans if scan["status"] in ("queued", "running")), None)
+        active = next((scan for scan in scans if scan["status"] == "running"), None)
         selected = active or next((scan for scan in scans if scan["status"] == "completed"), scans[0] if scans else None)
         findings = self.workbench.list_findings(selected["id"], limit=500) if selected else []
         return {
@@ -768,7 +676,6 @@ class SecurityService:
             "selectedScan": selected,
             "scans": scans,
             "findings": findings,
-            "latestResumableScan": self.workbench.latest_resumable_scan(),
         }
 
     def poll_events(self, params: dict[str, Any]) -> list[dict[str, Any]]:
@@ -779,11 +686,11 @@ class SecurityService:
 
     def shutdown(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         if self._closing.is_set():
-            return {"interruptedScanIds": []}
+            return {"releasedCoordinatorLeaseScanIds": []}
         self._closing.set()
-        interrupted = self.runner.shutdown(timeout=5.0)
+        released = set(self.workbench.release_session_leases(self.session_id))
         self.workbench.close_session(self.session_id)
-        return {"interruptedScanIds": interrupted}
+        return {"releasedCoordinatorLeaseScanIds": sorted(released)}
 
     def dispatch(self, method: str, params: dict[str, Any]) -> Any:
         handlers = {
@@ -791,23 +698,19 @@ class SecurityService:
             "get_capabilities": lambda _: self.capabilities(),
             "register_workspace": self.register_workspace,
             "start_scan": self.start_scan,
-            "resume_scan": self.resume_scan,
+            "acquire_scan_coordinator": self.acquire_scan_coordinator,
+            "renew_scan_coordinator": self.renew_scan_coordinator,
+            "release_scan_coordinator": self.release_scan_coordinator,
             "cancel_scan": self.cancel_scan,
             "get_scan": self.get_scan,
             "list_scans": self.list_scans,
             "get_progress": self.get_progress,
-            "deep_get_status": self.deep_get_status,
-            "deep_claim_worker": self.deep_claim_worker,
-            "deep_submit_worker": self.deep_submit_worker,
-            "deep_retry_worker": self.deep_retry_worker,
-            "deep_claim_merge": self.deep_claim_merge,
-            "deep_submit_merge": self.deep_submit_merge,
-            "deep_get_tail_assignment": self.deep_get_tail_assignment,
-            "deep_submit_tail_result": self.deep_submit_tail_result,
-            "deep_retry_writeup": self.deep_retry_writeup,
+            "get_scan_context": self.get_scan_context,
+            "update_scan_progress": self.update_scan_progress,
+            "complete_scan": self.complete_scan,
+            "fail_scan": self.fail_scan,
             "list_findings": self.list_findings,
             "get_finding": self.get_finding,
-            "validate_finding": self.validate_finding,
             "triage_finding": self.triage_finding,
             "create_remediation": self.create_remediation,
             "prepare_remediation_patch": self.prepare_remediation_patch,
@@ -815,12 +718,10 @@ class SecurityService:
             "verify_remediation_patch": self.verify_remediation_patch,
             "create_triage_intake": self.create_triage_intake,
             "submit_triage_assessment": self.submit_triage_assessment,
-            "create_hardening_proposal": self.create_hardening_proposal,
             "export_report": self.export_report,
             "create_tracking_handoff": self.create_tracking_handoff,
             "record_tracking_result": self.record_tracking_result,
             "cleanup_scan": self.cleanup_scan,
-            "refresh_threat_model": self.refresh_threat_model,
             "get_dashboard": self.get_dashboard,
             "poll_events": self.poll_events,
             "database_info": self.database_info,

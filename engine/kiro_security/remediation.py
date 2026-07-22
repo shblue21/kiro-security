@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import EngineError
-from .scanner import _git_filter_overrides
+from .git_safety import git_filter_overrides
 from .security import atomic_write, redact, resolve_within, run_process, sha256_file
 
 MAX_PATCH_BYTES = 512 * 1024
@@ -209,7 +209,7 @@ def _digest_gitlink(digest: Any, path: Path, relative: str, expected_revision: s
     root = run_process("git", ["rev-parse", "--show-toplevel"], cwd=path, check=False)
     revision = run_process("git", ["rev-parse", "HEAD"], cwd=path, check=False)
     status = run_process(
-        "git", [*_git_filter_overrides(path), "status", "--porcelain=v1", "-z", "--untracked-files=all",
+        "git", [*git_filter_overrides(path), "status", "--porcelain=v1", "-z", "--untracked-files=all",
                 "--ignore-submodules=none"],
         cwd=path, check=False,
     )
@@ -291,7 +291,7 @@ def worktree_content_digest(
             if expected_revision is None:
                 revision = run_process("git", ["rev-parse", "HEAD"], cwd=path, check=False)
                 status = run_process(
-                    "git", [*_git_filter_overrides(path), "status", "--porcelain=v1", "-z",
+                    "git", [*git_filter_overrides(path), "status", "--porcelain=v1", "-z",
                             "--untracked-files=all", "--ignore-submodules=none"],
                     cwd=path, check=False,
                 )
@@ -377,7 +377,7 @@ def prepare_patch_artifact(
     path = resolve_within(artifact_dir, f"remediations/{record_id}/patch-{patch_digest}.patch")
     atomic_write(path, patch)
     run_process(
-        "git", [*_git_filter_overrides(workspace), "apply", *(["--no-index"] if revision is None else []),
+        "git", [*git_filter_overrides(workspace), "apply", *(["--no-index"] if revision is None else []),
                 "--check", "--whitespace=nowarn", str(path)],
         cwd=workspace,
     )
@@ -451,10 +451,10 @@ def _materialized_patch_digests(
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(_safe_regular_file(workspace, relative.as_posix()), destination)
         if metadata.get("baseRevision") is None:
-            args = [*_git_filter_overrides(workspace), "apply", "--no-index"]
+            args = [*git_filter_overrides(workspace), "apply", "--no-index"]
         else:
             git_dir = run_process("git", ["rev-parse", "--absolute-git-dir"], cwd=workspace).stdout.strip()
-            args = [*_git_filter_overrides(workspace), f"--git-dir={git_dir}", f"--work-tree={root}", "apply"]
+            args = [*git_filter_overrides(workspace), f"--git-dir={git_dir}", f"--work-tree={root}", "apply"]
         if reverse:
             args.append("--reverse")
         run_process("git", [*args, "--whitespace=nowarn", "-"], cwd=root, input_bytes=patch_bytes)

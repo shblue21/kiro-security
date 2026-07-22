@@ -41,7 +41,7 @@ def wait_for_scan(service: Any, scan_id: str, timeout: float = 30.0) -> dict[str
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         scan = service.get_scan({"scanId": scan_id})
-        if scan["status"] not in ("queued", "running"):
+        if scan["status"] != "running":
             return scan
         time.sleep(0.03)
     raise AssertionError(f"scan {scan_id} did not reach a terminal state")

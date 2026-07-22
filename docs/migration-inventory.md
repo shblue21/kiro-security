@@ -34,7 +34,7 @@ The attachment was identified by filename, exact SHA-256, internal root, plugin 
 | Area | Contents observed | Migration relevance |
 |---|---|---|
 | Plugin manifest | Product metadata, skills directory, app integrations, MCP server, proprietary license | Identity and capability inventory only; rewritten as a VSIX manifest |
-| Workflow skills | 11 workflows covering scan, diff, deep scan, threat model, discovery, validation, attack path, triage, remediation, hardening, writeup, and tracking | Workflow sequencing and output contracts adapted into engine phases and companion Power guidance |
+| Workflow skills | 11 workflows covering scan, diff, deep scan, threat model, discovery, validation, attack path, triage, remediation, hardening, writeup, and tracking | Model workflow sequencing and semantic output contracts belong to the Power/phase layer; Engine retains deterministic lifecycle/finalization only |
 | Python workbench | SQLite workbench, state transitions, Git target identity, progress, source excerpts, remediation state, artifact sealing, exports | Durable state model and safety properties adapted into the new engine |
 | JSON schemas | Findings, coverage, completed scan manifest | Field model adapted under Kiro Security Power schema IDs, preserving compatible data shapes where practical |
 | References | Scan contract, artifact layout, finding detail fields, report format, SARIF adapter, preflight, security guidance | Used to define protocol, artifacts, reports, and parity requirements |
@@ -56,7 +56,7 @@ The reference schema contains ten migrations. Its durable model includes:
 - Versioned `finding_remediation_attempts` with generate/apply/verify actions, claims, delivery state, patch metadata, and verification summaries.
 - A partial unique index enforcing one running scan per workspace.
 
-Kiro Security Power preserves these concepts and extends them with explicit evidence, validation, attack-path, hardening, export, engine-session, and event records needed by the IDE, MCP, and recovery model.
+The list above describes the reference inventory, not current Engine workflow authority. Kiro Security Power retains lifecycle, immutable target, canonical findings/evidence indexing, mutable product state, export, engine-session, and event records. Model worker, round, merge, novelty, validation-assignment, and reporting-tail state is intentionally absent from SQLite.
 
 ## Reference scan and artifact contracts
 
@@ -78,8 +78,8 @@ Additional workflow artifacts described by the reference include threat models, 
 
 | Workflow | Primary retained behavior |
 |---|---|
-| Security scan | Repository/scoped scan orchestration and single canonical reporting tail |
-| Deep security scan | Multiple independent discovery passes, semantic merge, canonical validation, one reporting tail |
+| Security scan | Power-owned repository/scoped phases followed by one canonical completion/seal |
+| Deep security scan | Power-owned independent discovery rounds, coordinator semantic merge/validation, then one canonical completion/seal |
 | Security diff scan | Git target resolution and change-scoped analysis |
 | Threat model | Assets, trust boundaries, attacker-controlled inputs, invariants, and high-impact failure modes |
 | Finding discovery | Source-to-sink candidate production with evidence and a reportability bar |

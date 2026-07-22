@@ -3,7 +3,6 @@ import {
   ExportFormat,
   PROTOCOL_VERSION,
   RpcEnvelope,
-  SCAN_MODES,
   SEVERITIES,
   TriageDecision,
   TrackingProvider,
@@ -83,6 +82,7 @@ export function validateWebviewMessage(value: unknown): WebviewMessage | undefin
     case "openSettings":
     case "openLogs":
     case "copyMcpConfig":
+    case "copyPowerPath":
     case "verifyAgentIntegration":
     case "removeAgentIntegration":
     case "retryEngine":
@@ -96,39 +96,11 @@ export function validateWebviewMessage(value: unknown): WebviewMessage | undefin
       return value.scope === undefined || value.scope === "workspace" || value.scope === "user"
         ? { type: "openMcpConfig", scope: value.scope as "workspace" | "user" | undefined }
         : undefined;
-    case "startScan": {
-      if (!SCAN_MODES.includes(value.mode as never) || !boundedString(value.scope, 4096)) return undefined;
-      const message: Extract<WebviewMessage, { type: "startScan" }> = {
-        type: "startScan",
-        mode: value.mode as Extract<WebviewMessage, { type: "startScan" }>["mode"],
-        scope: value.scope,
-      };
-      if (value.analysisProfile !== undefined) {
-        if (value.analysisProfile !== "fast" && value.analysisProfile !== "model") return undefined;
-        message.analysisProfile = value.analysisProfile;
-      }
-      if (value.diffTargetKind !== undefined) {
-        if (!(["working_tree", "commit", "range"] as const).includes(value.diffTargetKind as never)) return undefined;
-        message.diffTargetKind = value.diffTargetKind as "working_tree" | "commit" | "range";
-      }
-      if (value.diffBaseRevision !== undefined) {
-        if (!boundedString(value.diffBaseRevision, 256)) return undefined;
-        message.diffBaseRevision = value.diffBaseRevision;
-      }
-      if (value.diffHeadRevision !== undefined) {
-        if (!boundedString(value.diffHeadRevision, 256)) return undefined;
-        message.diffHeadRevision = value.diffHeadRevision;
-      }
-      return message;
-    }
-    case "resumeScan":
-    case "cancelScan":
     case "selectScan":
     case "cleanupScan":
       return boundedString(value.scanId, 256) ? { type: value.type, scanId: value.scanId } : undefined;
     case "openFinding":
     case "openSource":
-    case "validateFinding":
     case "createRemediation":
     case "copyFindingLink":
       return boundedString(value.occurrenceId, 256) ? { type: value.type, occurrenceId: value.occurrenceId } : undefined;
@@ -140,8 +112,6 @@ export function validateWebviewMessage(value: unknown): WebviewMessage | undefin
       if (!boundedString(value.occurrenceId, 256) || !TRIAGE.has(value.decision as TriageDecision)) return undefined;
       if (value.note !== undefined && (typeof value.note !== "string" || value.note.length > 4000)) return undefined;
       return { type: "triageFinding", occurrenceId: value.occurrenceId, decision: value.decision as TriageDecision, note: value.note as string | undefined };
-    case "createHardening":
-      return boundedString(value.scanId, 256) ? { type: "createHardening", scanId: value.scanId } : undefined;
     case "exportReport":
       return boundedString(value.scanId, 256) && EXPORTS.has(value.format as ExportFormat)
         ? { type: "exportReport", scanId: value.scanId, format: value.format as ExportFormat }

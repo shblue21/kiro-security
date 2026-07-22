@@ -78,18 +78,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         await provider.openBesidePanel();
       }
     }),
-    vscode.commands.registerCommand("kiroSecurity.refreshThreatModel", () => controller.refreshThreatModel()),
-    vscode.commands.registerCommand("kiroSecurity.resumeLastScan", () => controller.resumeScan()),
-    vscode.commands.registerCommand("kiroSecurity.cancelActiveScan", () => controller.cancelScan()),
     vscode.commands.registerCommand("kiroSecurity.openFinding", (argument?: unknown) => controller.openFinding(occurrenceFromArgument(argument, diagnostics))),
     vscode.commands.registerCommand("kiroSecurity.showFindingDetails", async (argument?: unknown) => {
       await vscode.commands.executeCommand("kiroSecurity.openPanel");
       await controller.openFinding(occurrenceFromArgument(argument, diagnostics), false);
-    }),
-    vscode.commands.registerCommand("kiroSecurity.validateFinding", async (argument?: unknown) => {
-      const occurrenceId = occurrenceFromArgument(argument, diagnostics);
-      const finding = occurrenceId ? await controller.openFinding(occurrenceId, false) : await controller.openFinding(undefined, false);
-      if (finding) await controller.validateFinding(finding.occurrenceId);
     }),
     vscode.commands.registerCommand("kiroSecurity.createRemediation", async (argument?: unknown) => {
       const occurrenceId = occurrenceFromArgument(argument, diagnostics);

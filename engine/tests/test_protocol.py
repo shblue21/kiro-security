@@ -25,35 +25,34 @@ def test_initialize_and_start_scan_validation() -> None:
         {"protocolVersion": PROTOCOL_VERSION, "clientInfo": {"name": "test", "version": "1"}},
     )
     assert params["protocolVersion"] == PROTOCOL_VERSION
-    runtime = {
-        "contractVersion": "deep-worker/v2",
-        "agentType": "delegated-worker",
-        "reasoningEffort": "high",
-        "hostVersion": "test-host/1",
-        "delegationMode": "fresh",
-        "capabilities": {
-            "delegatedAgentAvailable": True,
-            "freshContextMode": True,
-            "usableWorkerSlots": 6,
-            "goalSupport": True,
-        },
-    }
-    assert validate_method(
-        "start_scan", {"mode": "deep", "scope": "src", "maxFiles": 100, "modelId": "test-model", "runtime": runtime}
-    )["mode"] == "deep"
-    assert validate_method("start_scan", {"mode": "standard", "scope": "src"})["analysisProfile"] == "fast"
-    assert validate_method(
-        "start_scan",
-        {"mode": "diff", "analysisProfile": "model", "modelId": "test-model", "runtime": runtime},
-    )["analysisProfile"] == "model"
-    with pytest.raises(EngineError):
-        validate_method("start_scan", {"mode": "deep", "scope": "src"})
-    with pytest.raises(EngineError):
-        validate_method("start_scan", {"mode": "standard", "analysisProfile": "model"})
+    assert validate_method("start_scan", {"mode": "deep", "scope": "src", "maxFiles": 100})["mode"] == "deep"
+    assert validate_method("start_scan", {"mode": "standard", "scope": "src"})["mode"] == "standard"
+    assert validate_method("start_scan", {"mode": "diff"})["mode"] == "diff"
+    with pytest.raises(EngineError, match="Unexpected parameter"):
+        validate_method("start_scan", {"mode": "deep", "scope": "src", "hostProof": {}})
     with pytest.raises(EngineError, match="mode"):
         validate_method("start_scan", {"mode": "arbitrary"})
     with pytest.raises(EngineError, match="maxFiles"):
         validate_method("start_scan", {"mode": "standard", "maxFiles": 0})
+    # Removed worker/result and planner methods are unknown.
+    for method in (
+        "deep_claim_worker", "deep_submit_worker", "deep_retry_worker", "deep_claim_merge",
+        "deep_submit_merge", "deep_get_tail_assignment", "deep_submit_tail_result", "deep_retry_writeup",
+        "deep_get_status", "model_get_plan", "model_checkpoint",
+    ):
+        with pytest.raises(EngineError, match="Unknown RPC method"):
+            validate_method(method, {"scanId": "scan_x"})
+    assert validate_method("get_scan_context", {"scanId": "scan_x"})["scanId"] == "scan_x"
+    lease = {"scanId": "scan_x", "coordinatorToken": "a" * 64, "coordinatorGeneration": 1}
+    assert validate_method("complete_scan", lease)["scanId"] == "scan_x"
+    assert validate_method("fail_scan", {**lease, "reason": "native delegation unavailable"})["scanId"] == "scan_x"
+    assert validate_method("update_scan_progress", {**lease, "phase": "discovery", "phasePercent": 25})["phase"] == "discovery"
+    with pytest.raises(EngineError, match="coordinatorToken"):
+        validate_method("complete_scan", {"scanId": "scan_x"})
+    with pytest.raises(EngineError, match="Unknown RPC method"):
+        validate_method("resume_scan", {"scanId": "scan_x"})
+    with pytest.raises(EngineError, match="Unexpected parameter"):
+        validate_method("complete_scan", {**lease, "candidates": []})
     assert validate_method("get_dashboard", {"limit": 30})["limit"] == 30
     with pytest.raises(EngineError, match="limit"):
         validate_method("get_dashboard", {"limit": 201})

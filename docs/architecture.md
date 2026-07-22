@@ -1,120 +1,48 @@
 # Architecture
 
-## Ownership model
-
-Kiro Security Power is a VSIX-first product. The extension host owns activation, workspace trust, commands, Kiro/VS Code UI integration, engine lifecycle, diagnostics, navigation, cancellation, and cleanup. The Webview owns presentation only. The Python engine owns analysis workflows, artifact generation, and durable SQLite state. The Power and MCP server are companion agent interfaces over the same engine and database.
+Kiro Security Power has three deliberately separate layers.
 
 ```text
-Kiro IDE
-└── Kiro Security Power VSIX
-    ├── commands / status bar / output / diagnostics / code actions
-    ├── Security WebviewView and beside WebviewPanel fallback
-    ├── typed Webview message validation
-    └── EngineProcessManager (spawn executable + argument array)
-             │ JSON-RPC 2.0, protocol kiro-security-rpc/1.0
-             ▼
-    Python Security Engine
-    ├── preflight → threat_model → discovery → validation
-    │                    → attack_path → reporting
-    ├── standard / deep / diff runners
-    ├── JSON, CSV, SARIF, Markdown and per-finding exports
-    ├── approval-ready tracking handoffs and safe history cleanup
-    └── SQLite workbench in <workspace>/.kiro/security-power/
-             ▲
-             │ same RPC and workbench
-    Kiro Agent integration
-    ├── Python MCP stdio server (one-click Setup path)
-    ├── auto-inclusion steering
-    ├── optional native Kiro Power registration
-    └── Node MCP compatibility adapter
+Kiro chat Power coordinator
+  -> fresh native Kiro subagents
+  -> phase artifacts and ledgers
+  -> coordinator semantic merge / novelty / policy
+  -> coordinator canonical JSON assembly
+  -> one-shot Engine validation, projection, index, and seal
 ```
 
-## Packages
+The extension owns process lifecycle, workbench UI, findings/report consumption, triage, remediation, tracking, and export. The Python Engine owns deterministic inventory/worklists, scan lifecycle, canonical verification, projection, indexing, and sealing. The Power owns every semantic phase.
 
-- `packages/extension`: VSIX extension host, commands, view provider, diagnostics, source navigation, status and logging.
-- `packages/protocol`: shared TypeScript request/event/domain types and strict boundary validation.
-- `packages/webview`: CSP-constrained HTML/CSS/JavaScript UI and testable state helpers.
-- `packages/mcp`: Node stdio compatibility adapter that delegates to the Python RPC server.
-- `engine/kiro_security/mcp_server.py`: dependency-light Python MCP server used by the one-click Agent Setup path.
-- `engine/kiro_security`: Python engine, migrations, scanner, validation, attack paths, reporting, exports, and RPC server.
-- `powers/kiro-security-power`: companion Power instructions and opt-in MCP configuration template.
+## Scan lifecycle
 
-## Durable state
+The lifecycle MCP surface is `security_get_capabilities`, `security_start_scan`, `security_acquire_scan_coordinator`, `security_renew_scan_coordinator`, `security_release_scan_coordinator`, `security_get_scan_context`, `security_update_scan_progress`, `security_get_scan`, `security_get_progress`, `security_cancel_scan`, `security_complete_scan`, and `security_fail_scan`. Existing finding, triage, remediation, tracking, and export tools remain adjacent product capabilities.
 
-Default workspace state:
+A scan start canonicalizes its immutable request contract (mode, scope, Diff target, limits, and user context). A running scan without a complete stored `startContract` fails closed as `legacy_scan_incompatible`; no defaults are synthesized. An existing running scan is returned only for an identical contract; incompatible requests fail with `scan_already_running`. Otherwise the Engine stages the scan directory, stable credential-free repository/workspace target ID, immutable per-scan snapshot, compiled guidance, deterministic worklists, and setup artifact digests before any running row exists. `BEGIN IMMEDIATE` then rechecks the workspace invariant and publishes the fully prepared running scan, progress, artifacts, active pointer, and first transient coordinator lease together; a losing identical race discards its unpublished staging directory and returns the winner read-only. A partial unique index on running scan rows is the final database guard. Scan start launches no background analysis process. Context returns target ID, snapshot and Diff metadata, artifact/input/output paths, lifecycle progress, and other running Deep lifecycles. It returns no jobs, next action, candidate body, round/merge state, or analysis profile.
 
-```text
-<workspace>/.kiro/security-power/
-├── workbench.sqlite
-├── workbench.sqlite-wal
-├── artifacts/<scan-id>/
-│   ├── scan-manifest.json
-│   ├── coverage.json
-│   ├── findings.json
-│   ├── report.md
-│   ├── threat-model.md
-│   ├── discovery.json
-│   ├── validation.json
-│   ├── attack-path.json
-│   ├── hardening/hardening.md
-│   ├── writeups/<finding-id>.md
-│   └── tracking/<finding-id>-<provider>.json
-├── exports/
-└── logs/
-```
+Scan lifecycle is workspace-owned and remains `running` across Engine shutdown or process loss. Execution authority is a separate expiring bearer lease: only its token holder may mutate progress or publish a terminal result, while all clients may read context. Token hashes alone are stored; renewal uses generation CAS; completion, failure, and cancellation delete the lease in the same transaction as the state transition. The token is an arbitration capability, not an OS filesystem boundary, so finalization still verifies artifact and publication digests. Cancel is cooperative at coordinator phase/worker boundaries. Complete reads fixed artifacts. Fail preserves partial artifacts as non-success.
 
-SQLite uses foreign keys, WAL journaling, a busy timeout, parameterized statements, explicit transactions, schema migrations, and integrity-checked backups before and after migration of an existing database. Engine sessions heartbeat into the database. Scans owned by stale sessions become `interrupted`, retain phase/progress/artifacts, and are eligible for `resume_scan`. Terminal or interrupted scans can be removed through `cleanup_scan`; cleanup is confined to the canonical state directory and intentionally preserves explicitly selected exports outside it.
+The coordinator lease is an explicit Kiro shared-MCP transport adaptation. Codex binds a workbench to one coordinating thread; Kiro can expose the same workspace DB to multiple Engine clients. The lease restores that single-coordinator execution invariant without adding a scan owner, changing terminal lifecycle semantics, or making Engine process liveness authoritative.
 
-## RPC lifecycle
+## Skill-driven workflows
 
-The transport is one UTF-8 JSON object per line over stdio. The first request must be `initialize` with `protocolVersion: "1.0"`. Requests and responses use JSON-RPC 2.0. Events are notifications with the required names:
+Standard, Diff, and Deep are independent top-level steering documents. The coordinator progressively loads only the current phase method. Fresh prompts repeat objective, target, inputs, hard rules, output ownership, and closure checklist because subagents do not inherit Power or coordinator history.
 
-- `engine.ready`
-- `scan.started`
-- `scan.phaseChanged`
-- `scan.progress`
-- `finding.discovered`
-- `finding.updated`
-- `artifact.created`
-- `scan.completed`
-- `scan.cancelled`
-- `scan.failed`
-- `scan.integrityIssue`
-- `engine.log`
+Standard assigns deterministic ranking shards, files/tiny shards, candidates, attack rows, writeups, and one collection hardening task. Diff uses exact changed-file/tiny-shard ownership and bounded directly supporting context. Deep launches four fresh identical-brief full-worklist discovery workers per complete round, merges only after the four-worker barrier, compares semantic novelty, and stops at zero novelty or round five with partial coverage.
 
-The extension also polls durable state so events emitted by an MCP-owned engine process appear in the VSIX.
+The Engine never schedules workers, merges candidates, computes novelty, creates validation/attack semantics, assigns writeups, or decides the next phase.
 
-## Scan execution
+## Artifact and canonical boundaries
 
-The explicit Fast profile performs the deterministic Standard/Diff pass. Model Standard, Diff, and Deep create an authoritative worklist, require six homogeneous host-attested Agent discovery workers, consolidate their receipts at semantic merge, and continue through the durable model validation/reporting tail without silently falling back to Fast. Diff resolves changed paths from Git using argument arrays; commit/range scans require the requested head to be checked out so worklist bytes cannot diverge from the bounded patch.
+Scan artifacts use phase directories below `artifacts/01_context` through `artifacts/05_findings`, Deep worker directories below `deep_discovery/round-NN/worker-NN`, reportable writeups below `findings/<slug>/`, and collection hardening below `hardening/`.
 
-Each phase commits progress and artifacts independently. Cancellation is represented in SQLite and checked between files and phase work. Shutdown asks runner threads to hand off, persists `interrupted`, and exits without deleting partial state.
+`findings.json`, `coverage.json`, and sealed `scan-manifest.json` are immutable canonical observations. They contain semantic identity and evidence, not workflow rows. `report.md`, SARIF, writeups, and hardening are derived/supporting artifacts. Mutable triage/remediation/tracking state remains in SQLite.
 
-## Coverage ledger and finalization
+Completion holds an OS-backed scan-scoped lock, revalidates the immutable target before and after finalization, verifies the returned manifest binding and published manifest/artifact bytes, then immediately enters the SQLite completion transaction. That transaction creates one Engine-owned timestamp after `BEGIN IMMEDIATE`; the manifest's Agent-authored `completedAt` remains canonical document content and never controls scan, progress, artifact, finding, or workspace lifecycle timestamps. The transaction then rechecks the running state, replaces the official artifact/finding indexes, and commits the reporting phase, completion status, and seal digest together. A failed post-finalize target or publication check leaves the scan running without a durable seal or completed indexes; generated projections remain unofficial files. The finalizer also validates strict JSON schemas, deterministic finding fingerprint/ID binding, safe regular-file paths, coverage receipt references, writeup/hardening file availability, and immutable setup artifacts. It does not infer candidate terminal states, coverage frontier semantics, validation, attack paths, or reportability: the Power's phase gates own those decisions before `security_complete_scan`.
 
-Coverage is not inferred from finding categories. Every `coverage.surfaces[]` entry is the projection of one durable `coverage_ledger` row and uses exactly one canonical disposition: `reportable`, `suppressed`, `not_applicable`, or `deferred`. There is no separate surface-summary disposition vocabulary. `receiptDigest` is SHA-256 over canonical sorted JSON containing `rowId`, disposition, reason, evidence references, and candidate/finding references. Stable semantic finding references are isolated in `coverage_finding_reference()` so the ledger does not depend on mutable locations.
+## Workbench
 
-For Standard and Diff, `not_applicable` means only that the bounded configured rule-family traversal ran for that supported source row and emitted no candidate; it is not a claim that the file is vulnerability-free. Deep never invents a clean receipt for a missing worklist row. Unsupported, unreadable, oversized, or inventory-limited in-scope items are explicit `deferred` rows. Completeness is therefore:
+The DB retains workspaces, scans, progress, artifacts, findings/occurrences/locations/evidence, events, triage, remediation, tracking, exports, and a scan-level coverage ledger. It contains no worker, round, merge, or assignment tables. Phase artifacts are continuation authority after coordinator lease handoff; progress rows are not.
 
-- `complete`: at least one supported row exists, every in-scope row has a receipt, no row is deferred, and Deep is not capped.
-- `partial`: any row is unclosed or deferred, or Deep terminated at its round cap.
-- `unknown`: no supported source file was reviewed, including Standard/Diff scopes containing only unsupported files.
+## UI boundary
 
-`coverage.json`, `findings.json`, `discovery.json`, `validation.json`, and `attack-path.json` form the canonical JSON bundle. Coverage and findings use strict schemas; the auxiliary sealed documents use explicit dependency-free top-level contracts. A completed `scan-manifest.json` is validated in memory and fixes every sealed artifact digest. `report.md`, `hardening/hardening.md`, and per-finding writeups are derived projections and never appear in `manifest.scan.artifacts`; they are listed separately under `derivedArtifacts`. The workbench publishes completed status, coverage, manifest digest, canonical and derived artifact records, and the official finalization files through one transaction boundary, preventing a reader from seeing a completed scan before its final artifacts are available.
-
-## Webview data flow
-
-The Webview cannot read files or SQLite. It sends a small allowlisted message union to the extension. The extension validates message shape, workspace-relative scope, Git refs, finding identifiers, and export URIs before calling the engine. The extension sends full typed snapshots and incremental event messages back to the Webview.
-
-## Secondary Side Bar behavior
-
-The extension contributes a normal Activity Bar view container. The `Open Security Panel on Right` command first opens the view and invokes the stable workbench command to move it to the Secondary Side Bar. Because a manifest cannot guarantee initial right-side placement, onboarding records successful guidance in global state. When movement is unavailable, the extension opens a distinct `WebviewPanel` in `ViewColumn.Beside` and labels it as a fallback rather than claiming it is the Secondary Side Bar.
-
-
-## Tracking boundary
-
-Finding tracking is implemented as an approval-ready handoff rather than an implicit external write. The engine records a provider-neutral or GitHub/Linear/Jira-shaped payload, duplicate-check metadata, source links, and a digest in SQLite and under the scan artifact directory. A human or separately authorized connector can review and submit that payload. This preserves the reference approval boundary without embedding connector credentials or duplicating scan logic in MCP.
-
-## Agent integration lifecycle
-
-The extension host owns Agent installation. After explicit modal approval it resolves Python 3.9+ with SQLite, copies only approved Power and engine files into extension global storage, performs a JSONC-preserving merge into workspace or user MCP configuration, writes managed auto-inclusion steering, and verifies the process through MCP initialize, tools/list, and `security_get_capabilities`. The prepared runtime path is stable across VSIX version-directory replacement. Before execution, its complete allowlisted payload is compared with the installed VSIX and unexpected import-shadow files, symlinks, special files, altered schemas/migrations, or changed Power MCP settings are rejected. Python runs with `-B -S` and a minimal environment. Any failed verification restores captured files and the previous prepared runtime. The Kiro-native Powers-panel import remains a separate optional host confirmation.
+The Engine contains no heuristic scanner, semantic validator, attack-path generator, or scan background runner. Standard, Diff, and Deep are chat/Power-only. The Dashboard remains a result and lifecycle consumer.

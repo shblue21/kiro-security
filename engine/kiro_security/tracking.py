@@ -12,7 +12,7 @@ from .security import redact, sha256_bytes, write_json
 TRACKING_PROVIDERS = ("manual", "github", "linear", "jira")
 TRIAGE_SOURCE_TYPES = (
     "sarif", "cve", "advisory", "scanner_ticket", "bug_bounty",
-    "codex_security_finding", "freeform", "unknown",
+    "kiro_security_finding", "freeform", "unknown",
 )
 TRACKING_OUTCOMES = ("created", "updated", "reused", "blocked", "failed", "uncertain")
 

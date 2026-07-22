@@ -9,7 +9,27 @@ const manifest = JSON.parse(await readFile(path.join(root, "package.json"), "utf
 const filename = `kiro-security-power-${manifest.version}.vsix`;
 const output = path.join(root, "dist", filename);
 const vsceEntrypoint = path.join(root, "node_modules", "@vscode", "vsce", "vsce");
-const result = spawnSync(process.execPath, [vsceEntrypoint, "package", "--no-dependencies", "--allow-missing-repository", "--out", output], {
+const packageIgnore = path.join(root, "scripts", "package.vscodeignore");
+const listing = spawnSync(process.execPath, [vsceEntrypoint, "ls", "--ignoreFile", packageIgnore], {
+  cwd: root,
+  encoding: "utf8",
+  shell: false,
+});
+if (listing.status !== 0) {
+  process.stderr.write(listing.stderr || "Unable to inspect package inputs.\n");
+  process.exit(listing.status ?? 1);
+}
+const forbiddenInputs = listing.stdout.split(/\r?\n/).filter((entry) =>
+  /(?:^|\/)__pycache__(?:\/|$)|\.pyc$/i.test(entry),
+);
+if (forbiddenInputs.length) {
+  console.error(`Forbidden package inputs detected: ${forbiddenInputs.join(", ")}`);
+  process.exit(1);
+}
+const result = spawnSync(process.execPath, [
+  vsceEntrypoint, "package", "--no-dependencies", "--allow-missing-repository",
+  "--ignoreFile", packageIgnore, "--out", output,
+], {
   cwd: root,
   stdio: "inherit",
   shell: false,

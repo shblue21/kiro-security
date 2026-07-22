@@ -1,0 +1,29 @@
+{
+  "upstream": "codex-security 0.1.11",
+  "purpose": "Audit-only direct-port parity check. This file is never loaded by the model-scan runtime.",
+  "allowedAdaptations": [
+    "Kiro product, document type, identifier, SARIF, and runtime naming",
+    "native worker concurrency cap of 4 and Deep round cap of 5",
+    "package-local imports and schema location",
+    "workspace-local .kiro/security-power artifact root exclusion from target snapshots",
+    "Kiro runtime fact provider and Kiro configuration discovery",
+    "workspace-local completion-lock path and Kiro scan identifier validation"
+  ],
+  "ports": [
+    {"upstreamPath":"scripts/resolve_security_md.py","localPath":"resolve_security_md.py","upstreamSha256":"f89577b5e43d95e0890f9e1dfd79e2c8351cff15a818282b722157ee104b856e","allowedDiffSha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+    {"upstreamPath":"scripts/rank_preview.py","localPath":"rank_preview.py","upstreamSha256":"f656f43803181458bdfdd29709a45293bc8c5372f58a730f7566c95e5b447b65","allowedDiffSha256":"99d5342c21a043ed0731023fa059b5f2479b6c2bd80a1a6c0fa5f53f0fa5c5e2"},
+    {"upstreamPath":"scripts/generate_rank_input.py","localPath":"generate_rank_input.py","upstreamSha256":"625913be1fa1339de94b3f891cd6b6b420e0a5913dc473e0f8964728a82a78e3","allowedDiffSha256":"569d01d2ebc8d26bea6adf56e398470b0e1b23de015084c59e74f3694ee61dcb"},
+    {"upstreamPath":"scripts/workbench_target.py","localPath":"workbench_target.py","upstreamSha256":"c6cec7207af2091bccd4677ddc8ea8b21d601830d9e9d7003ec4ffbfcd0f5989","allowedDiffSha256":"e06a6f6e57dd7012b3168a6c96f3e7272444d2d5fab222afef789acb5d4078a8"},
+    {"upstreamPath":"scripts/finalize_scan_contract.py","localPath":"finalize_scan_contract.py","upstreamSha256":"c072bc5b441079095a272abe62d39e8f4dcfb961a406c4ae64eef940bfdef26b","allowedDiffSha256":"bf0acef29a68d2acee7a8f8745eeddc8caa23b42a7f053ee785a10582953316a"},
+    {"upstreamPath":"scripts/report_projection.py","localPath":"report_projection.py","upstreamSha256":"0e6c246ac0a7c63bb3e8801ca87cddc5c26a1d6898e0e0591f2e94a0483ec4c7","allowedDiffSha256":"0c16877d06dd2ee785f99613c3a2479f541c419d2438b7c7f25c1948bb4b896c"},
+    {"upstreamPath":"scripts/config_preflight.py","localPath":"config_preflight.py","upstreamSha256":"cff0180424086e5cb5b289bdf3f5bf106d5c360050bc154324e2d72bb6dcc84f","allowedDiffSha256":"91b73619483f4826ce82b114e3b83c82a157bf6d5a566f66e28dee651321ca2a"},
+    {"upstreamPath":"scripts/workbench_constants.py","localPath":"workbench_constants.py","upstreamSha256":"96a1ccdd612ebd642133e2cae97ef9c232c6fb284c1234b5bf51d3f895fb62cb","allowedDiffSha256":"820d0e7f72dc825296dcc8d159e4c3badf929dbb6a046b4dfbbaf42abd12ad70"},
+    {"upstreamPath":"scripts/validate_report_format.py","localPath":"validate_report_format.py","upstreamSha256":"653703cee503cb1a2a69b84dab1d6d984253bd1a779838dc5720ea67d4972b0c","allowedDiffSha256":"a7046b883c71938cc40f9a63c41f73338dabf0e1e2fe23bb958a331242a3bb66"},
+    {"upstreamPath":"scripts/windows_scan_local_files.py","localPath":"windows_scan_local_files.py","upstreamSha256":"d1d28299715bf264cbdc69eda377aaa74df1975360ff0f0f01210525dac8d164","allowedDiffSha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+    {"upstreamPath":"scripts/workbench_db.py","upstreamLineRanges":[[4,4],[8,8],[13,14],[19,19],[21,21],[23,24],[26,34],[127,190]],"localPath":"completion_lock.py","upstreamSha256":"15ad4281a6c5ebc612e2b133248529563990a0e02649a4d612b7c87610acacbf","allowedDiffSha256":"911968a6e0d2155507939030a04adc4edf9a38d82b81072ef9b398651416f578"},
+    {"upstreamPath":"preflight/capability-profiles.toml","localPath":"preflight/capability-profiles.toml","upstreamSha256":"71f715ad4cb63a31ca71cf08c9499a41fde7881049c34ec6aa10bed7d8a3ada6","allowedDiffSha256":"347b5b917d33401fd56bc8ae8145d7bffc4226d9a98026a7b1428f9994b54037"},
+    {"upstreamPath":"schemas/coverage.schema.json","localPath":"../../schemas/coverage.schema.json","upstreamSha256":"7964b132998ca4dcdd19c75f5d92483e1d44cb71462237709b968ec548c10652","allowedDiffSha256":"7d0e440df3b03b75508a74da77030f5dea16d6cabb6f9a45bc355cf318247727"},
+    {"upstreamPath":"schemas/findings.schema.json","localPath":"../../schemas/findings.schema.json","upstreamSha256":"bd16dfe9a68c9b0485cad15b4ea3b037b0006dfb76a0549ed65a60ab8b062ac4","allowedDiffSha256":"846d81ddb8d1cf60fe9acd5857fdb0916a9397147d6ad2e91a7c29e48b27c4a5"},
+    {"upstreamPath":"schemas/scan-manifest.schema.json","localPath":"../../schemas/scan-manifest.schema.json","upstreamSha256":"20d6801775ae1b056d10114c3af5e07c5edfef27468218611411231a95c7c55e","allowedDiffSha256":"d794cc4fdbeee0912fd3267bd1d88e166e236797443a4fe107bc73071be99c29"}
+  ]
+}

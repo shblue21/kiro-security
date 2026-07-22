@@ -16,18 +16,14 @@ _REQUEST_FIELDS = frozenset({"jsonrpc", "protocolVersion", "id", "method", "para
 _METHOD_PARAMS = {
     "initialize": {"protocolVersion", "clientInfo"},
     "register_workspace": {"workspaceRoot", "defaultScope", "defaultMode"},
-    "start_scan": {"mode", "scope", "diffTargetKind", "diffBaseRevision", "diffHeadRevision", "maxFiles", "maxFileBytes", "analysisProfile", "modelId", "runtime"},
-    **{method: {"scanId"} for method in ("resume_scan", "cancel_scan", "get_scan", "get_progress", "create_hardening_proposal", "cleanup_scan", "deep_get_status", "deep_claim_merge")},
-    "deep_claim_worker": {"scanId", "modelId", "delegationId", "runtime"},
-    "deep_submit_worker": {"scanId", "workerId", "claimToken", "rowReceipts", "threatModel", "summary", "seedResearch", "dedupeReport", "candidates", "completionAttestation"},
-    "deep_retry_worker": {"scanId", "workerIndex", "reason"},
-    "deep_submit_merge": {"scanId", "claimToken", "canonicalCandidates"},
-    "deep_get_tail_assignment": {"scanId", "modelId", "delegationId", "runtime"},
-    "deep_submit_tail_result": {"scanId", "assignmentId", "claimToken", "modelId", "delegationId", "runtime", "completionAttestation", "result"},
-    "deep_retry_writeup": {"scanId", "assignmentId", "reason"},
+    "start_scan": {"mode", "scope", "diffTargetKind", "diffBaseRevision", "diffHeadRevision", "maxFiles", "maxFileBytes", "userContext"},
+    **{method: {"scanId"} for method in ("acquire_scan_coordinator", "get_scan", "get_progress", "get_scan_context", "cleanup_scan")},
+    **{method: {"scanId", "coordinatorToken", "coordinatorGeneration"} for method in ("renew_scan_coordinator", "release_scan_coordinator", "cancel_scan", "complete_scan")},
+    "update_scan_progress": {"scanId", "coordinatorToken", "coordinatorGeneration", "phase", "phasePercent", "itemsTotal", "itemsCompleted", "reportableFindingsCount", "message"},
+    "fail_scan": {"scanId", "coordinatorToken", "coordinatorGeneration", "reason"},
     "list_scans": {"limit"},
     "list_findings": {"scanId", "search", "limit"},
-    **{method: {"occurrenceId", "findingId"} for method in ("get_finding", "validate_finding", "create_remediation")},
+    **{method: {"occurrenceId", "findingId"} for method in ("get_finding", "create_remediation")},
     "create_tracking_handoff": {"occurrenceId", "findingId", "provider", "destination", "stableLink", "trackingProof"},
     "triage_finding": {"occurrenceId", "decision", "note"},
     "create_triage_intake": {"sourceType", "inputId", "occurrenceId", "input"},
@@ -40,7 +36,6 @@ _METHOD_PARAMS = {
     **{method: set() for method in ("get_capabilities", "database_info", "shutdown")},
     "get_dashboard": {"limit"},
     "poll_events": {"afterSequence", "limit"},
-    "refresh_threat_model": {"scope"},
 }
 
 
@@ -72,6 +67,13 @@ def optional_int(params: dict[str, Any], name: str, *, minimum: int, maximum: in
         return None
     if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
         raise EngineError("invalid_params", f"{name} must be an integer between {minimum} and {maximum}.")
+    return value
+
+
+def required_int(params: dict[str, Any], name: str, *, minimum: int, maximum: int) -> int:
+    value = optional_int(params, name, minimum=minimum, maximum=maximum)
+    if value is None:
+        raise EngineError("invalid_params", f"{name} is required.")
     return value
 
 
@@ -137,65 +139,38 @@ def validate_method(method: str, raw_params: Any) -> dict[str, Any]:
         optional_string(params, "diffHeadRevision", max_length=256)
         optional_int(params, "maxFiles", minimum=1, maximum=100_000)
         optional_int(params, "maxFileBytes", minimum=1024, maximum=10_485_760)
-        profile = optional_string(params, "analysisProfile", max_length=16) or ("model" if mode == "deep" else "fast")
-        if profile not in ("fast", "model") or (mode == "deep" and profile != "model"):
-            raise EngineError("invalid_params", "analysisProfile must be model for Deep and fast or model otherwise.")
-        params["analysisProfile"] = profile
-        if profile == "model":
-            required_string(params, "modelId", max_length=256)
-            require_object(params.get("runtime"), "runtime")
-    elif method in {"resume_scan", "cancel_scan", "get_scan", "get_progress", "create_hardening_proposal", "cleanup_scan"}:
+        optional_string(params, "userContext", max_length=4000)
+    elif method in {"acquire_scan_coordinator", "get_scan", "get_progress", "get_scan_context", "cleanup_scan"}:
         required_string(params, "scanId", max_length=256)
-    elif method in {"deep_get_status", "deep_claim_merge"}:
+    elif method in {"renew_scan_coordinator", "release_scan_coordinator", "cancel_scan", "complete_scan"}:
         required_string(params, "scanId", max_length=256)
-    elif method == "deep_claim_worker":
+        required_string(params, "coordinatorToken", max_length=128)
+        required_int(params, "coordinatorGeneration", minimum=1, maximum=2_147_483_647)
+    elif method == "update_scan_progress":
         required_string(params, "scanId", max_length=256)
-        required_string(params, "modelId", max_length=256)
-        required_string(params, "delegationId", max_length=256)
-        require_object(params.get("runtime"), "runtime")
-    elif method == "deep_submit_worker":
+        required_string(params, "coordinatorToken", max_length=128)
+        required_int(params, "coordinatorGeneration", minimum=1, maximum=2_147_483_647)
+        phase = optional_string(params, "phase", max_length=32)
+        if phase is not None and phase not in ("preflight", "threat_model", "discovery", "validation", "attack_path", "reporting"):
+            raise EngineError("invalid_params", "Unsupported progress phase.")
+        for name in ("itemsTotal", "itemsCompleted", "reportableFindingsCount"):
+            optional_int(params, name, minimum=0, maximum=2_147_483_647)
+        percent = params.get("phasePercent")
+        if percent is not None and (isinstance(percent, bool) or not isinstance(percent, (int, float)) or not 0 <= percent <= 100):
+            raise EngineError("invalid_params", "phasePercent must be a number between 0 and 100.")
+        optional_string(params, "message", max_length=1000)
+    elif method == "fail_scan":
         required_string(params, "scanId", max_length=256)
-        required_string(params, "workerId", max_length=256)
-        required_string(params, "claimToken", max_length=256)
-        if not isinstance(params.get("rowReceipts"), list) or not isinstance(params.get("candidates"), list):
-            raise EngineError("invalid_params", "rowReceipts and candidates must be arrays.")
-        required_string(params, "threatModel", max_length=200000)
-        optional_string(params, "summary", max_length=20000)
-        optional_string(params, "seedResearch", max_length=200000)
-        optional_string(params, "dedupeReport", max_length=200000)
-        require_object(params.get("completionAttestation"), "completionAttestation")
-    elif method == "deep_retry_worker":
-        required_string(params, "scanId", max_length=256)
-        if optional_int(params, "workerIndex", minimum=1, maximum=6) is None:
-            raise EngineError("invalid_params", "workerIndex is required.")
-        optional_string(params, "reason", max_length=4000)
-    elif method == "deep_submit_merge":
-        required_string(params, "scanId", max_length=256)
-        required_string(params, "claimToken", max_length=256)
-        if not isinstance(params.get("canonicalCandidates"), list):
-            raise EngineError("invalid_params", "canonicalCandidates must be an array.")
-    elif method == "deep_get_tail_assignment":
-        required_string(params, "scanId", max_length=256)
-        required_string(params, "modelId", max_length=256)
-        required_string(params, "delegationId", max_length=256)
-        require_object(params.get("runtime"), "runtime")
-    elif method == "deep_submit_tail_result":
-        for name in ("scanId", "assignmentId", "claimToken", "modelId", "delegationId"):
-            required_string(params, name, max_length=256)
-        require_object(params.get("runtime"), "runtime")
-        require_object(params.get("completionAttestation"), "completionAttestation")
-        require_object(params.get("result"), "result")
-    elif method == "deep_retry_writeup":
-        required_string(params, "scanId", max_length=256)
-        required_string(params, "assignmentId", max_length=256)
-        optional_string(params, "reason", max_length=4000)
+        required_string(params, "coordinatorToken", max_length=128)
+        required_int(params, "coordinatorGeneration", minimum=1, maximum=2_147_483_647)
+        required_string(params, "reason", max_length=4000)
     elif method == "list_scans":
         optional_int(params, "limit", minimum=1, maximum=200)
     elif method == "list_findings":
         required_string(params, "scanId", max_length=256)
         optional_string(params, "search", max_length=200)
         optional_int(params, "limit", minimum=1, maximum=2000)
-    elif method in {"get_finding", "validate_finding", "create_remediation", "create_tracking_handoff"}:
+    elif method in {"get_finding", "create_remediation", "create_tracking_handoff"}:
         if "occurrenceId" not in params and "findingId" not in params:
             raise EngineError("invalid_params", "occurrenceId or findingId is required.")
         optional_string(params, "occurrenceId", max_length=256)
@@ -260,14 +235,12 @@ def validate_method(method: str, raw_params: Any) -> dict[str, Any]:
         optional_string(params, "destination", max_length=8192)
         optional_string(params, "allowedRoot", max_length=8192)
         optional_string(params, "occurrenceId", max_length=256)
-    elif method in {"get_capabilities", "get_dashboard", "database_info", "poll_events", "refresh_threat_model", "shutdown"}:
+    elif method in {"get_capabilities", "get_dashboard", "database_info", "poll_events", "shutdown"}:
         if method == "get_dashboard":
             optional_int(params, "limit", minimum=1, maximum=200)
         if method == "poll_events":
             optional_int(params, "afterSequence", minimum=0, maximum=2_147_483_647)
             optional_int(params, "limit", minimum=1, maximum=1000)
-        if method == "refresh_threat_model":
-            optional_string(params, "scope", max_length=4096)
     return params
 
 

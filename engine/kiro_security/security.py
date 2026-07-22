@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any, Iterable
+from urllib.parse import urlsplit, urlunsplit
 
 from .errors import EngineError
 
@@ -67,6 +68,50 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _sanitized_remote_identity(value: str) -> str | None:
+    remote = value.strip()
+    if not remote:
+        return None
+    if "://" not in remote:
+        match = re.fullmatch(r"(?:[^@/:]+@)?([^/:]+):(.+)", remote)
+        if match:
+            host, path = match.groups()
+            return f"ssh://{host.lower()}/{path.lstrip('/').rstrip('/')}"
+        return None
+    parsed = urlsplit(remote)
+    if not parsed.scheme or not parsed.hostname or parsed.scheme.lower() == "file":
+        return None
+    host = parsed.hostname.lower()
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    try:
+        port = f":{parsed.port}" if parsed.port is not None else ""
+    except ValueError:
+        return None
+    path = "/" + parsed.path.lstrip("/").rstrip("/")
+    return urlunsplit((parsed.scheme.lower(), f"{host}{port}", path, "", ""))
+
+
+def stable_target_id(workspace: Path) -> str:
+    """Return a credential-free stable repository/workspace identity digest."""
+    remote_identity = None
+    try:
+        result = run_process(
+            "git", ["config", "--local", "--get", "remote.origin.url"],
+            cwd=workspace, timeout=10, check=False,
+        )
+        if result.returncode == 0:
+            remote_identity = _sanitized_remote_identity(result.stdout)
+    except EngineError:
+        remote_identity = None
+    material = (
+        f"remote\0{remote_identity}"
+        if remote_identity is not None
+        else f"workspace\0{workspace.resolve(strict=True)}"
+    )
+    return f"kiro-security-target/v1:sha256:{sha256_bytes(material.encode('utf-8', 'surrogatepass'))}"
 
 
 def redact(value: str) -> str:

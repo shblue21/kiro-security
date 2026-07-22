@@ -1,0 +1,11 @@
+.kiro/**
+**/__pycache__/**
+**/*.pyc
+engine/tests/**
+tests/**
+dist/tests/**
+fixtures/**
+packages/**
+requirements-dev.txt
+pytest.ini
+tsconfig.json

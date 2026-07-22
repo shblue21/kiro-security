@@ -41,7 +41,7 @@ def test_rpc_server_rejects_malformed_input_and_version_mismatch(workspace: Path
         assert read_json(process)["result"]["protocolVersion"] == PROTOCOL_VERSION
         process.stdin.write(json.dumps({"jsonrpc": "2.0", "protocolVersion": PROTOCOL_VERSION, "id": 3, "method": "shutdown", "params": {}}) + "\n")
         process.stdin.flush()
-        assert read_json(process)["result"]["interruptedScanIds"] == []
+        assert read_json(process)["result"]["releasedCoordinatorLeaseScanIds"] == []
     finally:
         try:
             process.stdin.close()

@@ -21,6 +21,18 @@ async function tempRoot(name: string): Promise<string> {
   return mkdtemp(path.join(os.tmpdir(), `${name}-`));
 }
 
+async function registerPreparedPower(powerPath: string, userConfigPath: string): Promise<void> {
+  const power = JSON.parse(await readFile(path.join(powerPath, "mcp.json"), "utf8")) as any;
+  const entry = power.mcpServers["kiro-security-power-runtime"];
+  await mkdir(path.dirname(userConfigPath), { recursive: true });
+  let source = "{}\n";
+  try { source = await readFile(userConfigPath, "utf8"); } catch { /* create below */ }
+  await writeFile(
+    userConfigPath,
+    mergeMcpServerConfigText(source, userConfigPath, "power-kiro-security-power-kiro-security-power-runtime", entry),
+  );
+}
+
 test("JSONC MCP merge and removal preserve comments and unrelated servers", () => {
   const source = `{
   // keep this operator note
@@ -54,6 +66,8 @@ test("managed Agent steering is auto-included and describes the shared workbench
   assert.match(steering, new RegExp(MANAGED_STEERING_MARKER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.match(steering, /\.kiro\/security-power\/workbench\.sqlite/);
   assert.match(steering, /security_get_capabilities/);
+  assert.match(steering, /MCP availability alone does not make scans ready/);
+  assert.match(steering, /Do not start Standard, Diff, or Deep unless Kiro has activated the installed native Power/);
   assert.match(steering, /not an official OpenAI, Codex, or Kiro product/);
 });
 
@@ -96,10 +110,9 @@ test("one-click installer merges, verifies, prepares Power, and removes only man
     assert.deepEqual(managed.args, ["-B", "-S", "-m", "kiro_security.mcp_server"]);
     assert.deepEqual(managed.autoApprove, [
       "security_get_capabilities",
-      "security_list_scans",
       "security_get_scan",
       "security_get_progress",
-      "security_deep_get_status",
+      "security_get_scan_context",
       "security_list_findings",
       "security_get_finding",
     ]);
@@ -109,6 +122,8 @@ test("one-click installer merges, verifies, prepares Power, and removes only man
       path.join(installed.powerPath, "POWER.md"),
       path.join(installed.powerPath, "mcp.json"),
       path.join(installed.powerPath, "steering"),
+      path.join(installed.powerPath, "references"),
+      path.join(installed.powerPath, "references", "final-report.md"),
       path.join(installed.powerPath, "runtime", "engine", "kiro_security", "mcp_server.py"),
     ]) {
       assert.ok((await stat(required)).isFile() || (await stat(required)).isDirectory());
@@ -116,12 +131,24 @@ test("one-click installer merges, verifies, prepares Power, and removes only man
 
     const status = await manager.inspect(installed.pythonExecutable);
     assert.equal(status.configured, true);
-    assert.equal(status.verified, true);
-    assert.equal(status.state, "verified");
+    assert.equal(status.verified, false);
+    assert.equal(status.state, "configured");
     assert.equal(status.power.prepared, true);
     assert.equal(status.power.manifestValid, true);
+    assert.equal(status.power.registration, "import_required");
+    await assert.rejects(
+      manager.verify(installed.pythonExecutable),
+      (error: unknown) => error instanceof AgentIntegrationError && error.code === "power_not_registered",
+    );
+    await registerPreparedPower(installed.powerPath, path.join(home, ".kiro", "settings", "mcp.json"));
+    const registeredStatus = await manager.inspect(installed.pythonExecutable);
+    assert.equal(registeredStatus.power.registration, "detected");
+    assert.equal(registeredStatus.verified, false);
     const verified = await manager.verify(installed.pythonExecutable);
     assert.ok(verified.toolCount >= 15);
+    const readyStatus = await manager.inspect(installed.pythonExecutable);
+    assert.equal(readyStatus.state, "verified");
+    assert.equal(readyStatus.verified, true);
     await assert.rejects(stat(path.join(installed.powerPath, "runtime", "engine", "kiro_security", "__pycache__")), { code: "ENOENT" });
 
     const importShadow = path.join(installed.powerPath, "runtime", "engine", "json.py");
@@ -248,6 +275,7 @@ test("user-scoped integration remains workspace-neutral and still verifies the c
     const managed = config.mcpServers[AGENT_MCP_SERVER_NAME];
     assert.equal(managed.env.KIRO_SECURITY_WORKSPACE, undefined);
     assert.equal(managed.autoApprove, undefined);
+    await registerPreparedPower(installed.powerPath, installed.configPath);
     assert.ok((await manager.verify(installed.pythonExecutable)).toolCount >= 15);
     const removed = await manager.removeDirectIntegration();
     assert.deepEqual(removed.removedConfigPaths, [installed.configPath]);

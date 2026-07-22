@@ -1,57 +1,39 @@
-# Migration and parity matrix
+# Codex Security plugin-layer parity matrix
 
-Status vocabulary: **Reused**, **Adapted**, **Rewritten**, **Replaced**, **Unsupported**, or **Excluded with reason**.
+This matrix records local implementation evidence. `Desktop gate` remains FAIL until independently reviewed real Kiro evidence is supplied.
 
-Schema compatibility targets canonical lifecycle meaning and structural safety, not byte-for-byte Codex product identity. Kiro keeps its `kiro-security-power.*` document types, `scan_`/`kspf_`/`occ_` identifiers, `kiro-security/(deep-)?v1` fingerprints, WS-A row coverage, canonical/supporting/derived artifact roles, Kiro and Deep/tail provenance, and Kiro RPC/event names. Python `validate_method()` remains the authoritative engine-method parameter validator, MCP schemas validate agent-facing arguments, and the shared TypeScript protocol validates envelopes, events, and document DTOs; these layers intentionally apply the reference safety properties in the Kiro dialect rather than adopting Codex/OpenAI branding or identifiers.
+| Requirement | Status | Evidence |
+|---|---|---|
+| Power top-level mode routing | PASS (static) | POWER routes three independent steering workflows; Setup requires native import and verifies Kiro's namespaced registration before scan-ready |
+| Legacy heuristic/profile path removal | PASS | no analysis profile, background runner, heuristic finding producer, dashboard start, or deterministic semantic tool remains |
+| Native capability preflight | PASS (static) | Power directly checks native tool/type; Engine self-proof removed |
+| Runtime scan goal/task ownership | PASS (static) | coordinator and worker objectives specified |
+| Progressive phase loading | PASS | separate phase steering and explicit phase isolation |
+| Standard independent workflow | PASS | static rank/file/candidate ownership |
+| Diff independent workflow | PASS | exact Git target and bounded context |
+| Deep repeated discovery | PASS | four identical fresh workers, max five rounds |
+| Fresh native subagent ownership | PASS (static) | self-contained prompt contract |
+| Worker isolation and identical brief | PASS (static) | Deep brief forbids themes/prior state |
+| Deterministic shared worklist | PASS | model adapter writes rank/deep JSONL |
+| Worker-local artifact ownership | PASS (static) | phase and worker directory contract |
+| Candidate/coverage ledger | PASS (Skill gate) | file-work, security-coverage, and candidate ledgers have distinct coordinator-owned closure rules; the deterministic finalizer does not infer terminal candidate state |
+| Complete-round barrier | PASS (static) | four completion/idle gate in Deep steering |
+| Coordinator semantic merge | PASS (static) | remediation-subsumption rules |
+| Semantic novelty/saturation | PASS (static) | inventory comparison; partial cap |
+| Canonical threat model | PASS (static) | Standard/Diff pre-discovery, Deep terminal validation model |
+| Candidate validation | PASS | dedicated phase and required canonical semantics |
+| Attack path/policy | PASS | validation/threat prerequisites and final policy |
+| Dedicated writeup | PASS | one reportable finding per worker |
+| Collection hardening | PASS | one collection task; zero-finding omission |
+| Coordinator canonical assembly | PASS | coordinator must author the complete semantic manifest; Engine rejects skeletal/pre-sealed input and adds only seal fields/hashes |
+| Lifecycle-only MCP | PASS | exact twelve-tool scan lifecycle including coordinator acquire/renew/release; Python/Node surfaces match and completion has no semantic body |
+| Workflow-state-free DB | PASS | fresh schema v12 contains no model workflow tables or worker/assignment/round/profile/attestation/session-owner columns; all pending migrations are resolved and applied under one `BEGIN IMMEDIATE`; active-pointer mismatches fail closed; a partial unique index enforces one fully prepared running scan per workspace; a hash-only transient coordinator lease arbitrates mutations without owning lifecycle |
+| One-shot completion | PASS | completion accepts only scan ID plus the transient coordinator token and generation; canonical validation/attack/code evidence readback preserves Agent-authored fields |
+| Deterministic projection/seal | PASS | OS-backed per-scan completion lock; pre/post-finalizer target validation; returned manifest and artifact-byte verification; Engine-owned transaction timestamp isolated from manifest `completedAt`; immediate transaction recheck/index replacement/reporting-phase completion/seal/lease deletion; adversarial target, manifest, artifact, future timestamp, and non-owner rejection; concurrent completion has one authorized winner; zero/one finding report/SARIF completion |
+| Artifact-based continuation | PASS (local) | durable running scan plus coordinator lease handoff and target revalidation; no assignment recovery |
+| Cancellation | PASS (local) | current lease holder performs an immediate terminal transition and atomically deletes the lease |
+| Chat-only UI | PASS | no Dashboard scan-start path exists |
+| Ordinary user-facing result | PASS (local) | report projection omits worker bookkeeping |
+| Actual Kiro Desktop E2E | **FAIL / NOT RUN** | required before final approval |
 
-| Reference component or capability | Status | Kiro Security Power implementation | Notes / residual difference |
-|---|---|---|---|
-| Plugin manifest | Rewritten | Root `package.json` VSIX manifest | Product identity changed; no OpenAI/Codex branding |
-| Skill/workflow instructions | Adapted | Python phase engine plus `powers/kiro-security-power/POWER.md` | Operational invariants retained; agent-specific wording condensed |
-| Python scripts | Adapted | `engine/kiro_security/` | State, Git, artifact, export, and safety concepts retained in a smaller cohesive package |
-| JSON findings schema | Adapted | `engine/schemas/findings.schema.json` | Compatible core fields; Kiro provenance and management extensions |
-| Coverage schema | Adapted | `engine/schemas/coverage.schema.json` | Compatible receipt model and Kiro document type |
-| Scan manifest schema | Adapted | `engine/schemas/scan-manifest.schema.json` | Compatible sealed artifact inventory and lifecycle fields |
-| SQLite workbench | Adapted | `engine/kiro_security/db.py`, `engine/migrations/` | WAL, migrations, transactions, backup, sessions, heartbeat, recovery |
-| Scan lifecycle | Reused | `state_machine.py`, `runner.py`, DB constraints | Same mode/phase ordering; explicit interrupted state added |
-| Progress | Reused | `scan_progress`, RPC events, UI polling | Cross-process reconciliation supports MCP-started scans |
-| Handoff | Adapted | owner/session heartbeat and `handoff_state` | Host delivery claims are replaced by process-neutral durable ownership |
-| Finding discovery | Rewritten | `scanner.py` Fast profile plus durable six-worker model discovery and semantic merge | Fast is deterministic pre-screening; Standard/Diff use one model round and Deep iterates to zero novelty or cap |
-| Validation | Rewritten | `validator.py` for Fast; durable model tail assignments for model scans | The engine validates bounded proof results and never executes a model-submitted command |
-| Attack-path analysis | Rewritten | `attack_path.py` for Fast; durable model tail assignments for model scans | Model results require evidence-backed control, sink, impact, severity, counterevidence, and uncertainty |
-| Triage | Adapted | `triage_decisions` plus bounded external intake and proof-chain assessment | User disposition remains separate from untrusted imported evidence and model assessment |
-| Remediation | Adapted | Guidance plus prepared patch, drift gate, explicit apply, and verification receipt | No silent patching; repository mutation requires a digest-bound prepared patch and explicit apply call |
-| Hardening proposals | Adapted | `hardening.py` for Fast; normalized JSON and deterministic Markdown model portfolio | Report and hardening remain derived projections outside the canonical seal |
-| Vulnerability writeup | Adapted | Template writeups for Fast; dedicated bounded model writeup/PoC materialization | The engine controls the artifact path and does not autonomously construct or execute an exploit |
-| Finding tracking | Adapted | Digest-bound exact handoff preview plus sanitized connector readback | Provider credentials, duplicate search, approval, and network writes stay in a separately authorized connector |
-| JSON export | Reused | `exports.py` | Implemented and tested |
-| CSV export | Reused | `exports.py` | Implemented and tested |
-| SARIF export | Reused | `exports.py` | SARIF 2.1.0 projection implemented and tested |
-| Markdown report | Reused | `reporting.py` | Implemented and tested |
-| Threat model artifact | Adapted | deterministic repository context plus post-discovery canonical model synthesis | Context observations remain hints/unknowns until model proof; Standard/Diff/Deep reuse one tail kind |
-| Discovery output | Reused | `discovery.json` | Implemented |
-| Validation output | Reused | `validation.json` | Implemented |
-| Attack-path output | Reused | `attack-path.json` | Implemented |
-| Scan manifest JSON | Reused | `scan-manifest.json` | Implemented and sealed with artifact hashes |
-| Coverage JSON | Reused | `coverage.json` | Implemented |
-| Findings JSON | Reused | `findings.json` | Implemented |
-| MCP server | Rewritten | `engine/kiro_security/mcp_server.py` plus TypeScript source `packages/mcp/src/server.ts` | One-click Setup uses Python directly and the same SQLite service; no compressed reference runtime reused |
-| MCP App UI | Replaced | VSIX Webview/WebviewView | Product lifecycle belongs to VSIX; MCP remains companion adapter |
-| Kiro Power | Rewritten | `powers/kiro-security-power/` and Setup-prepared native bundle | Delegates all stateful actions to MCP/engine; native Powers-panel import remains an explicit Kiro confirmation |
-| Bundled assets | Excluded with reason | New `media/security.svg` | Reference logo is proprietary product branding |
-| Tests and fixtures | Rewritten | Node and Python tests; generated vulnerable fixture; Desktop verification record schema | Reference example is not hardcoded into production; actual Kiro delegated multi-round evidence remains outstanding |
-| Capability preflight | Adapted | Engine capabilities and setup state | Local dependency/workspace/Git checks surfaced to UI |
-| Git target identity | Adapted | Canonical path, Git revision, diff refs, snapshot digest | Direct subprocess argument arrays; environment minimized |
-| Source excerpts | Reused | Evidence records and finding detail payload | Bounded context only |
-| Sealed manifest digest | Reused | Artifact hashes plus manifest SHA-256 stored in SQLite | Implemented during reporting |
-| Cancellation | Reused | DB cancellation flag, thread checks, event and terminal state | Race-safe idempotent cancellation |
-| Interrupted recovery/resume | Adapted | Session heartbeat, stale-owner recovery, phase resume | Resume continues from durable current phase |
-| Secondary Side Bar experience | Adapted | View container plus stable workbench move command; beside panel fallback | Manifest cannot guarantee initial right-side placement |
-| Problems diagnostics | New integration | `DiagnosticCollection` for validated findings | IDE-native parity feature |
-| Code actions | New integration | Details and remediation actions | IDE-native parity feature |
-| Status bar/output channel | New integration | Active phase/progress/count and structured logs | IDE-native parity feature |
-| History cleanup | New integration | `cleanup_scan` RPC, History UI action, artifact boundary checks | Only completed/failed/cancelled/interrupted scans are removable; explicit external exports are retained |
-| Per-finding export | New integration | `export_report` with `occurrenceId`, Finding detail action | JSON handoff is generated from the selected durable finding only |
-| Secret storage | New integration | Optional analyzer credential stored in `SecretStorage` | No secret is written to settings or logs |
-| Agent one-click installation | Adapted | Setup JSONC merge, managed steering, stable runtime, MCP verification and rollback | Recreates Codex-like low-friction setup without private Kiro APIs or bypassing Kiro permission confirmation |
-| Telemetry | Replaced | Off by default; current implementation contains no telemetry transport | Opt-in setting is reserved and would require a separate consent and data-minimization review |
+P0/P1 local implementation findings: none currently known after correcting the native-Power activation gate. Desktop evidence may change this assessment.

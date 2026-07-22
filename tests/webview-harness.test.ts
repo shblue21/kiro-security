@@ -60,7 +60,6 @@ function snapshot(overrides: any = {}) {
     target_revision: "abc",
     snapshot_digest: "digest",
     cancellation_requested: false,
-    handoff_state: "none",
     failure_code: null,
     failure_message: null,
     started_at: "2026-07-14T00:00:00Z",
@@ -69,7 +68,7 @@ function snapshot(overrides: any = {}) {
     updated_at: "2026-07-14T00:00:02Z",
     files_total: 3,
     files_completed: 3,
-    progress: { scan_id: "scan_test", phase_percent: 100, overall_percent: 100, review_items_total: 3, review_items_completed: 3, reportable_findings_count: 1, deep_review_pass: null, message: "Completed", updated_at: "2026-07-14T00:00:02Z" },
+    progress: { scan_id: "scan_test", phase_percent: 100, overall_percent: 100, review_items_total: 3, review_items_completed: 3, reportable_findings_count: 1, message: "Completed", updated_at: "2026-07-14T00:00:02Z" },
     artifacts: [],
     coverage: { completeness: "complete", surfaces: [], explicitExclusions: [], deferred: [] },
   };
@@ -84,7 +83,6 @@ function snapshot(overrides: any = {}) {
       selectedScan: scan,
       scans: [scan],
       findings: [finding],
-      latestResumableScan: null,
     },
     selectedFinding: null,
     agentIntegration: {
@@ -111,7 +109,7 @@ test("webview harness renders loading, dashboard, empty/error, filtering, and de
   assert.match(harness.document.body.textContent ?? "", /Connecting/);
 
   harness.window.dispatchEvent(new harness.window.MessageEvent("message", { data: { type: "snapshot", snapshot: snapshot() } }));
-  assert.match(harness.document.body.textContent ?? "", /Fast \(deterministic\)/);
+  assert.match(harness.document.body.textContent ?? "", /Standard \(Kiro Agent\)/);
   assert.match(harness.document.body.textContent ?? "", /1\s*findings/);
   assert.ok(harness.document.querySelector('[aria-label="Security panel sections"]'));
   assert.equal(harness.document.querySelectorAll('[data-tab]').length, 3);
@@ -125,13 +123,13 @@ test("webview harness renders loading, dashboard, empty/error, filtering, and de
   assert.equal(harness.document.querySelector(".card"), unchangedCard, "unchanged snapshots should not replace the DOM");
 
   const labeled = snapshot();
-  const modelScan = { ...labeled.dashboard.selectedScan, capabilities: { analysisProfile: "model" } };
-  const fastScan = { ...modelScan, id: "scan_fast", status: "running", capabilities: { analysisProfile: "fast" } };
-  labeled.dashboard.activeScan = fastScan;
-  labeled.dashboard.selectedScan = modelScan;
-  labeled.dashboard.scans = [fastScan, modelScan];
+  const standardScan = { ...labeled.dashboard.selectedScan };
+  const deepScan = { ...standardScan, id: "scan_deep", mode: "deep", status: "running" };
+  labeled.dashboard.activeScan = deepScan;
+  labeled.dashboard.selectedScan = standardScan;
+  labeled.dashboard.scans = [deepScan, standardScan];
   harness.window.dispatchEvent(new harness.window.MessageEvent("message", { data: { type: "snapshot", snapshot: labeled } }));
-  assert.match(harness.document.querySelector(".active-scan")?.textContent ?? "", /Fast \(deterministic\)/);
+  assert.match(harness.document.querySelector(".active-scan")?.textContent ?? "", /Deep \(Kiro Agent\)/);
   assert.equal(harness.document.querySelectorAll(".scan-state").length, 1, "running replaces the completed state card");
   assert.match(harness.document.getElementById("recent-scans")?.textContent ?? "", /Standard \(Kiro Agent\)/);
 
@@ -205,6 +203,25 @@ test("webview harness renders loading, dashboard, empty/error, filtering, and de
   assert.equal(installMessage.scope, "workspace");
   assert.equal(installMessage.autoApprovePolicy, "read_only");
 
+  const importRequired = snapshot();
+  importRequired.agentIntegration = {
+    ...importRequired.agentIntegration,
+    configured: true,
+    state: "configured",
+    power: {
+      ...importRequired.agentIntegration.power,
+      prepared: true,
+      preparedPath: "/tmp/prepared-power",
+      manifestValid: true,
+      registration: "import_required",
+    },
+  };
+  harness.window.dispatchEvent(new harness.window.MessageEvent("message", { data: { type: "snapshot", snapshot: importRequired } }));
+  assert.match(harness.document.body.textContent ?? "", /native Power import required/i);
+  assert.ok(harness.document.querySelector('[data-action="copy-power-path"]'));
+  (harness.document.querySelector('[data-action="copy-power-path"]') as HTMLElement).click();
+  assert.equal(harness.messages.at(-1).type, "copyPowerPath");
+
   const configured = snapshot();
   configured.agentIntegration = { ...configured.agentIntegration, configured: true, state: "needs_repair", configScope: "user", autoApprovePolicy: "none" };
   harness.window.dispatchEvent(new harness.window.MessageEvent("message", { data: { type: "snapshot", snapshot: configured } }));
@@ -249,6 +266,22 @@ test("webview harness renders loading, dashboard, empty/error, filtering, and de
   assert.match(harness.document.body.textContent ?? "", /Python missing/);
   (harness.document.querySelector('[data-action="retry-engine"]') as HTMLElement).click();
   assert.equal(harness.messages.at(-1).type, "retryEngine");
+});
+
+test("failed scans are terminal and dashboard exposes no coordinator mutation controls", () => {
+  const harness = createHarness();
+  const failed = snapshot();
+  failed.dashboard.selectedScan = { ...failed.dashboard.selectedScan, status: "failed", failure_code: "unrecoverable" };
+  failed.dashboard.scans = [failed.dashboard.selectedScan];
+  harness.window.dispatchEvent(new harness.window.MessageEvent("message", { data: { type: "snapshot", snapshot: failed } }));
+  assert.equal(harness.document.querySelector('[data-action="resume"]'), null);
+  assert.equal(harness.document.querySelector('[data-action="cancel"]'), null);
+
+  const running = snapshot();
+  running.dashboard.activeScan = { ...running.dashboard.selectedScan, status: "running" };
+  harness.window.dispatchEvent(new harness.window.MessageEvent("message", { data: { type: "snapshot", snapshot: running } }));
+  assert.equal(harness.document.querySelector('[data-action="resume"]'), null);
+  assert.equal(harness.document.querySelector('[data-action="cancel"]'), null);
 });
 
 test("packaged webview CSP and styles exclude remote script sources and include accessibility themes", () => {

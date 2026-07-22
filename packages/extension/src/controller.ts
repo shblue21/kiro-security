@@ -227,7 +227,6 @@ export class SecurityController implements vscode.Disposable {
       await this.refreshAgentIntegration(false);
       const showDiagnostics = vscode.workspace.getConfiguration("kiroSecurity").get<boolean>("showValidatedDiagnostics", true);
       await this.diagnostics?.refresh(dashboard.findings, showDiagnostics);
-      await vscode.commands.executeCommand("setContext", "kiroSecurity.scanActive", Boolean(dashboard.activeScan));
       this.updateStatusBar();
       try {
         const events = await engine.request<Array<{ sequence: number; event: EngineEventName; payload: Record<string, unknown> }>>(
@@ -277,86 +276,6 @@ export class SecurityController implements vscode.Disposable {
     return path.relative(this.workspaceRoot, resolved) || ".";
   }
 
-  private validateGitRef(value: string | undefined, field: string): string | undefined {
-    if (value === undefined || value === "") return undefined;
-    if (value.length > 256 || value.startsWith("-") || !/^[A-Za-z0-9._/@+\-~^:]+$/.test(value)) throw new Error(`${field} is not a safe Git revision.`);
-    return value;
-  }
-
-  async startScan(
-    mode: ScanMode,
-    options: { scope?: string; analysisProfile?: "fast" | "model"; diffTargetKind?: "working_tree" | "commit" | "range"; diffBaseRevision?: string; diffHeadRevision?: string } = {},
-  ): Promise<ScanRecord | undefined> {
-    return this.userAction("Start scan", async () => {
-      if (mode === "deep" || mode === "diff" || options.analysisProfile === "model") {
-        const scope = this.validateScope(options.scope ?? vscode.workspace.getConfiguration("kiroSecurity").get<string>("defaultScope", "."));
-        const label = mode === "diff" ? "Diff" : mode === "deep" ? "Deep" : "Standard";
-        const prompt = [
-          `Run a ${label} Kiro Security scan for workspace-relative scope ${JSON.stringify(scope)}.`,
-          mode === "diff" ? `Diff target: ${options.diffTargetKind ?? "working_tree"}.` : undefined,
-          options.diffBaseRevision ? `Base revision: ${this.validateGitRef(options.diffBaseRevision, "Base revision")}.` : undefined,
-          options.diffHeadRevision ? `Head revision: ${this.validateGitRef(options.diffHeadRevision, "Head revision")}.` : undefined,
-          "Use the installed kiro-security-power Agent tools and preserve their runtime attestation requirements.",
-        ].filter(Boolean).join("\n");
-        await vscode.env.clipboard.writeText(prompt);
-        const choice = await vscode.window.showInformationMessage(
-          `Prompt copied. Paste it into a Kiro Agent chat to run the ${label} scan.`,
-          "Open Setup",
-        );
-        if (choice === "Open Setup") {
-          await vscode.commands.executeCommand("kiroSecurity.openPanel");
-          this.viewSink?.postNavigation("setup");
-        }
-        return undefined;
-      }
-      const engine = await this.ensureEngine();
-      const config = vscode.workspace.getConfiguration("kiroSecurity");
-      const scope = this.validateScope(options.scope ?? config.get<string>("defaultScope", "."));
-      const scan = await engine.request<ScanRecord>("start_scan", {
-        mode,
-        analysisProfile: "fast",
-        scope,
-        maxFiles: config.get<number>("maxFiles", 10_000),
-        maxFileBytes: config.get<number>("maxFileBytes", 1_048_576),
-      });
-      this.selectedScanId = scan.id;
-      this.selectedOccurrenceId = undefined;
-      this.selectedFinding = null;
-      await this.context.workspaceState.update("kiroSecurity.selectedScanId", scan.id);
-      await this.refresh();
-      return scan;
-    });
-  }
-
-  async startScanForUri(mode: ScanMode, uri?: vscode.Uri): Promise<void> {
-    let scope: string | undefined;
-    if (uri?.scheme === "file" && this.workspaceRoot && isPathWithin(this.workspaceRoot, uri.fsPath)) {
-      scope = path.relative(this.workspaceRoot, uri.fsPath) || ".";
-    }
-    await this.startScan(mode, { scope });
-  }
-
-  async resumeScan(scanId?: string): Promise<ScanRecord | undefined> {
-    return this.userAction("Resume scan", async () => {
-      const engine = await this.ensureEngine();
-      const target = scanId ?? this.dashboard?.latestResumableScan?.id;
-      if (!target) throw new Error("No interrupted or failed scan is available to resume.");
-      const scan = await engine.request<ScanRecord>("resume_scan", { scanId: target });
-      this.selectedScanId = scan.id;
-      await this.refresh();
-      return scan;
-    });
-  }
-
-  async cancelScan(scanId?: string): Promise<void> {
-    await this.userAction("Cancel scan", async () => {
-      const target = scanId ?? this.dashboard?.activeScan?.id;
-      if (!target) throw new Error("No active scan is available to cancel.");
-      await (await this.ensureEngine()).request("cancel_scan", { scanId: target });
-      await this.refresh();
-    });
-  }
-
   async selectScan(scanId: string): Promise<void> {
     this.selectedScanId = scanId;
     this.selectedOccurrenceId = undefined;
@@ -369,7 +288,7 @@ export class SecurityController implements vscode.Disposable {
     await this.userAction("Clean up scan", async () => {
       const scan = this.dashboard?.scans.find((item) => item.id === scanId);
       if (!scan) throw new Error("The scan is no longer available.");
-      if (["queued", "running"].includes(scan.status)) throw new Error("Cancel the active scan before cleanup.");
+      if (scan.status === "running") throw new Error("Only terminal scans can be cleaned up.");
       const confirmation = await vscode.window.showWarningMessage(
         `Delete scan ${scanId} and its saved results? Exported files are kept.`,
         { modal: true },
@@ -421,14 +340,6 @@ export class SecurityController implements vscode.Disposable {
     return selected?.occurrenceId;
   }
 
-  async validateFinding(occurrenceId: string): Promise<void> {
-    await this.userAction("Validate finding", async () => {
-      this.selectedFinding = await (await this.ensureEngine()).request<FindingDetail>("validate_finding", { occurrenceId });
-      this.selectedOccurrenceId = occurrenceId;
-      await this.refresh();
-    });
-  }
-
   async triageFinding(occurrenceId: string, decision: TriageDecision, note?: string): Promise<void> {
     await this.userAction("Triage finding", async () => {
       this.selectedFinding = await (await this.ensureEngine()).request<FindingDetail>("triage_finding", { occurrenceId, decision, note });
@@ -453,22 +364,6 @@ export class SecurityController implements vscode.Disposable {
       await vscode.window.showInformationMessage(
         `A ready-to-paste Kiro Agent issue-tracker prompt${target} was copied. No issue was created.`,
       );
-    });
-  }
-
-  async createHardening(scanId: string): Promise<void> {
-    await this.userAction("Create hardening proposal", async () => {
-      const record = await (await this.ensureEngine()).request<{ artifactPath: string }>("create_hardening_proposal", { scanId });
-      await this.refresh();
-      await this.openTrustedEnginePath(record.artifactPath);
-    });
-  }
-
-  async refreshThreatModel(): Promise<void> {
-    await this.userAction("Refresh threat model", async () => {
-      const scope = vscode.workspace.getConfiguration("kiroSecurity").get<string>("defaultScope", ".");
-      const result = await (await this.ensureEngine()).request<{ path: string }>("refresh_threat_model", { scope: this.validateScope(scope) });
-      await this.openTrustedEnginePath(result.path);
     });
   }
 
@@ -671,10 +566,12 @@ export class SecurityController implements vscode.Disposable {
         return installed;
       });
       const choice = await vscode.window.showInformationMessage(
-        `Kiro Agent integration is ready. Verified ${result.toolCount} tools with Python ${result.pythonVersion}. Kiro should reload the MCP configuration automatically.`,
+        `The MCP runtime passed its local probe (${result.toolCount} tools, Python ${result.pythonVersion}). To enable scans, import the prepared folder from Kiro's Powers panel, then verify again.`,
+        "Copy Power folder",
         "Open MCP config",
       );
-      if (choice === "Open MCP config") await this.openMcpConfig(scope);
+      if (choice === "Copy Power folder") await this.copyPowerPath();
+      else if (choice === "Open MCP config") await this.openMcpConfig(scope);
     });
   }
 
@@ -772,6 +669,18 @@ export class SecurityController implements vscode.Disposable {
     const config = await this.agentIntegration.configForClipboard(this.pythonPath(), this.configuredAutoApprovePolicy());
     await vscode.env.clipboard.writeText(JSON.stringify(config, null, 2));
     void vscode.window.showInformationMessage("Reviewed Kiro Security Power MCP configuration copied. Existing settings were not modified.");
+  }
+
+  async copyPowerPath(): Promise<void> {
+    this.requireTrustedWorkspace("copying the prepared Power folder path");
+    const preparedPath = this.agentIntegrationStatus.power.preparedPath;
+    if (!preparedPath || !this.agentIntegrationStatus.power.manifestValid) {
+      throw new Error("Run Install or Repair Agent Integration before importing the native Power.");
+    }
+    await vscode.env.clipboard.writeText(preparedPath);
+    void vscode.window.showInformationMessage(
+      "Power folder copied. In Kiro open Powers → Add Custom Power → Import power from a folder, select this path, click Install, then return here and Verify setup.",
+    );
   }
 
   private async userAction<T>(label: string, action: () => Promise<T>): Promise<T | undefined> {

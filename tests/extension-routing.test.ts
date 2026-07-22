@@ -13,9 +13,6 @@ const commands = new Set(manifest.contributes.commands.map((entry: { command: st
 const required = [
   "kiroSecurity.openPanel",
   "kiroSecurity.openPanelRight",
-  "kiroSecurity.refreshThreatModel",
-  "kiroSecurity.resumeLastScan",
-  "kiroSecurity.cancelActiveScan",
   "kiroSecurity.exportReport",
   "kiroSecurity.openLogs",
   "kiroSecurity.installAgentIntegration",
@@ -24,19 +21,20 @@ const required = [
 test("manifest contributes every required command and activation route", () => {
   for (const command of required) {
     assert.equal(commands.has(command), true, `missing ${command}`);
-    assert.equal(manifest.activationEvents.includes(`onCommand:${command}`) || ["kiroSecurity.openFinding", "kiroSecurity.validateFinding"].includes(command), true, `missing activation for ${command}`);
+    assert.equal(manifest.activationEvents.includes(`onCommand:${command}`), true, `missing activation for ${command}`);
   }
   assert.equal(manifest.contributes.views.kiroSecurity[0].type, "webview");
   assert.equal(manifest.contributes.viewsWelcome, undefined);
   const commandIds = manifest.contributes.commands.map((entry: { command: string }) => entry.command);
-  assert.equal(commandIds.length, 8, "the Command Palette surface stays focused");
+  assert.equal(commandIds.length, 5, "the Command Palette surface stays focused");
   for (const removed of [
     "kiroSecurity.configure",
     "kiroSecurity.revealPowerBundle",
-    "kiroSecurity.startFastScan",
     "kiroSecurity.startStandardScan",
     "kiroSecurity.startDeepScan",
     "kiroSecurity.scanGitChanges",
+    "kiroSecurity.resumeLastScan",
+    "kiroSecurity.cancelActiveScan",
   ]) {
     assert.equal(commandIds.includes(removed), false, `${removed} should be removed`);
   }
@@ -55,15 +53,10 @@ test("activation stays quiet: no onboarding notification, Agent setup lives in t
   assert.match(extensionSource, /onDidGrantWorkspaceTrust/);
 });
 
-test("webview command routes reject forged scan modes and traversal scope is left for host validation", () => {
-  assert.equal(validateWebviewMessage({ type: "startScan", mode: "standard", scope: "src" })?.type, "startScan");
-  assert.equal(validateWebviewMessage({ type: "startScan", mode: "arbitrary", scope: "src" }), undefined);
-  const traversal = validateWebviewMessage({ type: "startScan", mode: "standard", scope: "../outside" });
-  assert.equal(traversal?.type, "startScan", "shape validation should pass bounded strings; extension host enforces workspace containment");
+test("webview has no scan-start route and directs scans through Agent setup", () => {
+  assert.equal(validateWebviewMessage({ type: "startScan", mode: "standard", scope: "src" }), undefined);
   const controllerSource = readFileSync(path.join(root, "packages", "extension", "src", "controller.ts"), "utf8");
-  const startScan = controllerSource.slice(controllerSource.indexOf("async startScan("), controllerSource.indexOf("async startScanForUri"));
-  assert.match(startScan, /clipboard\.writeText\(prompt\)/);
-  assert.doesNotMatch(startScan, /must be started from Kiro Agent/);
+  assert.doesNotMatch(controllerSource, /async startScan\(/);
 });
 
 

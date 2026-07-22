@@ -8,8 +8,10 @@ Kiro Security Power 0.2.0 adds an approval-driven Setup flow that connects Kiro'
 2. Open **Kiro Security → Setup**.
 3. Review the detected Python/SQLite runtime, installation scope, exact target files, and tool approval policy.
 4. Select **Install and verify** and approve the modal confirmation.
-5. The installer merges one MCP server entry, writes auto-inclusion steering, prepares a stable local Power folder, verifies every allowlisted runtime file against the VSIX payload, starts the packaged MCP process, negotiates the MCP protocol, lists tools, calls `security_get_capabilities`, and reports `Verified` only after the shared workbench passes its health check.
-6. Open a new Agent conversation or refresh MCP servers if a conversation was already open before setup.
+5. The installer merges one bootstrap MCP server entry, writes safety/activation steering, prepares a stable local Power folder, verifies every allowlisted runtime file against the VSIX payload, starts the packaged MCP process, negotiates the MCP protocol, lists tools, and calls `security_get_capabilities`. This proves only the deterministic MCP runtime.
+6. Copy the prepared folder path. In Kiro select **Powers → Add Custom Power → Import power from a folder**, choose that folder, review permissions, and click Install.
+7. Return to Setup and select **Verify after import**. Setup reports `Verified` only after it detects Kiro's namespaced native-Power MCP registration and probes that exact registration.
+8. Open a new Agent conversation so Kiro can activate the installed `POWER.md` and mode steering.
 
 No separate Node installation is required by this flow. The MCP process uses the same detected Python 3.9+ runtime as the VSIX engine.
 
@@ -34,14 +36,14 @@ The prepared Python process is launched with `-B -S -m kiro_security.mcp_server`
 - `none`: every MCP tool requires Agent approval.
 - `read_only`: only capability, scan/status/progress, and finding lookup tools are pre-approved.
 
-Starting or cancelling scans, validation, triage, remediation, tracking handoff, hardening, threat-model generation, and export are never pre-approved by the VSIX.
+Starting or cancelling scans, triage, remediation, tracking handoff, and export are never pre-approved by the VSIX.
 
 ## Native Powers-panel registration
 
-The Setup flow makes Agent tools functional through MCP plus auto-inclusion steering. It also prepares a Kiro-compatible custom Power folder containing `POWER.md`, `mcp.json`, `steering/`, provenance notice, and the local runtime.
+The Setup flow prepares a Kiro-compatible custom Power folder containing `POWER.md`, `mcp.json`, `steering/`, references, provenance notice, and the local runtime. Its bootstrap MCP probe checks deterministic infrastructure only. The auto-inclusion steering refuses to start a scan when the native Power instructions are absent.
 
-Kiro's own **Powers → Add Custom Power → Import power from a folder** confirmation remains optional and cannot be bypassed by the VSIX. Importing the prepared folder adds the native Powers-panel entry; it is not required for Agent tool use after Setup reports `Verified`.
+Kiro's own **Powers → Add Custom Power → Import power from a folder** confirmation is required and cannot be bypassed by the VSIX. Kiro registers the Power MCP under a namespaced entry. Setup does not equate a direct MCP probe with scan readiness; it remains `Configured` until that native registration is detected and verified.
 
 ## Repair and removal
 
-**Install and verify** changes to **Repair and verify** when an entry already exists. Repair refreshes the stable runtime, exact MCP command, steering, and verification state. **Remove Agent integration** removes only VSIX-managed MCP and steering entries; unrelated servers, scan history, exports, and separately imported native Powers are retained.
+**Install and verify** changes to **Repair and verify** when an entry already exists. Repair refreshes the stable runtime, exact MCP command, steering, and verification state; Kiro Power registration must still be present and reverified. **Remove Agent integration** removes only VSIX-managed bootstrap MCP and steering entries; unrelated servers, scan history, exports, and separately imported native Powers are retained.

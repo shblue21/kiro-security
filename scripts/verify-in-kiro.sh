@@ -87,9 +87,9 @@ PLATFORM="$(uname -s 2>/dev/null || echo unknown)" node - <<'JS'
 const fs = require("node:fs");
 const checks = Object.fromEntries([
   "activityBarIcon", "secondarySideBar", "agentSetupVerified", "agentCapabilities", "nativePowerPrepared",
-  "fastScan", "modelStandardScan", "modelDiffScan", "deepSixWorker", "deepMultiRound", "deepTail",
+  "standardScan", "diffScan", "deepFourWorker", "deepMultiRound",
   "canonicalSeal", "liveProgress", "realFinding", "sourceNavigation", "problemsDiagnostic", "exports",
-  "historyAfterRestart", "resumeInterruptedScan", "mcpToVsix", "vsixToMcp", "disableAndUninstall",
+  "historyAfterRestart", "coordinatorLeaseHandoff", "mcpToVsix", "vsixToMcp", "disableAndUninstall",
 ].map((name) => [name, null]));
 fs.writeFileSync(process.env.RESULT_FILE, JSON.stringify({
   schemaVersion: "1.0",

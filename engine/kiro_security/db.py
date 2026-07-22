@@ -2,19 +2,60 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import shutil
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterator
 
-from .constants import ARTIFACT_KINDS, PHASES, is_model_scan
+from .constants import ARTIFACT_KINDS, PHASES
 from .coverage import COVERAGE_DISPOSITIONS
 from .errors import EngineError
-from .security import random_id, sha256_file, stable_id, utc_now
+from .security import random_id, sha256_bytes, sha256_file, stable_id, utc_now
 from .state_machine import require_phase_transition, require_status_transition
+
+
+def _sql_statements(script: str) -> list[str]:
+    statements: list[str] = []
+    buffer = ""
+    for line in script.splitlines():
+        buffer = f"{buffer}\n{line}".strip()
+        if sqlite3.complete_statement(buffer):
+            statements.append(buffer)
+            buffer = ""
+    if buffer:
+        raise ValueError("Incomplete SQLite migration statement.")
+    return statements
+
+
+def _sqlite_busy(error: sqlite3.OperationalError) -> bool:
+    message = str(error).lower()
+    return "locked" in message or "busy" in message
+
+
+# A lease must safely span one native-worker batch; coordinators renew it at
+# phase boundaries. Expired/crashed holders remain recoverable without tying
+# the durable scan lifecycle to an Engine process.
+COORDINATOR_LEASE_TTL_SECONDS = 3600
+
+
+def _coordinator_lease_expiry() -> str:
+    return (
+        datetime.now(timezone.utc) + timedelta(seconds=COORDINATOR_LEASE_TTL_SECONDS)
+    ).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _coordinator_token() -> str:
+    # 32 random bytes provide the required 256 bits of CSPRNG entropy.
+    return secrets.token_hex(32)
+
+
+def _coordinator_token_hash(token: str) -> str:
+    return sha256_bytes(token.encode("utf-8"))
 
 
 class Workbench:
@@ -42,17 +83,25 @@ class Workbench:
                 raise EngineError("state_path_escape", f"Workbench directory escapes state root: {directory.name}")
         self.apply_migrations()
 
-    def _connect(self) -> sqlite3.Connection:
-        try:
+    def _connect(self, *, foreign_keys: bool = True) -> sqlite3.Connection:
+        for attempt in range(5):
             connection = sqlite3.connect(self.db_path, timeout=15, isolation_level=None)
-            connection.row_factory = sqlite3.Row
-            connection.execute("PRAGMA foreign_keys = ON")
-            connection.execute("PRAGMA journal_mode = WAL")
-            connection.execute("PRAGMA synchronous = NORMAL")
-            connection.execute("PRAGMA busy_timeout = 15000")
-            return connection
-        except sqlite3.DatabaseError as exc:
-            raise EngineError("database_error", f"Unable to open workbench database: {exc}") from exc
+            try:
+                connection.row_factory = sqlite3.Row
+                connection.execute(f"PRAGMA foreign_keys = {'ON' if foreign_keys else 'OFF'}")
+                connection.execute("PRAGMA busy_timeout = 15000")
+                connection.execute("PRAGMA journal_mode = WAL")
+                connection.execute("PRAGMA synchronous = NORMAL")
+                return connection
+            except sqlite3.OperationalError as exc:
+                connection.close()
+                if attempt == 4 or not _sqlite_busy(exc):
+                    raise EngineError("database_error", f"Unable to open workbench database: {exc}") from exc
+                time.sleep(0.05 * (2**attempt))
+            except sqlite3.DatabaseError as exc:
+                connection.close()
+                raise EngineError("database_error", f"Unable to open workbench database: {exc}") from exc
+        raise AssertionError("SQLite retry loop exhausted unexpectedly.")
 
     @contextmanager
     def transaction(self, *, immediate: bool = True) -> Iterator[sqlite3.Connection]:
@@ -71,52 +120,194 @@ class Workbench:
             finally:
                 connection.close()
 
+    @staticmethod
+    def _scan_child_row_counts(connection: sqlite3.Connection) -> dict[str, int]:
+        counts = {"scans": int(connection.execute("SELECT COUNT(*) FROM scans").fetchone()[0])}
+        tables = [
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+        ]
+        for table in tables:
+            if table == "scans":
+                continue
+            if any(row[2] == "scans" for row in connection.execute(f'PRAGMA foreign_key_list("{table}")')):
+                counts[table] = int(connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
+        return counts
+
+    @staticmethod
+    def _create_coordinator_lease_table(connection: sqlite3.Connection) -> None:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scan_coordinator_leases (
+                scan_id TEXT PRIMARY KEY REFERENCES scans(id) ON DELETE CASCADE,
+                token_hash TEXT NOT NULL UNIQUE CHECK(length(token_hash) = 64),
+                generation INTEGER NOT NULL CHECK(generation >= 1),
+                holder_session_id TEXT REFERENCES engine_sessions(id) ON DELETE SET NULL,
+                acquired_at TEXT NOT NULL,
+                renewed_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS coordinator_leases_by_expiry ON scan_coordinator_leases(expires_at)"
+        )
+
+    @classmethod
+    def _apply_scan_coordinator_lease_migration(cls, connection: sqlite3.Connection) -> None:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(scans)")}
+        legacy_columns = {
+            "owner_session_id", "heartbeat_at", "handoff_state", "resumed_at", "resume_count",
+        }
+        table_sql = str(connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='scans'"
+        ).fetchone()[0])
+        needs_rebuild = bool(columns & legacy_columns) or "'queued'" in table_sql or "'interrupted'" in table_sql
+        if needs_rebuild:
+            incompatible = {
+                row["status"]: int(row["count"])
+                for row in connection.execute(
+                    "SELECT status, COUNT(*) AS count FROM scans WHERE status IN ('queued','interrupted') GROUP BY status"
+                ).fetchall()
+            }
+            if incompatible:
+                raise EngineError(
+                    "legacy_scan_incompatible",
+                    "Queued or interrupted legacy scans cannot be reinterpreted under the Codex lifecycle contract.",
+                    {"incompatibleStatusCounts": incompatible},
+                )
+            before = cls._scan_child_row_counts(connection)
+            objects = [
+                (row[0], row[1], row[2])
+                for row in connection.execute(
+                    """
+                    SELECT type, name, sql FROM sqlite_master
+                    WHERE tbl_name='scans' AND type IN ('index','trigger') AND sql IS NOT NULL
+                    ORDER BY type, name
+                    """
+                ).fetchall()
+            ]
+            connection.execute(
+                """
+                CREATE TABLE scans_v012 (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                    mode TEXT NOT NULL CHECK (mode IN ('diff','standard','deep')),
+                    scope TEXT NOT NULL,
+                    diff_target_kind TEXT CHECK (diff_target_kind IN ('working_tree','commit','range')),
+                    diff_base_revision TEXT,
+                    diff_head_revision TEXT,
+                    status TEXT NOT NULL CHECK (status IN ('running','completed','cancelled','failed')),
+                    phase TEXT NOT NULL CHECK (phase IN ('preflight','threat_model','discovery','validation','attack_path','reporting')),
+                    phase_index INTEGER NOT NULL DEFAULT 0 CHECK (phase_index BETWEEN 0 AND 5),
+                    artifact_dir TEXT NOT NULL UNIQUE,
+                    target_identity TEXT,
+                    target_revision TEXT,
+                    snapshot_digest TEXT,
+                    cancellation_requested INTEGER NOT NULL DEFAULT 0 CHECK (cancellation_requested IN (0,1)),
+                    failure_code TEXT,
+                    failure_message TEXT,
+                    started_at TEXT,
+                    completed_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    sealed_manifest_digest TEXT,
+                    target_device INTEGER,
+                    target_inode INTEGER,
+                    files_total INTEGER NOT NULL DEFAULT 0,
+                    files_completed INTEGER NOT NULL DEFAULT 0,
+                    coverage_json TEXT,
+                    capability_json TEXT
+                )
+                """
+            )
+            preserved = (
+                "id,workspace_id,mode,scope,diff_target_kind,diff_base_revision,diff_head_revision,"
+                "status,phase,phase_index,artifact_dir,target_identity,target_revision,snapshot_digest,"
+                "cancellation_requested,failure_code,failure_message,started_at,completed_at,created_at,updated_at,"
+                "sealed_manifest_digest,target_device,target_inode,files_total,files_completed,coverage_json,capability_json"
+            )
+            connection.execute(
+                f"INSERT INTO scans_v012({preserved}) SELECT {preserved} FROM scans"
+            )
+            connection.execute("DROP TABLE scans")
+            connection.execute("ALTER TABLE scans_v012 RENAME TO scans")
+            for _object_type, _name, sql in objects:
+                connection.execute(sql)
+            after = cls._scan_child_row_counts(connection)
+            if before != after:
+                raise EngineError(
+                    "migration_row_count_changed",
+                    "The scan ownership migration changed scan or child-table row counts.",
+                    {"before": before, "after": after},
+                )
+        cls._create_coordinator_lease_table(connection)
+
     def apply_migrations(self) -> None:
         migration_files = sorted(self.migrations_dir.glob("[0-9][0-9][0-9]_*.sql"))
         if not migration_files:
             raise EngineError("migration_missing", f"No migrations found in {self.migrations_dir}")
         existed = self.db_path.exists() and self.db_path.stat().st_size > 0
-        connection = self._connect()
+        # Parent-table rebuilds require this connection-local setting before
+        # BEGIN. Runtime connections always restore and enforce foreign keys.
+        connection = self._connect(foreign_keys=False)
+        applied_any = False
+        migration_name = "schema initialization"
         try:
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)"
-            )
-            current = int(connection.execute("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").fetchone()[0])
-            pending = [path for path in migration_files if int(path.name[:3]) > current]
-            migration_stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+            def begin_and_resolve_pending() -> tuple[int, list[Path]]:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)"
+                )
+                applied = {
+                    int(row["version"])
+                    for row in connection.execute("SELECT version FROM schema_migrations")
+                }
+                current_version = max(applied, default=0)
+                return current_version, [
+                    path for path in migration_files if int(path.name[:3]) not in applied
+                ]
+
+            current, pending = begin_and_resolve_pending()
+            migration_stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ') + f".p{os.getpid()}"
             if pending and existed:
+                connection.execute("ROLLBACK")
                 backup = self.state_dir / f"workbench.pre-migration-v{current}.{migration_stamp}.sqlite"
                 destination = sqlite3.connect(backup)
                 try:
                     connection.backup(destination)
                 finally:
                     destination.close()
+                current, pending = begin_and_resolve_pending()
             for path in pending:
                 version = int(path.name[:3])
-                sql = path.read_text(encoding="utf-8")
-                try:
-                    migration_name = path.stem.replace("'", "''")
-                    applied_at = utc_now().replace("'", "''")
-                    connection.executescript(
-                        "BEGIN IMMEDIATE;\n"
-                        + sql
-                        + f"\nINSERT INTO schema_migrations(version, name, applied_at) VALUES ({version}, '{migration_name}', '{applied_at}');\n"
-                        + "COMMIT;\n"
-                    )
-                except sqlite3.DatabaseError as exc:
-                    try:
-                        connection.execute("ROLLBACK")
-                    except sqlite3.DatabaseError:
-                        pass
-                    raise EngineError(
-                        "migration_failed",
-                        f"Migration {path.name} failed: {exc}",
-                        {"migration": path.name},
-                    ) from exc
+                migration_name = path.name
+                if version == 12:
+                    self._apply_scan_coordinator_lease_migration(connection)
+                else:
+                    sql = path.read_text(encoding="utf-8")
+                    for statement in _sql_statements(sql):
+                        connection.execute(statement)
+                connection.execute(
+                    "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
+                    (version, path.stem, utc_now()),
+                )
+                applied_any = True
+            self._require_workspace_scan_invariants(connection)
+            foreign_key_issues = connection.execute("PRAGMA foreign_key_check").fetchall()
+            if foreign_key_issues:
+                raise EngineError(
+                    "database_foreign_key_error",
+                    "SQLite foreign_key_check failed after migration.",
+                    {"violations": [list(row) for row in foreign_key_issues[:20]]},
+                )
             integrity = connection.execute("PRAGMA quick_check").fetchone()[0]
             if integrity != "ok":
                 raise EngineError("database_corrupt", f"SQLite quick_check failed: {integrity}")
-            if pending and existed:
+            connection.execute("COMMIT")
+            if applied_any and existed:
                 final_version = int(connection.execute("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").fetchone()[0])
                 post_backup = self.state_dir / f"workbench.post-migration-v{final_version}.{migration_stamp}.sqlite"
                 destination = sqlite3.connect(post_backup)
@@ -124,7 +315,31 @@ class Workbench:
                     connection.backup(destination)
                 finally:
                     destination.close()
+        except EngineError:
+            try:
+                connection.execute("ROLLBACK")
+            except sqlite3.DatabaseError:
+                pass
+            raise
+        except (sqlite3.DatabaseError, ValueError) as exc:
+            try:
+                connection.execute("ROLLBACK")
+            except sqlite3.DatabaseError:
+                pass
+            raise EngineError(
+                "migration_failed",
+                f"Migration {migration_name} failed: {exc}",
+                {"migration": migration_name},
+            ) from exc
         finally:
+            try:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                connection.execute("PRAGMA foreign_keys = ON")
+                if int(connection.execute("PRAGMA foreign_keys").fetchone()[0]) != 1:
+                    raise EngineError("database_error", "Unable to restore SQLite foreign-key enforcement.")
+            except sqlite3.DatabaseError:
+                pass
             connection.close()
 
     def database_info(self) -> dict[str, Any]:
@@ -173,10 +388,6 @@ class Workbench:
                 "UPDATE engine_sessions SET heartbeat_at=? WHERE id=? AND closed_at IS NULL",
                 (timestamp, session_id),
             )
-            connection.execute(
-                "UPDATE scans SET heartbeat_at=?, updated_at=? WHERE owner_session_id=? AND status='running'",
-                (timestamp, timestamp, session_id),
-            )
 
     def close_session(self, session_id: str) -> None:
         timestamp = utc_now()
@@ -194,33 +405,21 @@ class Workbench:
         finally:
             connection.close()
 
-    def recover_stale_sessions(self, stale_after_seconds: int = 20) -> list[str]:
-        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=stale_after_seconds)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-        recovered: list[str] = []
+    def release_session_leases(self, session_id: str) -> list[str]:
+        """Release execution authority without changing durable scan state."""
         with self.transaction() as connection:
-            rows = connection.execute(
-                """
-                SELECT s.id
-                FROM scans s
-                LEFT JOIN engine_sessions e ON e.id = s.owner_session_id
-                WHERE s.status='running'
-                  AND (s.heartbeat_at IS NULL OR s.heartbeat_at < ? OR e.closed_at IS NOT NULL OR e.id IS NULL)
-                """,
-                (cutoff,),
-            ).fetchall()
-            timestamp = utc_now()
-            for row in rows:
-                connection.execute(
-                    """
-                    UPDATE scans
-                    SET status='interrupted', handoff_state='available', owner_session_id=NULL,
-                        heartbeat_at=NULL, updated_at=?
-                    WHERE id=? AND status='running'
-                    """,
-                    (timestamp, row["id"]),
-                )
-                recovered.append(row["id"])
-        return recovered
+            scan_ids = [
+                row["scan_id"]
+                for row in connection.execute(
+                    "SELECT scan_id FROM scan_coordinator_leases WHERE holder_session_id=? ORDER BY scan_id",
+                    (session_id,),
+                ).fetchall()
+            ]
+            connection.execute(
+                "DELETE FROM scan_coordinator_leases WHERE holder_session_id=?",
+                (session_id,),
+            )
+        return scan_ids
 
     def _quarantine_publication(self, artifact_dir: Path, stamp: str) -> list[str]:
         """Move an unsanctioned manifest and its projections out of the official paths."""
@@ -322,10 +521,10 @@ class Workbench:
         - non-active scans with an official manifest but no committed seal
           have the manifest and its projections quarantined, and stale
           atomic-write temp files removed;
-        - completed scans whose manifest is missing or does not match the
-          durable sealed digest are surfaced as explicit integrity failures;
-        - a completed scan that somehow lacks a sealed digest is revoked via
-          the unsealed-completion failure path.
+        - completed scans whose manifest is missing, unsealed, or does not
+          match the durable sealed digest are surfaced as explicit integrity
+          failures. A committed terminal lifecycle row is never rewritten by
+          startup recovery.
         """
 
         connection = self._connect()
@@ -346,19 +545,14 @@ class Workbench:
             if row["status"] == "completed":
                 digest = row["sealed_manifest_digest"]
                 if not digest:
-                    try:
-                        self.fail_unsealed_completion(
-                            row["id"],
-                            "finalization_integrity_failure",
-                            "The scan was completed without a committed sealed manifest digest.",
-                        )
-                    except EngineError:
-                        pass
                     quarantined = self._quarantine_publication(artifact_dir, stamp) if manifest_present else []
                     issues.append({
                         "scanId": row["id"],
                         "code": "completed_scan_unsealed",
-                        "message": "A completed scan had no sealed manifest digest; the completion was revoked.",
+                        "message": (
+                            "A completed scan had no sealed manifest digest; its publication was quarantined "
+                            "and the terminal lifecycle row was preserved for audit."
+                        ),
                         "quarantinedPaths": quarantined,
                     })
                 elif not manifest_path.exists() and not manifest_path.is_symlink():
@@ -406,7 +600,7 @@ class Workbench:
                                 **mismatch,
                                 "quarantinedPaths": quarantined,
                             })
-            elif row["status"] in ("interrupted", "failed", "cancelled"):
+            elif row["status"] in ("failed", "cancelled"):
                 if manifest_present:
                     quarantined = self._quarantine_publication(artifact_dir, stamp)
                     issues.append({
@@ -449,6 +643,293 @@ class Workbench:
         finally:
             connection.close()
 
+    @staticmethod
+    def _require_workspace_scan_invariants(
+        connection: sqlite3.Connection, workspace_id: str | None = None
+    ) -> str | None:
+        params: tuple[Any, ...] = () if workspace_id is None else (workspace_id,)
+        where = "" if workspace_id is None else "WHERE w.id=?"
+        rows = connection.execute(
+            f"""
+            SELECT w.id, w.active_scan_id,
+                (SELECT s.id FROM scans s WHERE s.workspace_id=w.id AND s.status='running' LIMIT 1) AS running_id,
+                (SELECT COUNT(*) FROM scans s WHERE s.workspace_id=w.id AND s.status='running') AS running_count
+            FROM workspaces w {where}
+            """,
+            params,
+        ).fetchall()
+        if workspace_id is not None and not rows:
+            raise EngineError("workspace_not_found", f"Workspace not found: {workspace_id}")
+        for row in rows:
+            if int(row["running_count"]) > 1 or row["active_scan_id"] != row["running_id"]:
+                raise EngineError(
+                    "workspace_scan_invariant",
+                    "The workspace active scan pointer does not match its running scan.",
+                    {
+                        "workspaceId": row["id"],
+                        "activeScanId": row["active_scan_id"],
+                        "runningScanId": row["running_id"],
+                        "runningCount": int(row["running_count"]),
+                    },
+                )
+        return rows[0]["running_id"] if workspace_id is not None else None
+
+    @staticmethod
+    def _scan_start_contract(scan: dict[str, Any] | sqlite3.Row) -> dict[str, Any]:
+        raw_capabilities = scan.get("capabilities") if isinstance(scan, dict) else None
+        if raw_capabilities is None:
+            raw = scan.get("capability_json") if isinstance(scan, dict) else scan["capability_json"]
+            try:
+                raw_capabilities = json.loads(raw) if raw else None
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise EngineError(
+                    "legacy_scan_incompatible",
+                    "The running scan has no valid immutable startContract and cannot be reused.",
+                    {"scanId": scan["id"]},
+                ) from exc
+        contract = raw_capabilities.get("startContract") if isinstance(raw_capabilities, dict) else None
+        required = {
+            "mode", "scope", "diffTargetKind", "diffBaseRevision", "diffHeadRevision",
+            "maxFiles", "maxFileBytes", "userContext",
+        }
+        valid = (
+            isinstance(contract, dict)
+            and set(contract) == required
+            and contract.get("mode") in ("standard", "deep", "diff")
+            and isinstance(contract.get("scope"), str)
+            and bool(contract.get("scope"))
+            and (contract.get("diffTargetKind") is None or contract.get("diffTargetKind") in ("working_tree", "commit", "range"))
+            and (contract.get("diffBaseRevision") is None or isinstance(contract.get("diffBaseRevision"), str))
+            and (contract.get("diffHeadRevision") is None or isinstance(contract.get("diffHeadRevision"), str))
+            and isinstance(contract.get("maxFiles"), int)
+            and not isinstance(contract.get("maxFiles"), bool)
+            and contract["maxFiles"] >= 1
+            and isinstance(contract.get("maxFileBytes"), int)
+            and not isinstance(contract.get("maxFileBytes"), bool)
+            and contract["maxFileBytes"] >= 1
+            and (contract.get("userContext") is None or isinstance(contract.get("userContext"), str))
+        )
+        if not valid:
+            raise EngineError(
+                "legacy_scan_incompatible",
+                "The running scan has no valid immutable startContract and cannot be reused.",
+                {"scanId": scan["id"]},
+            )
+        return contract
+
+    @classmethod
+    def _require_matching_start_contract(
+        cls, scan: dict[str, Any] | sqlite3.Row, requested: dict[str, Any]
+    ) -> None:
+        if cls._scan_start_contract(scan) == requested:
+            return
+        raise EngineError(
+            "scan_already_running",
+            "Another scan with a different immutable request is already running in this workspace.",
+            {
+                "scanId": scan["id"],
+                "mode": scan["mode"],
+                "scope": scan["scope"],
+                "diffTargetKind": scan["diff_target_kind"],
+            },
+        )
+
+    def running_scan_for_workspace(self, workspace_id: str) -> dict[str, Any] | None:
+        connection = self._connect()
+        try:
+            running_id = self._require_workspace_scan_invariants(connection, workspace_id)
+            row = connection.execute(
+                "SELECT * FROM scans WHERE id=?", (running_id,)
+            ).fetchone() if running_id is not None else None
+        finally:
+            connection.close()
+        return dict(row) if row is not None else None
+
+    @staticmethod
+    def _lease_public(
+        state: str, *, generation: int | None = None, expires_at: str | None = None,
+        token: str | None = None,
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {"state": state}
+        if generation is not None:
+            result["generation"] = generation
+        if expires_at is not None:
+            result["expiresAt"] = expires_at
+        if token is not None:
+            result["token"] = token
+        return result
+
+    def _scan_with_lease_state(
+        self,
+        scan: dict[str, Any],
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> dict[str, Any]:
+        owns_connection = connection is None
+        connection = connection or self._connect()
+        try:
+            lease = connection.execute(
+                "SELECT generation, expires_at FROM scan_coordinator_leases WHERE scan_id=?",
+                (scan["id"],),
+            ).fetchone()
+        finally:
+            if owns_connection:
+                connection.close()
+        now = utc_now()
+        if lease is None or lease["expires_at"] <= now:
+            public = self._lease_public("available")
+        else:
+            public = self._lease_public(
+                "busy", generation=int(lease["generation"]), expires_at=lease["expires_at"]
+            )
+        return {**scan, "coordinatorLease": public}
+
+    @classmethod
+    def _require_running_scan_invariants(
+        cls,
+        connection: sqlite3.Connection,
+        scan_id: str,
+    ) -> sqlite3.Row:
+        scan = connection.execute("SELECT * FROM scans WHERE id=?", (scan_id,)).fetchone()
+        if scan is None:
+            raise EngineError("scan_not_found", f"Scan not found: {scan_id}")
+        if scan["status"] != "running":
+            raise EngineError("scan_not_running", f"Scan {scan_id} is {scan['status']}.")
+        cls._scan_start_contract(scan)
+        running_id = cls._require_workspace_scan_invariants(connection, scan["workspace_id"])
+        if running_id != scan_id:
+            raise EngineError(
+                "workspace_scan_invariant",
+                "The running scan is not the workspace's active scan.",
+                {
+                    "workspaceId": scan["workspace_id"],
+                    "activeScanId": running_id,
+                    "runningScanId": scan_id,
+                },
+            )
+        return scan
+
+    @classmethod
+    def _require_coordinator_lease(
+        cls,
+        connection: sqlite3.Connection,
+        scan_id: str,
+        token: str,
+        generation: int,
+    ) -> sqlite3.Row:
+        scan = cls._require_running_scan_invariants(connection, scan_id)
+        lease = connection.execute(
+            "SELECT token_hash, generation, expires_at FROM scan_coordinator_leases WHERE scan_id=?",
+            (scan_id,),
+        ).fetchone()
+        supplied_hash = _coordinator_token_hash(token)
+        if (
+            lease is None
+            or not secrets.compare_digest(str(lease["token_hash"]), supplied_hash)
+            or int(lease["generation"]) != generation
+            or lease["expires_at"] <= utc_now()
+        ):
+            raise EngineError(
+                "coordinator_lease_invalid",
+                "A live coordinator lease with the current generation is required for this mutation.",
+                {"scanId": scan_id},
+            )
+        return scan
+
+    def require_coordinator_lease(self, scan_id: str, token: str, generation: int) -> None:
+        with self.transaction() as connection:
+            self._require_coordinator_lease(connection, scan_id, token, generation)
+
+    def acquire_coordinator_lease(self, scan_id: str, session_id: str) -> dict[str, Any]:
+        token = _coordinator_token()
+        token_hash = _coordinator_token_hash(token)
+        timestamp = utc_now()
+        expires_at = _coordinator_lease_expiry()
+        with self.transaction() as connection:
+            self._require_running_scan_invariants(connection, scan_id)
+            current = connection.execute(
+                "SELECT generation, expires_at FROM scan_coordinator_leases WHERE scan_id=?",
+                (scan_id,),
+            ).fetchone()
+            if current is not None and current["expires_at"] > timestamp:
+                raise EngineError(
+                    "coordinator_busy",
+                    "Another coordinator holds the live execution lease for this scan.",
+                    {"scanId": scan_id, "expiresAt": current["expires_at"]},
+                )
+            generation = 1 if current is None else int(current["generation"]) + 1
+            connection.execute(
+                """
+                INSERT INTO scan_coordinator_leases(
+                    scan_id, token_hash, generation, holder_session_id, acquired_at, renewed_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(scan_id) DO UPDATE SET token_hash=excluded.token_hash,
+                    generation=excluded.generation, holder_session_id=excluded.holder_session_id,
+                    acquired_at=excluded.acquired_at, renewed_at=excluded.renewed_at,
+                    expires_at=excluded.expires_at
+                """,
+                (scan_id, token_hash, generation, session_id, timestamp, timestamp, expires_at),
+            )
+        return {
+            **self.get_scan(scan_id),
+            "coordinatorLease": self._lease_public(
+                "acquired", generation=generation, expires_at=expires_at, token=token
+            ),
+        }
+
+    def renew_coordinator_lease(
+        self, scan_id: str, token: str, generation: int, session_id: str
+    ) -> dict[str, Any]:
+        timestamp = utc_now()
+        expires_at = _coordinator_lease_expiry()
+        token_hash = _coordinator_token_hash(token)
+        next_generation = generation + 1
+        with self.transaction() as connection:
+            self._require_coordinator_lease(connection, scan_id, token, generation)
+            updated = connection.execute(
+                """
+                UPDATE scan_coordinator_leases
+                SET generation=?, holder_session_id=?, renewed_at=?, expires_at=?
+                WHERE scan_id=? AND token_hash=? AND generation=? AND expires_at>?
+                """,
+                (
+                    next_generation, session_id, timestamp, expires_at,
+                    scan_id, token_hash, generation, timestamp,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise EngineError(
+                    "coordinator_lease_invalid",
+                    "The coordinator lease changed before it could be renewed.",
+                    {"scanId": scan_id},
+                )
+        return {
+            "scanId": scan_id,
+            "coordinatorLease": self._lease_public(
+                "acquired", generation=next_generation, expires_at=expires_at
+            ),
+        }
+
+    def release_coordinator_lease(self, scan_id: str, token: str, generation: int) -> dict[str, Any]:
+        with self.transaction() as connection:
+            self._require_coordinator_lease(connection, scan_id, token, generation)
+            connection.execute("DELETE FROM scan_coordinator_leases WHERE scan_id=?", (scan_id,))
+        return {"scanId": scan_id, "coordinatorLease": self._lease_public("released")}
+
+    def _cleanup_unpublished_scan_directory(self, artifact_dir: Path, scan_id: str, owned: bool) -> None:
+        if not owned or not artifact_dir.exists():
+            return
+        candidate = artifact_dir.absolute()
+        root = self.artifacts_dir.absolute()
+        if candidate.parent != root or candidate.name != scan_id:
+            raise EngineError("unsafe_cleanup_path", "Unpublished scan cleanup escaped the artifact root.")
+        if candidate.is_symlink():
+            candidate.unlink()
+        elif candidate.is_dir():
+            shutil.rmtree(candidate)
+        else:
+            candidate.unlink()
+
     def create_scan(
         self,
         *,
@@ -457,11 +938,28 @@ class Workbench:
         scope: str,
         artifact_dir: Path | None,
         session_id: str,
+        capabilities: dict[str, Any],
+        setup_scan: Callable[[dict[str, Any]], dict[str, Any]],
         diff_target_kind: str | None = None,
         diff_base_revision: str | None = None,
         diff_head_revision: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], bool]:
+        start_contract = capabilities["startContract"]
+        with self.transaction(immediate=False) as connection:
+            running_id = self._require_workspace_scan_invariants(connection, workspace_id)
+            active = connection.execute(
+                "SELECT * FROM scans WHERE id=?", (running_id,)
+            ).fetchone() if running_id is not None else None
+            if active is not None:
+                self._require_matching_start_contract(active, start_contract)
+                return self._scan_with_lease_state(
+                    self._get_scan(connection, active["id"]), connection=connection
+                ), False
         scan_id = random_id("scan")
+        lease_token = _coordinator_token()
+        lease_token_hash = _coordinator_token_hash(lease_token)
+        lease_expires_at = _coordinator_lease_expiry()
+        owns_artifact_dir = artifact_dir is None
         artifact_dir = artifact_dir or (self.artifacts_dir / scan_id)
         timestamp = utc_now()
         try:
@@ -469,128 +967,127 @@ class Workbench:
             device, inode = int(stat.st_dev), int(stat.st_ino)
         except OSError:
             device = inode = None
-        with self.transaction() as connection:
-            active = connection.execute(
-                "SELECT id FROM scans WHERE workspace_id=? AND status IN ('queued','running')",
-                (workspace_id,),
-            ).fetchone()
-            if active:
-                raise EngineError("scan_already_active", "A scan is already active for this workspace.", {"scanId": active["id"]})
-            connection.execute(
-                """
-                INSERT INTO scans(
-                    id, workspace_id, mode, scope, diff_target_kind, diff_base_revision, diff_head_revision,
-                    status, phase, phase_index, artifact_dir, owner_session_id, heartbeat_at,
-                    started_at, created_at, updated_at, target_device, target_inode
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'running', 'preflight', 0, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    scan_id, workspace_id, mode, scope, diff_target_kind, diff_base_revision, diff_head_revision,
-                    str(artifact_dir), session_id, timestamp, timestamp, timestamp, timestamp, device, inode,
-                ),
-            )
-            connection.execute(
-                """
-                INSERT INTO scan_progress(scan_id, phase_percent, overall_percent, message, updated_at)
-                VALUES (?, 0, 0, 'Starting preflight', ?)
-                """,
-                (scan_id, timestamp),
-            )
-            connection.execute("UPDATE workspaces SET active_scan_id=?, updated_at=? WHERE id=?", (scan_id, timestamp, workspace_id))
-        return self.get_scan(scan_id)
-
-    def resume_scan(
-        self,
-        scan_id: str,
-        session_id: str,
-        recover_tail_artifacts: Callable[[list[dict[str, Any]]], None] | None = None,
-    ) -> dict[str, Any]:
-        with self.transaction() as connection:
-            row = connection.execute("SELECT * FROM scans WHERE id=?", (scan_id,)).fetchone()
-            if row is None:
-                raise EngineError("scan_not_found", f"Scan not found: {scan_id}")
-            if row["status"] not in ("interrupted", "failed"):
-                raise EngineError("scan_not_resumable", f"Scan {scan_id} is {row['status']}, not resumable.")
-            active = connection.execute(
-                "SELECT id FROM scans WHERE workspace_id=? AND status IN ('queued','running') AND id<>?",
-                (row["workspace_id"], scan_id),
-            ).fetchone()
-            if active:
-                raise EngineError("scan_already_active", "Another scan is active for this workspace.", {"scanId": active["id"]})
-            require_status_transition(row["status"], "running")
-            timestamp = utc_now()
-            orphaned_tail = []
-            if is_model_scan({
-                "mode": row["mode"],
-                "capabilities": json.loads(row["capability_json"] or "{}"),
-            }):
-                orphaned_tail = connection.execute(
-                    """
-                    SELECT current.* FROM deep_tail_assignments current
-                    WHERE current.scan_id=? AND current.status='claimed' AND NOT EXISTS (
-                        SELECT 1 FROM deep_tail_assignments newer
-                        WHERE newer.scan_id=current.scan_id AND newer.kind=current.kind
-                          AND newer.subject_id=current.subject_id AND newer.attempt>current.attempt
+        draft = {
+            "id": scan_id,
+            "workspace_id": workspace_id,
+            "mode": mode,
+            "scope": scope,
+            "diff_target_kind": diff_target_kind,
+            "diff_base_revision": diff_base_revision,
+            "diff_head_revision": diff_head_revision,
+            "artifact_dir": str(artifact_dir),
+            "capabilities": capabilities,
+            "started_at": timestamp,
+        }
+        try:
+            prepared = setup_scan(draft)
+        except Exception:
+            self._cleanup_unpublished_scan_directory(artifact_dir, scan_id, owns_artifact_dir)
+            raise
+        existing_scan: dict[str, Any] | None = None
+        try:
+            with self.transaction() as connection:
+                running_id = self._require_workspace_scan_invariants(connection, workspace_id)
+                active = connection.execute("SELECT * FROM scans WHERE id=?", (running_id,)).fetchone() if running_id else None
+                if active is not None:
+                    self._require_matching_start_contract(active, start_contract)
+                    existing_scan = self._scan_with_lease_state(
+                        self._get_scan(connection, active["id"]), connection=connection
                     )
-                    ORDER BY current.kind, current.subject_id
-                    """,
-                    (scan_id,),
-                ).fetchall()
-                if orphaned_tail and recover_tail_artifacts is not None:
-                    recover_tail_artifacts([dict(item) for item in orphaned_tail])
-                for assignment in orphaned_tail:
+                else:
                     connection.execute(
-                        "UPDATE deep_tail_assignments SET status='failed', failure_message=?, updated_at=? WHERE id=? AND status='claimed'",
-                        ("Claim ownership was lost when the interrupted scan resumed.", timestamp, assignment["id"]),
+                        """
+                        INSERT INTO scans(
+                            id, workspace_id, mode, scope, diff_target_kind, diff_base_revision, diff_head_revision,
+                            status, phase, phase_index, artifact_dir,
+                            started_at, created_at, updated_at, target_device, target_inode,
+                            target_identity, target_revision, snapshot_digest, capability_json,
+                            files_total, files_completed
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'running', 'preflight', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                        """,
+                        (
+                            scan_id, workspace_id, mode, scope, diff_target_kind,
+                            prepared.get("diffBaseRevision"), prepared.get("diffHeadRevision"),
+                            str(artifact_dir), timestamp, timestamp, timestamp, device, inode,
+                            prepared["targetIdentity"], prepared.get("targetRevision"), prepared["snapshotDigest"],
+                            json.dumps(capabilities, separators=(",", ":"), allow_nan=False),
+                            int(prepared["filesTotal"]),
+                        ),
                     )
                     connection.execute(
                         """
-                        INSERT INTO deep_tail_assignments(
-                            id, scan_id, kind, subject_id, status, attempt, previous_assignment_id,
-                            previous_receipt_digest, payload_json, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)
+                        INSERT INTO scan_coordinator_leases(
+                            scan_id, token_hash, generation, holder_session_id, acquired_at, renewed_at, expires_at
+                        ) VALUES (?, ?, 1, ?, ?, ?, ?)
                         """,
                         (
-                            random_id("tail"), scan_id, assignment["kind"], assignment["subject_id"],
-                            int(assignment["attempt"]) + 1, assignment["id"], assignment["receipt_digest"],
-                            assignment["payload_json"], timestamp, timestamp,
+                            scan_id, lease_token_hash, session_id,
+                            timestamp, timestamp, lease_expires_at,
                         ),
                     )
-            connection.execute(
-                """
-                UPDATE scans SET status='running', owner_session_id=?, heartbeat_at=?, cancellation_requested=0,
-                    handoff_state='claimed', failure_code=NULL, failure_message=NULL, resumed_at=?, resume_count=resume_count+1,
-                    completed_at=NULL, updated_at=? WHERE id=?
-                """,
-                (session_id, timestamp, timestamp, timestamp, scan_id),
-            )
-            connection.execute("UPDATE workspaces SET active_scan_id=?, updated_at=? WHERE id=?", (scan_id, timestamp, row["workspace_id"]))
-        return self.get_scan(scan_id)
+                    connection.execute(
+                        """
+                        INSERT INTO scan_progress(scan_id, phase_percent, overall_percent, message, updated_at)
+                        VALUES (?, 100, ?, ?, ?)
+                        """,
+                        (scan_id, 100.0 / len(PHASES), prepared["progressMessage"], timestamp),
+                    )
+                    for record in prepared["artifacts"]:
+                        connection.execute(
+                            """
+                            INSERT INTO scan_artifacts(scan_id, kind, path, sha256, media_type, created_at)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                scan_id, record["kind"], record["path"], record["sha256"],
+                                record["mediaType"], timestamp,
+                            ),
+                        )
+                    connection.execute(
+                        "UPDATE workspaces SET active_scan_id=?, updated_at=? WHERE id=?",
+                        (scan_id, timestamp, workspace_id),
+                    )
+        except Exception:
+            self._cleanup_unpublished_scan_directory(artifact_dir, scan_id, owns_artifact_dir)
+            raise
+        if existing_scan is not None:
+            self._cleanup_unpublished_scan_directory(artifact_dir, scan_id, owns_artifact_dir)
+            return existing_scan, False
+        return {
+            **self.get_scan(scan_id),
+            "coordinatorLease": self._lease_public(
+                "acquired", generation=1, expires_at=lease_expires_at, token=lease_token
+            ),
+        }, True
+
+    @staticmethod
+    def _get_scan(connection: sqlite3.Connection, scan_id: str) -> dict[str, Any]:
+        row = connection.execute("SELECT * FROM scans WHERE id=?", (scan_id,)).fetchone()
+        if row is None:
+            raise EngineError("scan_not_found", f"Scan not found: {scan_id}")
+        progress = connection.execute("SELECT * FROM scan_progress WHERE scan_id=?", (scan_id,)).fetchone()
+        artifacts = connection.execute(
+            "SELECT kind, path, sha256, media_type, created_at FROM scan_artifacts WHERE scan_id=? ORDER BY kind",
+            (scan_id,),
+        ).fetchall()
+        result = dict(row)
+        result["progress"] = dict(progress) if progress else None
+        result["artifacts"] = [dict(item) for item in artifacts]
+        result["cancellation_requested"] = bool(result["cancellation_requested"])
+        if result.get("coverage_json"):
+            result["coverage"] = json.loads(result["coverage_json"])
+        else:
+            result["coverage"] = None
+        if result.get("capability_json"):
+            result["capabilities"] = json.loads(result["capability_json"])
+        else:
+            result["capabilities"] = None
+        return result
 
     def get_scan(self, scan_id: str) -> dict[str, Any]:
         connection = self._connect()
         try:
-            row = connection.execute("SELECT * FROM scans WHERE id=?", (scan_id,)).fetchone()
-            if row is None:
-                raise EngineError("scan_not_found", f"Scan not found: {scan_id}")
-            progress = connection.execute("SELECT * FROM scan_progress WHERE scan_id=?", (scan_id,)).fetchone()
-            artifacts = connection.execute(
-                "SELECT kind, path, sha256, media_type, created_at FROM scan_artifacts WHERE scan_id=? ORDER BY kind",
-                (scan_id,),
-            ).fetchall()
-            result = dict(row)
-            result["progress"] = dict(progress) if progress else None
-            result["artifacts"] = [dict(item) for item in artifacts]
-            result["cancellation_requested"] = bool(result["cancellation_requested"])
-            if result.get("coverage_json"):
-                result["coverage"] = json.loads(result["coverage_json"])
-            else:
-                result["coverage"] = None
-            if result.get("capability_json"):
-                result["capabilities"] = json.loads(result["capability_json"])
-            else:
-                result["capabilities"] = None
-            return result
+            return self._get_scan(connection, scan_id)
         finally:
             connection.close()
 
@@ -605,28 +1102,13 @@ class Workbench:
             connection.close()
         return [self.get_scan(row["id"]) for row in rows]
 
-    def latest_resumable_scan(self) -> dict[str, Any] | None:
-        connection = self._connect()
-        try:
-            row = connection.execute(
-                """
-                SELECT id FROM scans
-                WHERE workspace_id=(SELECT id FROM workspaces WHERE root_path=?) AND status IN ('interrupted','failed')
-                ORDER BY updated_at DESC LIMIT 1
-                """,
-                (str(self.workspace),),
-            ).fetchone()
-        finally:
-            connection.close()
-        return self.get_scan(row["id"]) if row else None
-
     def active_scan(self) -> dict[str, Any] | None:
         connection = self._connect()
         try:
             row = connection.execute(
                 """
                 SELECT id FROM scans
-                WHERE workspace_id=(SELECT id FROM workspaces WHERE root_path=?) AND status IN ('queued','running')
+                WHERE workspace_id=(SELECT id FROM workspaces WHERE root_path=?) AND status='running'
                 ORDER BY created_at DESC LIMIT 1
                 """,
                 (str(self.workspace),),
@@ -634,32 +1116,6 @@ class Workbench:
         finally:
             connection.close()
         return self.get_scan(row["id"]) if row else None
-
-    def set_scan_target(
-        self, scan_id: str, *, revision: str | None, snapshot_digest: str | None,
-        diff_base_revision: str | None = None, diff_head_revision: str | None = None,
-    ) -> None:
-        with self.transaction() as connection:
-            connection.execute(
-                """UPDATE scans SET target_revision=?, snapshot_digest=?,
-                    diff_base_revision=COALESCE(?, diff_base_revision),
-                    diff_head_revision=COALESCE(?, diff_head_revision), updated_at=? WHERE id=?""",
-                (revision, snapshot_digest, diff_base_revision, diff_head_revision, utc_now(), scan_id),
-            )
-
-    def set_capabilities(self, scan_id: str, capabilities: dict[str, Any]) -> None:
-        with self.transaction() as connection:
-            connection.execute(
-                "UPDATE scans SET capability_json=?, updated_at=? WHERE id=?",
-                (json.dumps(capabilities, separators=(",", ":"), allow_nan=False), utc_now(), scan_id),
-            )
-
-    def set_coverage(self, scan_id: str, coverage: dict[str, Any]) -> None:
-        with self.transaction() as connection:
-            connection.execute(
-                "UPDATE scans SET coverage_json=?, updated_at=? WHERE id=?",
-                (json.dumps(coverage, separators=(",", ":"), allow_nan=False), utc_now(), scan_id),
-            )
 
     @staticmethod
     def _coverage_row_values(scan_id: str, row: dict[str, Any], timestamp: str) -> tuple[Any, ...]:
@@ -676,7 +1132,7 @@ class Workbench:
             disposition, reason.strip(),
             json.dumps(row.get("evidenceRefs") or [], separators=(",", ":"), allow_nan=False),
             json.dumps(row.get("candidateIds") or [], separators=(",", ":"), allow_nan=False),
-            row.get("workerId"), row["receiptDigest"], timestamp, timestamp,
+            row["receiptDigest"], timestamp, timestamp,
         )
 
     @staticmethod
@@ -685,13 +1141,13 @@ class Workbench:
             """
             INSERT INTO coverage_ledger(
                 id, scan_id, row_id, path, surface, entrypoint, root_control, sink, disposition, reason,
-                evidence_refs_json, candidate_ids_json, worker_id, receipt_digest, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                evidence_refs_json, candidate_ids_json, receipt_digest, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(scan_id, row_id) DO UPDATE SET
                 id=excluded.id, path=excluded.path, surface=excluded.surface, entrypoint=excluded.entrypoint,
                 root_control=excluded.root_control, sink=excluded.sink, disposition=excluded.disposition,
                 reason=excluded.reason, evidence_refs_json=excluded.evidence_refs_json,
-                candidate_ids_json=excluded.candidate_ids_json, worker_id=excluded.worker_id,
+                candidate_ids_json=excluded.candidate_ids_json,
                 receipt_digest=excluded.receipt_digest, updated_at=excluded.updated_at
             """,
             values,
@@ -764,7 +1220,6 @@ class Workbench:
                     "reason": row["reason"],
                     "evidenceRefs": json.loads(row["evidence_refs_json"]),
                     "candidateIds": json.loads(row["candidate_ids_json"]),
-                    "workerId": row["worker_id"],
                     "receiptDigest": row["receipt_digest"],
                     "createdAt": row["created_at"],
                     "updatedAt": row["updated_at"],
@@ -774,266 +1229,118 @@ class Workbench:
         finally:
             connection.close()
 
-    def replace_deep_worker_coverage_receipts(
-        self,
-        *,
-        scan_id: str,
-        worker_id: str,
-        round_number: int,
-        rows: list[dict[str, Any]],
-        connection: sqlite3.Connection | None = None,
-    ) -> None:
-        def apply(target: sqlite3.Connection) -> None:
-            now = utc_now()
-            target.execute("DELETE FROM deep_worker_coverage_receipts WHERE worker_id=?", (worker_id,))
-            for row in rows:
-                target.execute(
-                    """
-                    INSERT INTO deep_worker_coverage_receipts(
-                        id, scan_id, worker_id, round_number, row_id, path, surface, entrypoint, root_control, sink,
-                        disposition, reason, evidence_refs_json, candidate_ids_json, receipt_digest, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        stable_id("deep-coverage-receipt", worker_id, row["rowId"], row["receiptDigest"]),
-                        scan_id, worker_id, round_number, row["rowId"], row["path"], row["surface"],
-                        row.get("entrypoint"), row.get("rootControl"), row.get("sink"), row["disposition"],
-                        row["reason"], json.dumps(row.get("evidenceRefs") or [], separators=(",", ":"), allow_nan=False),
-                        json.dumps(row.get("candidateIds") or [], separators=(",", ":"), allow_nan=False),
-                        row["receiptDigest"], now, now,
-                    ),
-                )
-        if connection is not None:
-            apply(connection)
-            return
-        with self.transaction() as tx:
-            apply(tx)
-
-    def list_deep_worker_coverage_receipts(self, scan_id: str, round_number: int) -> list[dict[str, Any]]:
-        connection = self._connect()
-        try:
-            rows = connection.execute(
-                """
-                SELECT r.*, w.worker_index
-                FROM deep_worker_coverage_receipts r
-                JOIN deep_workers w ON w.id=r.worker_id
-                WHERE r.scan_id=? AND r.round_number=?
-                ORDER BY r.row_id, w.worker_index
-                """,
-                (scan_id, round_number),
-            ).fetchall()
-            return [
-                {
-                    "id": row["id"], "scanId": row["scan_id"], "workerId": row["worker_id"],
-                    "workerIndex": int(row["worker_index"]), "round": int(row["round_number"]),
-                    "rowId": row["row_id"], "path": row["path"], "surface": row["surface"],
-                    "entrypoint": row["entrypoint"], "rootControl": row["root_control"], "sink": row["sink"],
-                    "disposition": row["disposition"], "reason": row["reason"],
-                    "evidenceRefs": json.loads(row["evidence_refs_json"]),
-                    "candidateIds": json.loads(row["candidate_ids_json"]),
-                    "receiptDigest": row["receipt_digest"],
-                }
-                for row in rows
-            ]
-        finally:
-            connection.close()
-
-    def get_deep_scan_state(self, scan_id: str) -> dict[str, Any] | None:
-        connection = self._connect()
-        try:
-            row = connection.execute("SELECT * FROM deep_scan_state WHERE scan_id=?", (scan_id,)).fetchone()
-            if row is None:
-                return None
-            result = dict(row)
-            result["worklist"] = json.loads(result.pop("worklist_json"))
-            result["canonicalCandidates"] = json.loads(result.pop("canonical_candidates_json"))
-            return result
-        finally:
-            connection.close()
-
-    def set_phase(self, scan_id: str, phase: str, *, resuming: bool = False) -> dict[str, Any]:
-        if phase not in PHASES:
-            raise EngineError("invalid_phase", f"Unknown phase: {phase}")
-        with self.transaction() as connection:
-            row = connection.execute("SELECT status, phase FROM scans WHERE id=?", (scan_id,)).fetchone()
-            if row is None:
-                raise EngineError("scan_not_found", f"Scan not found: {scan_id}")
-            if row["status"] != "running":
-                raise EngineError("scan_not_running", f"Scan {scan_id} is {row['status']}.")
-            require_phase_transition(row["phase"], phase, resuming=resuming)
-            timestamp = utc_now()
-            index = PHASES.index(phase)
-            connection.execute(
-                "UPDATE scans SET phase=?, phase_index=?, updated_at=? WHERE id=?",
-                (phase, index, timestamp, scan_id),
-            )
-            connection.execute(
-                "UPDATE scan_progress SET phase_percent=0, overall_percent=?, message=?, updated_at=? WHERE scan_id=?",
-                ((index / len(PHASES)) * 100, f"Starting {phase.replace('_', ' ')}", timestamp, scan_id),
-            )
-        return self.get_scan(scan_id)
-
-    def update_progress(
+    def update_scan_progress(
         self,
         scan_id: str,
         *,
+        token: str,
+        generation: int,
+        phase: str | None = None,
         phase_percent: float | None = None,
         review_items_total: int | None = None,
         review_items_completed: int | None = None,
         reportable_findings_count: int | None = None,
-        deep_review_pass: int | None = None,
         message: str | None = None,
     ) -> dict[str, Any]:
-        scan = self.get_scan(scan_id)
-        current = scan["progress"] or {}
-        phase_percent_value = float(current.get("phase_percent", 0) if phase_percent is None else phase_percent)
-        phase_percent_value = max(0.0, min(100.0, phase_percent_value))
-        phase_index = int(scan["phase_index"])
-        overall = ((phase_index + phase_percent_value / 100.0) / len(PHASES)) * 100.0
-        values = {
-            "review_items_total": int(current.get("review_items_total", 0) if review_items_total is None else review_items_total),
-            "review_items_completed": int(current.get("review_items_completed", 0) if review_items_completed is None else review_items_completed),
-            "reportable_findings_count": int(current.get("reportable_findings_count", 0) if reportable_findings_count is None else reportable_findings_count),
-            "deep_review_pass": current.get("deep_review_pass") if deep_review_pass is None else deep_review_pass,
-            "message": current.get("message") if message is None else message,
-        }
-        if values["review_items_completed"] > values["review_items_total"]:
-            values["review_items_total"] = values["review_items_completed"]
         with self.transaction() as connection:
+            scan = self._require_coordinator_lease(connection, scan_id, token, generation)
+            current = connection.execute(
+                "SELECT * FROM scan_progress WHERE scan_id=?", (scan_id,)
+            ).fetchone()
+            if current is None:
+                raise EngineError("scan_progress_missing", f"Scan progress not found: {scan_id}")
+            target_phase = scan["phase"] if phase is None else phase
+            if target_phase not in PHASES:
+                raise EngineError("invalid_phase", f"Unknown phase: {target_phase}")
+            if target_phase != scan["phase"]:
+                require_phase_transition(scan["phase"], target_phase)
+            phase_index = PHASES.index(target_phase)
+            phase_percent_value = float(
+                current["phase_percent"] if phase_percent is None else phase_percent
+            )
+            phase_percent_value = max(0.0, min(100.0, phase_percent_value))
+            overall = ((phase_index + phase_percent_value / 100.0) / len(PHASES)) * 100.0
+            values = {
+                "review_items_total": int(
+                    current["review_items_total"] if review_items_total is None else review_items_total
+                ),
+                "review_items_completed": int(
+                    current["review_items_completed"] if review_items_completed is None else review_items_completed
+                ),
+                "reportable_findings_count": int(
+                    current["reportable_findings_count"]
+                    if reportable_findings_count is None else reportable_findings_count
+                ),
+                "message": current["message"] if message is None else message,
+            }
+            if values["review_items_completed"] > values["review_items_total"]:
+                values["review_items_total"] = values["review_items_completed"]
+            timestamp = utc_now()
+            if target_phase != scan["phase"]:
+                connection.execute(
+                    "UPDATE scans SET phase=?, phase_index=?, updated_at=? WHERE id=?",
+                    (target_phase, phase_index, timestamp, scan_id),
+                )
             connection.execute(
                 """
                 UPDATE scan_progress SET phase_percent=?, overall_percent=?, review_items_total=?, review_items_completed=?,
-                    reportable_findings_count=?, deep_review_pass=?, message=?, updated_at=? WHERE scan_id=?
+                    reportable_findings_count=?, message=?, updated_at=? WHERE scan_id=?
                 """,
                 (
                     phase_percent_value, min(99.9, overall), values["review_items_total"], values["review_items_completed"],
-                    values["reportable_findings_count"], values["deep_review_pass"], values["message"], utc_now(), scan_id,
+                    values["reportable_findings_count"], values["message"], timestamp, scan_id,
                 ),
             )
         return self.get_scan(scan_id)["progress"]
 
-    def set_file_counts(self, scan_id: str, total: int, completed: int) -> None:
-        total_value = max(0, int(total))
-        completed_value = max(0, min(int(completed), total_value))
-        with self.transaction() as connection:
-            connection.execute(
-                "UPDATE scans SET files_total=?, files_completed=?, updated_at=? WHERE id=?",
-                (total_value, completed_value, utc_now(), scan_id),
-            )
-
-    def request_cancel(self, scan_id: str) -> dict[str, Any]:
-        with self.transaction() as connection:
-            row = connection.execute("SELECT status FROM scans WHERE id=?", (scan_id,)).fetchone()
-            if row is None:
-                raise EngineError("scan_not_found", f"Scan not found: {scan_id}")
-            if row["status"] in ("completed", "cancelled", "failed"):
-                return self.get_scan(scan_id)
-            connection.execute(
-                "UPDATE scans SET cancellation_requested=1, updated_at=? WHERE id=?",
-                (utc_now(), scan_id),
-            )
-        return self.get_scan(scan_id)
-
-    def cancellation_requested(self, scan_id: str) -> bool:
-        connection = self._connect()
-        try:
-            row = connection.execute("SELECT cancellation_requested, status FROM scans WHERE id=?", (scan_id,)).fetchone()
-            if row is None:
-                raise EngineError("scan_not_found", f"Scan not found: {scan_id}")
-            return bool(row["cancellation_requested"]) or row["status"] == "cancelled"
-        finally:
-            connection.close()
-
-    def _finish_scan(self, scan_id: str, status: str, *, failure_code: str | None = None, failure_message: str | None = None) -> dict[str, Any]:
+    def _finish_scan(
+        self,
+        scan_id: str,
+        status: str,
+        *,
+        token: str,
+        generation: int,
+        failure_code: str | None = None,
+        failure_message: str | None = None,
+    ) -> dict[str, Any]:
         with self.transaction() as connection:
             row = connection.execute("SELECT status, workspace_id FROM scans WHERE id=?", (scan_id,)).fetchone()
             if row is None:
                 raise EngineError("scan_not_found", f"Scan not found: {scan_id}")
             if row["status"] == status:
                 return self.get_scan(scan_id)
+            self._require_coordinator_lease(connection, scan_id, token, generation)
             require_status_transition(row["status"], status)
             timestamp = utc_now()
-            completed_at = timestamp if status in ("completed", "cancelled", "failed") else None
             connection.execute(
                 """
-                UPDATE scans SET status=?, failure_code=?, failure_message=?, completed_at=?, owner_session_id=NULL,
-                    heartbeat_at=NULL, handoff_state=?, updated_at=? WHERE id=?
+                UPDATE scans SET status=?, cancellation_requested=?, failure_code=?, failure_message=?,
+                    completed_at=?, updated_at=? WHERE id=?
                 """,
-                (status, failure_code, failure_message, completed_at, "available" if status == "interrupted" else "none", timestamp, scan_id),
+                (
+                    status, 1 if status == "cancelled" else 0, failure_code,
+                    failure_message, timestamp, timestamp, scan_id,
+                ),
             )
-            if status == "completed":
-                connection.execute(
-                    "UPDATE scan_progress SET phase_percent=100, overall_percent=100, message='Completed', updated_at=? WHERE scan_id=?",
-                    (timestamp, scan_id),
-                )
             connection.execute(
                 "UPDATE workspaces SET active_scan_id=NULL, updated_at=? WHERE id=? AND active_scan_id=?",
                 (timestamp, row["workspace_id"], scan_id),
             )
+            connection.execute("DELETE FROM scan_coordinator_leases WHERE scan_id=?", (scan_id,))
         return self.get_scan(scan_id)
 
-    def complete_scan(self, scan_id: str) -> dict[str, Any]:
-        return self._finish_scan(scan_id, "completed")
+    def cancel_scan(self, scan_id: str, token: str, generation: int) -> dict[str, Any]:
+        return self._finish_scan(
+            scan_id, "cancelled", token=token, generation=generation
+        )
 
-    def fail_unsealed_completion(self, scan_id: str, code: str, message: str) -> dict[str, Any]:
-        """Revoke a just-completed scan when final sealing fails.
-
-        This narrow transition is allowed only before a manifest digest has been
-        committed. It prevents a scan from remaining completed without a valid
-        canonical bundle.
-        """
-
-        timestamp = utc_now()
-        with self.transaction() as connection:
-            row = connection.execute(
-                "SELECT status, sealed_manifest_digest, workspace_id FROM scans WHERE id=?",
-                (scan_id,),
-            ).fetchone()
-            if row is None:
-                raise EngineError("scan_not_found", f"Scan not found: {scan_id}")
-            if row["status"] != "completed" or row["sealed_manifest_digest"]:
-                raise EngineError(
-                    "completion_already_sealed",
-                    "Only an unsealed completed scan may be revoked after finalization failure.",
-                )
-            connection.execute(
-                """
-                UPDATE scans SET status='failed', failure_code=?, failure_message=?, completed_at=?,
-                    updated_at=? WHERE id=?
-                """,
-                (code, message[:4000], timestamp, timestamp, scan_id),
-            )
-            connection.execute(
-                """
-                UPDATE scan_progress SET message='Finalization failed', updated_at=? WHERE scan_id=?
-                """,
-                (timestamp, scan_id),
-            )
-        return self.get_scan(scan_id)
-
-    def cancel_scan(self, scan_id: str) -> dict[str, Any]:
-        return self._finish_scan(scan_id, "cancelled")
-
-    def fail_scan(self, scan_id: str, code: str, message: str) -> dict[str, Any]:
-        return self._finish_scan(scan_id, "failed", failure_code=code, failure_message=message[:4000])
-
-    def interrupt_scan(self, scan_id: str) -> dict[str, Any]:
-        return self._finish_scan(scan_id, "interrupted")
-
-    def interrupt_owned_scans(self, session_id: str) -> list[str]:
-        connection = self._connect()
-        try:
-            ids = [row["id"] for row in connection.execute(
-                "SELECT id FROM scans WHERE owner_session_id=? AND status='running'", (session_id,)
-            ).fetchall()]
-        finally:
-            connection.close()
-        for scan_id in ids:
-            try:
-                self.interrupt_scan(scan_id)
-            except EngineError:
-                pass
-        return ids
+    def fail_scan(
+        self, scan_id: str, code: str, message: str, token: str, generation: int
+    ) -> dict[str, Any]:
+        return self._finish_scan(
+            scan_id, "failed", token=token, generation=generation,
+            failure_code=code, failure_message=message[:4000],
+        )
 
     def add_event(self, event_name: str, payload: dict[str, Any], scan_id: str | None = None) -> int:
         with self.transaction() as connection:
@@ -1087,20 +1394,19 @@ class Workbench:
     def artifact_records(self, scan_id: str) -> list[dict[str, Any]]:
         return self.get_scan(scan_id)["artifacts"]
 
-    def save_manifest_digest(self, scan_id: str, digest: str) -> None:
-        with self.transaction() as connection:
-            connection.execute("UPDATE scans SET sealed_manifest_digest=?, updated_at=? WHERE id=?", (digest, utc_now(), scan_id))
-
     def complete_and_seal_scan_bundle(
         self,
         scan_id: str,
         *,
-        completed_at: str,
         coverage: dict[str, Any],
         manifest_digest: str,
         artifact_records: list[dict[str, Any]],
+        finding_count: int,
         publish_files: Callable[[], None] | None = None,
+        index_findings: Callable[[sqlite3.Connection, str], None] | None = None,
         hardening_record: dict[str, Any] | None = None,
+        coordinator_token: str,
+        coordinator_generation: int,
     ) -> dict[str, Any]:
         """Atomically publish completion together with the validated sealed bundle.
 
@@ -1114,20 +1420,14 @@ class Workbench:
         """
 
         with self.transaction() as connection:
-            scan = connection.execute(
-                "SELECT status, phase, workspace_id, sealed_manifest_digest FROM scans WHERE id=?",
-                (scan_id,),
-            ).fetchone()
-            if scan is None:
-                raise EngineError("scan_not_found", f"Scan not found: {scan_id}")
-            if scan["status"] != "running" or scan["phase"] != "reporting":
-                raise EngineError(
-                    "finalizer_wrong_state",
-                    "Only a running scan in the reporting phase can be atomically completed and sealed.",
-                )
+            timestamp = utc_now()
+            scan = self._require_coordinator_lease(
+                connection, scan_id, coordinator_token, coordinator_generation
+            )
             if scan["sealed_manifest_digest"]:
                 raise EngineError("scan_already_sealed", "The scan already has a sealed manifest digest.")
             require_status_transition(scan["status"], "completed")
+            connection.execute("DELETE FROM scan_artifacts WHERE scan_id=?", (scan_id,))
             for record in artifact_records:
                 connection.execute(
                     """
@@ -1138,32 +1438,9 @@ class Workbench:
                     """,
                     (
                         scan_id, record["kind"], record["path"], record["sha256"],
-                        record["mediaType"], record.get("createdAt") or completed_at,
+                        record["mediaType"], timestamp,
                     ),
                 )
-            connection.execute(
-                """
-                UPDATE scans SET status='completed', failure_code=NULL, failure_message=NULL,
-                    completed_at=?, owner_session_id=NULL, heartbeat_at=NULL, handoff_state='none',
-                    coverage_json=?, sealed_manifest_digest=?, updated_at=?
-                WHERE id=? AND status='running' AND phase='reporting'
-                """,
-                (
-                    completed_at,
-                    json.dumps(coverage, separators=(",", ":"), allow_nan=False),
-                    manifest_digest,
-                    completed_at,
-                    scan_id,
-                ),
-            )
-            connection.execute(
-                "UPDATE scan_progress SET phase_percent=100, overall_percent=100, message='Completed', updated_at=? WHERE scan_id=?",
-                (completed_at, scan_id),
-            )
-            connection.execute(
-                "UPDATE workspaces SET active_scan_id=NULL, updated_at=? WHERE id=? AND active_scan_id=?",
-                (completed_at, scan["workspace_id"], scan_id),
-            )
             if hardening_record is not None:
                 connection.execute(
                     """
@@ -1175,190 +1452,42 @@ class Workbench:
                     (
                         stable_id("hard", scan_id), scan_id, hardening_record["title"],
                         hardening_record["summary"], hardening_record["artifactPath"],
-                        completed_at, completed_at,
+                        timestamp, timestamp,
                     ),
                 )
+            if index_findings is not None:
+                index_findings(connection, timestamp)
+            connection.execute(
+                """UPDATE scan_progress SET phase_percent=100, overall_percent=100,
+                    reportable_findings_count=?, message='Completed', updated_at=? WHERE scan_id=?""",
+                (finding_count, timestamp, scan_id),
+            )
+            updated = connection.execute(
+                """
+                UPDATE scans SET status='completed', phase='reporting', phase_index=?,
+                    failure_code=NULL, failure_message=NULL, completed_at=?,
+                    coverage_json=?, sealed_manifest_digest=?, updated_at=?
+                WHERE id=? AND status='running'
+                """,
+                (
+                    PHASES.index("reporting"),
+                    timestamp,
+                    json.dumps(coverage, separators=(",", ":"), allow_nan=False),
+                    manifest_digest,
+                    timestamp,
+                    scan_id,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise EngineError("finalizer_wrong_state", "Only a running scan can be atomically completed and sealed.")
+            connection.execute(
+                "UPDATE workspaces SET active_scan_id=NULL, updated_at=? WHERE id=? AND active_scan_id=?",
+                (timestamp, scan["workspace_id"], scan_id),
+            )
+            connection.execute("DELETE FROM scan_coordinator_leases WHERE scan_id=?", (scan_id,))
             if publish_files is not None:
                 publish_files()
         return self.get_scan(scan_id)
-
-    def seal_scan_bundle(
-        self,
-        scan_id: str,
-        *,
-        coverage: dict[str, Any],
-        manifest_digest: str,
-        artifact_records: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        """Atomically register the validated bundle and its manifest digest."""
-
-        timestamp = utc_now()
-        with self.transaction() as connection:
-            scan = connection.execute(
-                "SELECT status, completed_at, sealed_manifest_digest FROM scans WHERE id=?",
-                (scan_id,),
-            ).fetchone()
-            if scan is None:
-                raise EngineError("scan_not_found", f"Scan not found: {scan_id}")
-            if scan["status"] != "completed" or not scan["completed_at"]:
-                raise EngineError("scan_not_completed", "The canonical bundle can be sealed only after scan completion.")
-            existing_digest = scan["sealed_manifest_digest"]
-            if existing_digest and existing_digest != manifest_digest:
-                raise EngineError("scan_already_sealed", "The scan already has a different sealed manifest digest.")
-            for record in artifact_records:
-                connection.execute(
-                    """
-                    INSERT INTO scan_artifacts(scan_id, kind, path, sha256, media_type, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(scan_id, kind) DO UPDATE SET path=excluded.path, sha256=excluded.sha256,
-                        media_type=excluded.media_type, created_at=excluded.created_at
-                    """,
-                    (
-                        scan_id, record["kind"], record["path"], record["sha256"],
-                        record["mediaType"], record.get("createdAt") or timestamp,
-                    ),
-                )
-            connection.execute(
-                """
-                UPDATE scans SET coverage_json=?, sealed_manifest_digest=?, updated_at=? WHERE id=?
-                """,
-                (
-                    json.dumps(coverage, separators=(",", ":"), allow_nan=False),
-                    manifest_digest, timestamp, scan_id,
-                ),
-            )
-        return artifact_records
-
-    def upsert_finding(
-        self, scan_id: str, candidate: dict[str, Any], *, durable_deep_candidate: bool = False
-    ) -> dict[str, Any]:
-        fingerprint = candidate["fingerprint"]
-        finding_id = stable_id("kspf", fingerprint)
-        occurrence_id = stable_id("occ", scan_id, finding_id)
-        timestamp = utc_now()
-        severity = candidate["severity"]
-        confidence = candidate["confidence"]
-        evidence_rows = []
-        submitted_evidence_ids: dict[str, str] = {}
-        for index, evidence in enumerate(candidate.get("codeEvidence", [])):
-            evidence_id = stable_id("ev", occurrence_id, str(index), evidence["path"], str(evidence["startLine"]))
-            submitted_id = evidence.get("id")
-            if isinstance(submitted_id, str):
-                if not submitted_id or submitted_id in submitted_evidence_ids:
-                    raise EngineError(
-                        "candidate_evidence_reference_invalid",
-                        "Candidate code evidence IDs must be non-empty and unique.",
-                    )
-                submitted_evidence_ids[submitted_id] = evidence_id
-            evidence_rows.append((evidence, evidence_id))
-        details = dict(candidate.get("details") or {})
-        root_cause = details.get("rootCause")
-        if isinstance(root_cause, dict) and isinstance(root_cause.get("evidenceRefs"), list):
-            canonical_ids = {evidence_id for _, evidence_id in evidence_rows}
-            mapped_refs = []
-            unresolved_prior = False
-            for reference in root_cause["evidenceRefs"]:
-                if not isinstance(reference, str) or not reference:
-                    raise EngineError(
-                        "candidate_evidence_reference_invalid",
-                        "Root-cause evidence references must be non-empty strings.",
-                    )
-                mapped = submitted_evidence_ids.get(reference, reference if reference in canonical_ids else None)
-                if mapped is None:
-                    compatible_prior = not submitted_evidence_ids and (
-                        details.get("legacyContract") is True
-                        or candidate.get("sourceRefs") == []
-                        and details.get("discoveryEngine") == "kiro-agent-deep-orchestration"
-                        or durable_deep_candidate
-                        and isinstance(candidate.get("canonicalId"), str)
-                        and bool(candidate["canonicalId"])
-                        and details.get("discoveryEngine") == "kiro-agent-deep-orchestration"
-                    )
-                    if compatible_prior:
-                        details["rootCause"] = {
-                            key: value for key, value in root_cause.items() if key != "evidenceRefs"
-                        }
-                        details["rootCauseEvidenceStatus"] = (
-                            "legacy_unresolved" if details.get("legacyContract") is True else "prior_unresolved"
-                        )
-                        unresolved_prior = True
-                        break
-                    raise EngineError(
-                        "candidate_evidence_reference_invalid",
-                        "Root-cause evidence references must identify submitted code evidence.",
-                    )
-                mapped_refs.append(mapped)
-            if not unresolved_prior:
-                details["rootCause"] = {**root_cause, "evidenceRefs": mapped_refs}
-        with self.transaction() as connection:
-            connection.execute(
-                """
-                INSERT INTO findings(id, fingerprint, rule_id, identity_anchor, identity_instance, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(fingerprint) DO UPDATE SET rule_id=excluded.rule_id, identity_anchor=excluded.identity_anchor,
-                    identity_instance=excluded.identity_instance, updated_at=excluded.updated_at
-                """,
-                (
-                    finding_id, fingerprint, candidate["ruleId"], candidate["identity"]["anchor"],
-                    candidate["identity"].get("instance"), timestamp, timestamp,
-                ),
-            )
-            existing = connection.execute(
-                "SELECT id, created_at FROM finding_occurrences WHERE scan_id=? AND finding_id=?",
-                (scan_id, finding_id),
-            ).fetchone()
-            created_at = existing["created_at"] if existing else timestamp
-            connection.execute(
-                """
-                INSERT INTO finding_occurrences(
-                    id, finding_id, scan_id, title, summary, severity, severity_score, severity_rationale,
-                    confidence, confidence_rationale, category, cwe_json, remediation, details_json,
-                    validation_status, triage_status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unvalidated', 'open', ?, ?)
-                ON CONFLICT(scan_id, finding_id) DO UPDATE SET title=excluded.title, summary=excluded.summary,
-                    severity=excluded.severity, severity_score=excluded.severity_score,
-                    severity_rationale=excluded.severity_rationale, confidence=excluded.confidence,
-                    confidence_rationale=excluded.confidence_rationale, category=excluded.category,
-                    cwe_json=excluded.cwe_json, remediation=excluded.remediation,
-                    details_json=excluded.details_json, updated_at=excluded.updated_at
-                """,
-                (
-                    occurrence_id, finding_id, scan_id, candidate["title"], candidate["summary"], severity["level"],
-                    severity.get("score"), severity.get("rationale"), confidence["level"], confidence["rationale"],
-                    candidate["taxonomy"]["category"], json.dumps(candidate["taxonomy"].get("cwe", [])),
-                    candidate["remediation"], json.dumps(details, separators=(",", ":")),
-                    created_at, timestamp,
-                ),
-            )
-            connection.execute("DELETE FROM finding_locations WHERE occurrence_id=?", (occurrence_id,))
-            for index, location in enumerate(candidate.get("locations", [])):
-                connection.execute(
-                    """
-                    INSERT INTO finding_locations(occurrence_id, relative_path, start_line, end_line, role, sort_order)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        occurrence_id, location["path"], int(location["startLine"]),
-                        int(location.get("endLine", location["startLine"])), location.get("role", "evidence"), index,
-                    ),
-                )
-            connection.execute("DELETE FROM finding_evidence WHERE occurrence_id=?", (occurrence_id,))
-            for index, (evidence, evidence_id) in enumerate(evidence_rows):
-                connection.execute(
-                    """
-                    INSERT INTO finding_evidence(
-                        id, occurrence_id, kind, label, relative_path, start_line, end_line, language, role,
-                        snippet, explanation, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        evidence_id, occurrence_id, evidence.get("kind", "code"), evidence.get("label", f"Evidence {index + 1}"),
-                        evidence["path"], int(evidence["startLine"]), int(evidence.get("endLine", evidence["startLine"])),
-                        evidence.get("language"), evidence.get("role"), evidence.get("code", "")[:12000],
-                        evidence.get("explanation", "")[:4000], timestamp,
-                    ),
-                )
-        return self.get_finding(occurrence_id)
 
     def _base_finding_rows(self, scan_id: str, *, search: str | None = None) -> list[sqlite3.Row]:
         connection = self._connect()
@@ -1444,30 +1573,6 @@ class Workbench:
                 "SELECT * FROM validation_records WHERE occurrence_id=? ORDER BY created_at DESC LIMIT 1", (row["id"],)
             ).fetchone()
             attack = connection.execute("SELECT * FROM attack_paths WHERE occurrence_id=?", (row["id"],)).fetchone()
-            scan_row = connection.execute(
-                "SELECT mode, capability_json FROM scans WHERE id=?", (row["scan_id"],)
-            ).fetchone()
-            tail_validation = tail_attack = None
-            if is_model_scan({
-                "mode": scan_row["mode"],
-                "capabilities": json.loads(scan_row["capability_json"] or "{}"),
-            }):
-                tail_validation = connection.execute(
-                    """
-                    SELECT result_json FROM deep_tail_assignments
-                    WHERE scan_id=? AND kind='validation' AND subject_id=? AND status='completed'
-                    ORDER BY attempt DESC LIMIT 1
-                    """,
-                    (row["scan_id"], row["id"]),
-                ).fetchone()
-                tail_attack = connection.execute(
-                    """
-                    SELECT result_json FROM deep_tail_assignments
-                    WHERE scan_id=? AND kind='attack_path' AND subject_id=? AND status='completed'
-                    ORDER BY attempt DESC LIMIT 1
-                    """,
-                    (row["scan_id"], row["id"]),
-                ).fetchone()
             triage = connection.execute("SELECT * FROM triage_decisions WHERE occurrence_id=?", (row["id"],)).fetchone()
             triage_assessments = connection.execute(
                 "SELECT * FROM triage_assessments WHERE occurrence_id=? ORDER BY created_at DESC", (row["id"],)
@@ -1492,8 +1597,9 @@ class Workbench:
                 """,
                 (row["scan_id"], row["id"], row["category"], row["rule_id"]),
             ).fetchall()
-            summary["details"] = json.loads(row["details_json"])
-            summary["codeEvidence"] = [
+            canonical_details = json.loads(row["details_json"])
+            summary["details"] = canonical_details
+            indexed_evidence = [
                 {
                     "id": item["id"], "kind": item["kind"], "label": item["label"],
                     "path": item["relative_path"], "startLine": item["start_line"], "endLine": item["end_line"],
@@ -1502,31 +1608,19 @@ class Workbench:
                 }
                 for item in evidence
             ]
-            summary["validation"] = None if validation is None else {
+            summary["codeEvidence"] = canonical_details.get("codeEvidence", indexed_evidence)
+            indexed_validation = None if validation is None else {
                 "id": validation["id"], "status": validation["status"], "method": validation["method"],
-                "rationale": validation["rationale"], "evidence": json.loads(validation["evidence_json"]),
+                "rationale": validation["rationale"], "evidenceRefs": json.loads(validation["evidence_json"]),
                 "createdAt": validation["created_at"],
             }
-            if tail_validation is not None:
-                authoritative = json.loads(tail_validation["result_json"])
-                summary["validation"] = {
-                    **({} if validation is None else {"id": validation["id"], "createdAt": validation["created_at"]}),
-                    **authoritative,
-                }
-            summary["attackPath"] = None if attack is None else {
+            indexed_attack = None if attack is None else {
                 "id": attack["id"], "narrative": attack["narrative"], "path": json.loads(attack["path_json"]),
                 "exploitability": attack["exploitability"], "impact": attack["impact"],
                 "severityRationale": attack["severity_rationale"],
             }
-            if tail_attack is not None:
-                authoritative = json.loads(tail_attack["result_json"])
-                summary["attackPath"] = {
-                    **({} if attack is None else {
-                        "id": attack["id"], "createdAt": attack["created_at"], "updatedAt": attack["updated_at"],
-                        "path": json.loads(attack["path_json"]), "severityRationale": attack["severity_rationale"],
-                    }),
-                    **authoritative,
-                }
+            summary["validation"] = canonical_details.get("validation", indexed_validation)
+            summary["attackPath"] = canonical_details.get("attackPath", indexed_attack)
             summary["triage"] = None if triage is None else {
                 "decision": triage["decision"], "note": triage["note"], "updatedAt": triage["updated_at"]
             }
@@ -1544,45 +1638,6 @@ class Workbench:
             return summary
         finally:
             connection.close()
-
-    def save_validation(self, occurrence_id: str, result: dict[str, Any]) -> dict[str, Any]:
-        record_id = random_id("val")
-        timestamp = utc_now()
-        with self.transaction() as connection:
-            row = connection.execute("SELECT id FROM finding_occurrences WHERE id=?", (occurrence_id,)).fetchone()
-            if row is None:
-                raise EngineError("finding_not_found", f"Finding occurrence not found: {occurrence_id}")
-            connection.execute(
-                "INSERT INTO validation_records(id, occurrence_id, status, method, rationale, evidence_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    record_id, occurrence_id, result["status"], result.get("method", "static_trace"),
-                    result["rationale"], json.dumps(result.get("evidence", []), separators=(",", ":")), timestamp,
-                ),
-            )
-            connection.execute(
-                "UPDATE finding_occurrences SET validation_status=?, updated_at=? WHERE id=?",
-                (result["status"], timestamp, occurrence_id),
-            )
-        return self.get_finding(occurrence_id)
-
-    def save_attack_path(self, occurrence_id: str, result: dict[str, Any]) -> dict[str, Any]:
-        attack_id = stable_id("path", occurrence_id)
-        timestamp = utc_now()
-        with self.transaction() as connection:
-            connection.execute(
-                """
-                INSERT INTO attack_paths(id, occurrence_id, narrative, path_json, exploitability, impact, severity_rationale, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(occurrence_id) DO UPDATE SET narrative=excluded.narrative, path_json=excluded.path_json,
-                    exploitability=excluded.exploitability, impact=excluded.impact,
-                    severity_rationale=excluded.severity_rationale, updated_at=excluded.updated_at
-                """,
-                (
-                    attack_id, occurrence_id, result["narrative"], json.dumps(result["path"], separators=(",", ":")),
-                    result["exploitability"], result["impact"], result["severityRationale"], timestamp, timestamp,
-                ),
-            )
-        return self.get_finding(occurrence_id)
 
     def triage_finding(self, occurrence_id: str, decision: str, note: str | None) -> dict[str, Any]:
         timestamp = utc_now()
@@ -1826,21 +1881,6 @@ class Workbench:
             completed["_artifact"] = artifact_record
         return completed
 
-    def save_hardening(self, scan_id: str, title: str, summary: str, artifact_path: Path) -> dict[str, Any]:
-        proposal_id = stable_id("hard", scan_id)
-        timestamp = utc_now()
-        with self.transaction() as connection:
-            connection.execute(
-                """
-                INSERT INTO hardening_proposals(id, scan_id, title, summary, artifact_path, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET title=excluded.title, summary=excluded.summary,
-                    artifact_path=excluded.artifact_path, updated_at=excluded.updated_at
-                """,
-                (proposal_id, scan_id, title, summary, str(artifact_path), timestamp, timestamp),
-            )
-        return {"id": proposal_id, "scanId": scan_id, "title": title, "summary": summary, "artifactPath": str(artifact_path)}
-
     def save_export(self, scan_id: str, format_name: str, path: Path) -> dict[str, Any]:
         export_id = random_id("export")
         digest = sha256_file(path)
@@ -1937,7 +1977,7 @@ class Workbench:
 
     def cleanup_scan(self, scan_id: str) -> dict[str, Any]:
         scan = self.get_scan(scan_id)
-        if scan["status"] in ("queued", "running"):
+        if scan["status"] == "running":
             raise EngineError("scan_active", "Active scans must be cancelled before cleanup.")
         export_paths: list[str] = []
         with self.transaction() as connection:

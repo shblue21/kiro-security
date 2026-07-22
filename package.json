@@ -24,11 +24,7 @@
     "onView:kiroSecurity.securityView",
     "onCommand:kiroSecurity.openPanel",
     "onCommand:kiroSecurity.openPanelRight",
-    "onCommand:kiroSecurity.refreshThreatModel",
-    "onCommand:kiroSecurity.resumeLastScan",
-    "onCommand:kiroSecurity.cancelActiveScan",
     "onCommand:kiroSecurity.openFinding",
-    "onCommand:kiroSecurity.validateFinding",
     "onCommand:kiroSecurity.exportReport",
     "onCommand:kiroSecurity.openLogs",
     "onUri",
@@ -67,23 +63,6 @@
         "title": "Open Security Panel on Right",
         "category": "Kiro Security",
         "icon": "$(layout-sidebar-right)"
-      },
-      {
-        "command": "kiroSecurity.refreshThreatModel",
-        "title": "Create or Refresh Threat Model",
-        "category": "Kiro Security"
-      },
-      {
-        "command": "kiroSecurity.resumeLastScan",
-        "title": "Resume Last Scan",
-        "category": "Kiro Security",
-        "icon": "$(debug-continue)"
-      },
-      {
-        "command": "kiroSecurity.cancelActiveScan",
-        "title": "Cancel Active Scan",
-        "category": "Kiro Security",
-        "icon": "$(debug-stop)"
       },
       {
         "command": "kiroSecurity.exportReport",
@@ -125,11 +104,6 @@
     },
     "menus": {
       "view/title": [
-        {
-          "command": "kiroSecurity.cancelActiveScan",
-          "when": "view == kiroSecurity.securityView && kiroSecurity.scanActive",
-          "group": "navigation@2"
-        },
         {
           "command": "kiroSecurity.openPanelRight",
           "when": "view == kiroSecurity.securityView",
@@ -174,7 +148,7 @@
             "Require approval for every security tool.",
             "Pre-approve only capability, scan status, progress, and finding read operations."
           ],
-          "description": "Safe MCP auto-approval policy installed by the Setup flow. Scan, triage, remediation, tracking, hardening, and export tools are never auto-approved."
+          "description": "Safe MCP auto-approval policy installed by the Setup flow. Scan, triage, remediation, tracking, and export tools are never auto-approved."
         },
         "kiroSecurity.defaultScope": {
           "type": "string",
@@ -192,20 +166,6 @@
           "type": "boolean",
           "default": true,
           "description": "Publish validated findings to the Problems view."
-        },
-        "kiroSecurity.maxFiles": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 100000,
-          "default": 10000,
-          "description": "Maximum files inspected in one scan."
-        },
-        "kiroSecurity.maxFileBytes": {
-          "type": "integer",
-          "minimum": 1024,
-          "maximum": 10485760,
-          "default": 1048576,
-          "description": "Maximum bytes read from one source file."
         }
       }
     },

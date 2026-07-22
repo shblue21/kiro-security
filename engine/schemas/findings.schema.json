@@ -1,432 +1,357 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://kiro-security-power.invalid/schemas/findings.schema.json",
+  "$comment": "Direct port: upstream codex-security 0.1.11 schemas/findings.schema.json SHA-256 bd16dfe9a68c9b0485cad15b4ea3b037b0006dfb76a0549ed65a60ab8b062ac4; allowed Kiro product/document/ID naming only; no semantic changes.",
+  "$id": "https://kiro.dev/security-power/schemas/findings.schema.json",
   "title": "Kiro Security Power findings",
   "type": "object",
-  "additionalProperties": false,
-  "required": ["documentType", "schemaVersion", "scanId", "findings"],
+  "required": [
+    "documentType",
+    "schemaVersion",
+    "scanId",
+    "findings"
+  ],
   "properties": {
-    "documentType": { "const": "kiro-security-power.findings" },
-    "schemaVersion": { "const": "1.0" },
-    "scanId": { "$ref": "#/$defs/scanId" },
+    "documentType": {
+      "const": "kiro-security-power.findings"
+    },
+    "schemaVersion": {
+      "const": "1.0"
+    },
+    "scanId": {
+      "type": "string",
+      "minLength": 1
+    },
     "findings": {
       "type": "array",
-      "items": { "$ref": "#/$defs/finding" }
-    }
-  },
-  "$defs": {
-    "scanId": { "type": "string", "pattern": "^scan_[a-f0-9]{24}$" },
-    "findingId": { "type": "string", "pattern": "^kspf_[a-f0-9]{24}$" },
-    "safeRelativePath": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 4096,
-      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\)(?!.*\\x00).+$"
-    },
-    "stringList": {
-      "type": "array",
-      "items": { "type": "string" }
-    },
-    "location": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["path", "startLine"],
-      "properties": {
-        "path": { "$ref": "#/$defs/safeRelativePath" },
-        "startLine": { "type": "integer", "minimum": 1 },
-        "endLine": { "type": "integer", "minimum": 1 },
-        "role": { "type": "string", "maxLength": 128 }
-      }
-    },
-    "evidence": {
-      "type": "object",
-      "additionalProperties": true,
-      "required": ["id", "label", "path", "startLine", "code", "explanation"],
-      "properties": {
-        "id": { "type": "string" },
-        "kind": { "type": "string" },
-        "label": { "type": "string" },
-        "path": { "$ref": "#/$defs/safeRelativePath" },
-        "startLine": { "type": "integer", "minimum": 1 },
-        "endLine": { "type": "integer", "minimum": 1 },
-        "language": { "type": ["string", "null"] },
-        "role": { "type": ["string", "null"] },
-        "code": { "type": "string" },
-        "explanation": { "type": "string" }
-      }
-    },
-    "proofEvidence": {
-      "type": "object",
-      "additionalProperties": true,
-      "required": ["path", "result"],
-      "properties": {
-        "path": { "$ref": "#/$defs/safeRelativePath" },
-        "result": { "type": "string", "minLength": 1 }
-      }
-    },
-    "deepProofEvidence": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["path", "result"],
-      "properties": {
-        "path": { "$ref": "#/$defs/safeRelativePath" },
-        "result": { "type": "string", "minLength": 1 }
-      }
-    },
-    "standardValidation": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["status", "method", "rationale", "evidence"],
-      "properties": {
-        "id": { "type": "string", "pattern": "^val_[a-f0-9]{24}$" },
-        "createdAt": { "type": "string", "format": "date-time" },
-        "status": { "enum": ["validated", "rejected", "needs_review"] },
-        "method": { "type": "string", "minLength": 1 },
-        "rationale": { "type": "string", "minLength": 1 },
-        "evidence": { "type": "array", "items": { "$ref": "#/$defs/proofEvidence" } }
-      }
-    },
-    "deepValidation": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "findingId", "status", "method", "rationale", "evidence", "counterevidence",
-        "crossFileTrace", "frameworkControls", "proofGaps", "tests", "dynamicValidationUnavailableReason"
-      ],
-      "properties": {
-        "id": { "type": "string", "pattern": "^val_[a-f0-9]{24}$" },
-        "createdAt": { "type": "string", "format": "date-time" },
-        "findingId": { "$ref": "#/$defs/findingId" },
-        "status": { "enum": ["validated", "rejected", "needs_review"] },
-        "method": { "type": "string", "minLength": 1 },
-        "rationale": { "type": "string", "minLength": 1 },
-        "evidence": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/deepProofEvidence" } },
-        "counterevidence": { "$ref": "#/$defs/stringList" },
-        "crossFileTrace": { "$ref": "#/$defs/stringList" },
-        "frameworkControls": { "type": "array", "minItems": 1, "items": { "type": "string" } },
-        "proofGaps": { "$ref": "#/$defs/stringList" },
-        "tests": {
-          "type": "array",
-          "items": {
+      "items": {
+        "type": "object",
+        "required": [
+          "findingId",
+          "occurrenceId",
+          "ruleId",
+          "identity",
+          "fingerprints",
+          "title",
+          "summary",
+          "severity",
+          "confidence",
+          "taxonomy",
+          "locations",
+          "remediation",
+          "provenance"
+        ],
+        "properties": {
+          "findingId": {
+            "type": "string",
+            "pattern": "^kspf_[a-f0-9]{24}$"
+          },
+          "occurrenceId": {
+            "type": "string",
+            "pattern": "^occ_[a-f0-9]{24}$"
+          },
+          "ruleId": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9._/-]*$"
+          },
+          "identity": {
             "type": "object",
-            "additionalProperties": false,
-            "required": ["name", "result"],
+            "required": [
+              "anchor"
+            ],
             "properties": {
-              "name": { "type": "string", "minLength": 1 },
-              "result": { "type": "string", "minLength": 1 }
-            }
-          }
-        },
-        "dynamicValidationUnavailableReason": { "type": ["string", "null"] }
-      }
-    },
-    "attackStep": {
-      "type": "object",
-      "additionalProperties": true,
-      "properties": {
-        "path": { "$ref": "#/$defs/safeRelativePath" }
-      }
-    },
-    "standardAttackPath": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["narrative", "path", "exploitability", "impact", "severityRationale"],
-      "properties": {
-        "id": { "type": "string", "pattern": "^path_[a-f0-9]{24}$" },
-        "narrative": { "type": "string", "minLength": 1 },
-        "path": { "type": "array", "items": { "$ref": "#/$defs/attackStep" } },
-        "exploitability": { "type": "string", "minLength": 1 },
-        "impact": { "type": "string", "minLength": 1 },
-        "severityRationale": { "type": "string", "minLength": 1 }
-      }
-    },
-    "deepAttackPath": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "findingId", "narrative", "actor", "attackerPrerequisite", "entrypoint",
-        "attackerControlledSource", "rootControl", "controlBypass", "crossFilePath",
-        "privilegedSink", "impact", "exploitPreconditions", "counterevidence",
-        "residualUncertainty", "severity", "exploitability", "confidence"
-      ],
-      "properties": {
-        "id": { "type": "string", "pattern": "^path_[a-f0-9]{24}$" },
-        "createdAt": { "type": "string", "format": "date-time" },
-        "updatedAt": { "type": "string", "format": "date-time" },
-        "path": { "type": "array", "items": { "$ref": "#/$defs/attackStep" } },
-        "severityRationale": { "type": "string", "minLength": 1 },
-        "findingId": { "$ref": "#/$defs/findingId" },
-        "narrative": { "type": "string", "minLength": 1 },
-        "actor": { "type": "string", "minLength": 1 },
-        "attackerPrerequisite": { "type": "string", "minLength": 1 },
-        "entrypoint": { "type": "string", "minLength": 1 },
-        "attackerControlledSource": { "type": "string", "minLength": 1 },
-        "rootControl": { "type": "string", "minLength": 1 },
-        "controlBypass": { "type": "string", "minLength": 1 },
-        "crossFilePath": {
-          "type": "array",
-          "minItems": 1,
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["path", "step"],
-            "properties": {
-              "path": { "$ref": "#/$defs/safeRelativePath" },
-              "step": { "type": "string", "minLength": 1 }
-            }
-          }
-        },
-        "privilegedSink": { "type": "string", "minLength": 1 },
-        "impact": { "type": "string", "minLength": 1 },
-        "exploitPreconditions": { "type": "array", "minItems": 1, "items": { "type": "string" } },
-        "counterevidence": { "$ref": "#/$defs/stringList" },
-        "residualUncertainty": { "type": "string", "minLength": 1 },
-        "severity": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["level", "rationale"],
-          "properties": {
-            "level": { "enum": ["critical", "high", "medium", "low", "informational"] },
-            "rationale": { "type": "string", "minLength": 1 }
-          }
-        },
-        "exploitability": { "type": "string", "minLength": 1 },
-        "confidence": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["level", "rationale"],
-          "properties": {
-            "level": { "enum": ["high", "medium", "low"] },
-            "rationale": { "type": "string", "minLength": 1 }
-          }
-        },
-        "policyDecision": { "enum": ["reportable", "ignore", "deferred"] },
-        "policyRationale": { "type": "string", "minLength": 1 }
-      }
-    },
-    "workerAttestation": {
-      "oneOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["status"],
-          "properties": { "status": { "const": "legacy_unverified" } }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["status", "authority", "contractVersion", "freshContext", "coordinatorHistoryInherited", "workerState"],
-          "properties": {
-            "status": { "const": "attested" },
-            "authority": { "const": "host" },
-            "contractVersion": { "const": "deep-worker/v2" },
-            "freshContext": { "const": true },
-            "coordinatorHistoryInherited": { "const": false },
-            "workerState": { "const": "completed_idle" }
-          }
-        }
-      ]
-    },
-    "deepWorkerProvenance": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["sourceRef", "workerIndex", "workerId", "modelId", "attestation"],
-      "properties": {
-        "sourceRef": { "type": "string", "minLength": 1 },
-        "workerIndex": { "type": "integer", "minimum": 1, "maximum": 6 },
-        "workerId": { "type": "string", "minLength": 1 },
-        "delegationId": { "type": "string", "minLength": 1 },
-        "modelId": { "type": "string", "minLength": 1 },
-        "attestation": { "$ref": "#/$defs/workerAttestation" }
-      }
-    },
-    "deepProvenance": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["canonicalId", "round", "sourceRefs", "workers", "mergeRationale", "identityRationale", "remediationSubsumption"],
-      "properties": {
-        "canonicalId": { "type": "string", "minLength": 1 },
-        "round": { "type": "integer", "minimum": 1 },
-        "sourceRefs": { "$ref": "#/$defs/stringList" },
-        "workers": { "type": "array", "items": { "$ref": "#/$defs/deepWorkerProvenance" } },
-        "mergeRationale": { "type": "string", "minLength": 1 },
-        "identityRationale": { "type": "string", "minLength": 1 },
-        "remediationSubsumption": { "type": "string", "minLength": 1 }
-      }
-    },
-    "modelProfile": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["modelId", "agentType", "reasoningEffort", "hostVersion", "delegationMode", "contractVersion"],
-      "properties": {
-        "modelId": { "type": "string", "minLength": 1 },
-        "agentType": { "type": "string", "minLength": 1 },
-        "reasoningEffort": { "type": "string", "minLength": 1 },
-        "hostVersion": { "type": "string", "minLength": 1 },
-        "delegationMode": { "type": "string", "minLength": 1 },
-        "contractVersion": { "type": "string", "minLength": 1 }
-      }
-    },
-    "tailProvenanceEntry": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["assignmentId", "kind", "attempt", "modelProfile", "receiptDigest"],
-      "properties": {
-        "assignmentId": { "type": "string", "minLength": 1 },
-        "kind": { "enum": ["validation", "attack_path", "writeup"] },
-        "attempt": { "type": "integer", "minimum": 1 },
-        "modelProfile": { "$ref": "#/$defs/modelProfile" },
-        "receiptDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
-      }
-    },
-    "deepTailProvenance": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "validation": { "$ref": "#/$defs/tailProvenanceEntry" },
-        "attack_path": { "$ref": "#/$defs/tailProvenanceEntry" },
-        "writeup": { "$ref": "#/$defs/tailProvenanceEntry" }
-      }
-    },
-    "finding": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "findingId", "occurrenceId", "ruleId", "identity", "fingerprints", "title", "summary",
-        "severity", "confidence", "taxonomy", "locations", "remediation", "provenance"
-      ],
-      "properties": {
-        "findingId": { "$ref": "#/$defs/findingId" },
-        "occurrenceId": { "type": "string", "pattern": "^occ_[a-f0-9]{24}$" },
-        "ruleId": { "type": "string", "minLength": 1 },
-        "identity": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["anchor"],
-          "properties": {
-            "anchor": { "type": "string", "minLength": 1 },
-            "instance": { "type": ["string", "null"] }
-          }
-        },
-        "fingerprints": {
-          "oneOf": [
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["algorithm", "primary"],
-              "properties": {
-                "algorithm": { "const": "kiro-security/v1" },
-                "primary": { "type": "string", "pattern": "^kiro-security/v1:sha256:[a-f0-9]{64}$" }
-              }
-            },
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["algorithm", "primary"],
-              "properties": {
-                "algorithm": { "const": "kiro-security/deep-v1" },
-                "primary": { "type": "string", "pattern": "^kiro-security/deep-v1:sha256:[a-f0-9]{64}$" }
+              "anchor": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9._/-]*$"
+              },
+              "instance": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9._/-]*$"
               }
             }
-          ]
-        },
-        "title": { "type": "string", "minLength": 1, "maxLength": 512 },
-        "summary": { "type": "string", "minLength": 1, "maxLength": 8000 },
-        "severity": {
-          "type": "object",
-          "additionalProperties": true,
-          "required": ["level"],
-          "properties": {
-            "level": { "enum": ["critical", "high", "medium", "low", "informational"] },
-            "score": { "type": ["number", "null"], "minimum": 0, "maximum": 10 },
-            "scoringSystem": { "type": ["string", "null"] },
-            "vector": { "type": ["string", "null"] },
-            "rationale": { "type": ["string", "null"] },
-            "changeConditions": { "type": ["string", "null"] }
-          }
-        },
-        "confidence": {
-          "type": "object",
-          "additionalProperties": true,
-          "required": ["level", "rationale"],
-          "properties": {
-            "level": { "enum": ["high", "medium", "low"] },
-            "rationale": { "type": "string" }
-          }
-        },
-        "taxonomy": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["category", "cwe"],
-          "properties": {
-            "category": { "type": "string" },
-            "cwe": { "type": "array", "items": { "type": "string", "pattern": "^CWE-[0-9]+$" } }
-          }
-        },
-        "locations": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/location" } },
-        "writeup": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["reportPath"],
-          "properties": {
-            "reportPath": {
+          },
+          "fingerprints": {
+            "type": "object",
+            "required": [
+              "algorithm",
+              "primary"
+            ],
+            "properties": {
+              "algorithm": {
+                "const": "kiro-security/v1"
+              },
+              "primary": {
+                "type": "string",
+                "pattern": "^kiro-security/v1:sha256:[a-f0-9]{64}$"
+              }
+            }
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1
+          },
+          "severity": {
+            "type": "object",
+            "required": [
+              "level"
+            ],
+            "properties": {
+              "level": {
+                "enum": [
+                  "critical",
+                  "high",
+                  "medium",
+                  "low",
+                  "informational"
+                ]
+              },
+              "score": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 10
+              },
+              "scoringSystem": {
+                "type": "string",
+                "minLength": 1
+              },
+              "vector": {
+                "type": "string",
+                "minLength": 1
+              },
+              "rationale": {
+                "type": "string",
+                "minLength": 1
+              },
+              "changeConditions": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "confidence": {
+            "type": "object",
+            "required": [
+              "level",
+              "rationale"
+            ],
+            "properties": {
+              "level": {
+                "enum": [
+                  "high",
+                  "medium",
+                  "low"
+                ]
+              },
+              "rationale": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "taxonomy": {
+            "type": "object",
+            "required": [
+              "category",
+              "cwe"
+            ],
+            "properties": {
+              "category": {
+                "type": "string",
+                "minLength": 1
+              },
+              "cwe": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          },
+          "locations": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": [
+                "path",
+                "startLine"
+              ],
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "startLine": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "endLine": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "role": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          },
+          "writeup": {
+            "type": "object",
+            "required": [
+              "reportPath"
+            ],
+            "properties": {
+              "reportPath": {
+                "type": "string",
+                "pattern": "^findings/([a-z0-9][a-z0-9._-]*)/\\1\\.md$"
+              }
+            }
+          },
+          "codeEvidence": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "label",
+                "path",
+                "startLine",
+                "code",
+                "explanation"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9._/-]*$"
+                },
+                "label": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "path": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "startLine": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "endLine": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "language": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "role": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "code": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "explanation": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          },
+          "rootCause": {
+            "type": [
+              "object",
+              "string"
+            ],
+            "required": [
+              "summary"
+            ],
+            "properties": {
+              "summary": {
+                "type": "string",
+                "minLength": 1
+              },
+              "evidenceRefs": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "code": {
+                "type": "string",
+                "minLength": 1
+              },
+              "language": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "remediation": {
+            "type": "string",
+            "minLength": 1
+          },
+          "validation": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "attackPath": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "remediationTests": {
+            "type": "array",
+            "items": {
               "type": "string",
-              "pattern": "^(?:writeups/kspf_[a-f0-9]{24}\\.md|findings/kspf_[a-f0-9]{24}/kspf_[a-f0-9]{24}\\.md)$"
+              "minLength": 1
             }
-          }
-        },
-        "codeEvidence": { "type": "array", "items": { "$ref": "#/$defs/evidence" } },
-        "rootCause": {
-          "anyOf": [
-            { "type": "string", "minLength": 1 },
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "required": ["summary"],
-              "properties": {
-                "summary": { "type": "string", "minLength": 1 },
-                "evidenceRefs": { "type": "array", "items": { "type": "string" } }
+          },
+          "preventiveControls": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "provenance": {
+            "type": "object",
+            "required": [
+              "source"
+            ],
+            "properties": {
+              "source": {
+                "type": "string",
+                "minLength": 1
               }
             }
-          ]
-        },
-        "remediation": { "type": "string", "minLength": 1 },
-        "validation": {
-          "anyOf": [
-            { "type": "null" },
-            { "$ref": "#/$defs/standardValidation" },
-            { "$ref": "#/$defs/deepValidation" }
-          ]
-        },
-        "attackPath": {
-          "anyOf": [
-            { "type": "null" },
-            { "$ref": "#/$defs/standardAttackPath" },
-            { "$ref": "#/$defs/deepAttackPath" }
-          ]
-        },
-        "remediationTests": { "type": "array", "items": { "type": "string" } },
-        "preventiveControls": { "type": "array", "items": { "type": "string" } },
-        "provenance": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["source"],
-          "properties": {
-            "source": { "const": "kiro_security_power" },
-            "engineVersion": { "type": "string", "minLength": 1 },
-            "deep": { "$ref": "#/$defs/deepProvenance" },
-            "deepTail": { "$ref": "#/$defs/deepTailProvenance" }
-          }
-        },
-        "extensions": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["validationStatus", "triageStatus", "source", "sink"],
-          "properties": {
-            "validationStatus": { "enum": ["unvalidated", "validated", "rejected", "needs_review"] },
-            "triageStatus": { "enum": ["open", "accepted_risk", "false_positive", "already_fixed", "wont_fix"] },
-            "source": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/location" }] },
-            "sink": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/location" }] }
+          },
+          "extensions": {
+            "type": "object",
+            "properties": {
+              "candidateId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "ledgerRowId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "reportId": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
           }
         }
       }

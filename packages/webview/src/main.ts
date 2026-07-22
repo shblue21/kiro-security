@@ -10,7 +10,6 @@ type Tab = "setup" | "dashboard" | "findings" | "history";
 interface PersistedState {
   tab: Tab;
   filters: FindingFilters;
-  scanMode?: "fast" | "standard" | "deep" | "diff";
   agentScope?: "workspace" | "user";
   agentAutoApprove?: "none" | "read_only";
 }
@@ -30,11 +29,9 @@ const saved = vscode.getState();
 const ui: PersistedState = saved ?? {
   tab: "dashboard",
   filters: { query: "", severity: "", confidence: "", validation: "", triage: "", sort: "severity" },
-  scanMode: "fast",
   agentScope: "workspace",
   agentAutoApprove: "read_only",
 };
-ui.scanMode ??= "fast";
 if (ui.tab === "history") ui.tab = "dashboard";
 let snapshot: any = null;
 let lastEvent = "";
@@ -74,7 +71,7 @@ function badge(text: unknown, kind = "neutral"): string {
 function statusBadge(status: string): string {
   const kind = ["completed", "validated", "ready", "verified"].includes(status) ? "success"
     : ["failed", "rejected", "critical", "high", "error"].includes(status) ? "danger"
-      : ["running", "needs_review", "needs_repair", "interrupted", "configured"].includes(status) ? "warning" : "neutral";
+      : ["running", "needs_review", "needs_repair", "configured"].includes(status) ? "warning" : "neutral";
   return badge(status.replaceAll("_", " "), kind);
 }
 function severityBadge(level: string): string {
@@ -89,9 +86,7 @@ function severitySummary(findings: any[]): string {
   }).join("")}</div>`;
 }
 function scanLabel(scan: any): string {
-  const model = scan?.mode === "deep" || scan?.capabilities?.analysisProfile === "model";
-  if (!model) return "Fast (deterministic)";
-  if (scan?.mode === "diff") return "Git changes (Kiro Agent)";
+  if (scan?.mode === "diff") return "Diff (Kiro Agent)";
   return `${scan?.mode === "deep" ? "Deep" : "Standard"} (Kiro Agent)`;
 }
 
@@ -114,10 +109,11 @@ function setupView(): string {
   const python = integration.dependencies?.python ?? {};
   const busy = integration.operation && integration.operation !== "idle";
   const integrationHealthy = integration.state === "verified";
+  const powerImportRequired = integration.power?.registration === "import_required";
   const integrationLabel = integrationHealthy
     ? `Verified · ${integration.configScope ?? "workspace"} scope`
     : integration.state === "configured"
-      ? "Configured; verification required"
+      ? powerImportRequired ? "MCP checked; native Power import required" : "Power detected; verification required"
       : integration.state === "needs_repair"
         ? "Needs repair"
         : integration.state === "error"
@@ -156,9 +152,9 @@ function setupView(): string {
     : busy && integration.operation !== "checking" ? `role="status"` : "";
   return `<div class="stack">
     <section class="card agent-setup" aria-busy="${busy ? "true" : "false"}"><div class="card-title"><div><h2>Connect Kiro Agent</h2><p>Connect once, then request repository security scans from Kiro Agent chat.</p></div>${statusBadge(integration.state ?? "not_configured")}</div>
-      <p class="setup-status" ${statusRole}><strong>${h(busy ? operationLabel : integrationLabel)}</strong>${integrationHealthy && !busy ? " · Agent tools are ready. Start a new Kiro Agent conversation (or refresh MCP servers), then ask for a Standard, Diff, or Deep scan." : ""}</p>
+      <p class="setup-status" ${statusRole}><strong>${h(busy ? operationLabel : integrationLabel)}</strong>${integrationHealthy && !busy ? " · Native Power and MCP tools are ready. Start a new Kiro Agent conversation, then ask for a Standard, Diff, or Deep scan." : powerImportRequired && !busy ? " · Open Kiro Powers → Add Custom Power → Import power from a folder. Import the prepared folder, then verify setup." : ""}</p>
       ${!setupReady ? `<p class="muted">Complete the required system checks below before connecting.</p>` : ""}
-      ${integrationHealthy ? "" : `<div class="button-row"><button id="setup-primary-action" class="primary" data-action="${primaryAction}" ${busy || !setupReady ? "disabled" : ""}>${h(operationLabel)}</button>${!pythonReady ? `<button data-action="settings">Configure Python</button>` : ""}</div>`}
+      ${integrationHealthy ? "" : powerImportRequired ? `<div class="button-row"><button id="setup-primary-action" class="primary" data-action="copy-power-path" ${busy || !setupReady ? "disabled" : ""}>Copy Power folder</button><button data-action="verify-agent" ${busy || !setupReady ? "disabled" : ""}>Verify after import</button></div>` : `<div class="button-row"><button id="setup-primary-action" class="primary" data-action="${primaryAction}" ${busy || !setupReady ? "disabled" : ""}>${h(operationLabel)}</button>${!pythonReady ? `<button data-action="settings">Configure Python</button>` : ""}</div>`}
       <details class="setup-options" id="setup-installation-options"><summary>Installation options</summary><div class="setup-options-body">
         <label>Installation scope<select id="agent-scope" ${busy || integration.configured ? "disabled" : ""}><option value="workspace" ${configuredScope === "workspace" ? "selected" : ""}>Current workspace (recommended)</option><option value="user" ${configuredScope === "user" ? "selected" : ""}>Current user (all workspaces)</option></select></label>
         ${integration.configured ? `<p class="muted">To change scope, remove the current integration, then install it again.</p>` : ""}
@@ -192,6 +188,7 @@ function dashboardView(): string {
   if (!dashboard) return `<div class="empty"><h2>Engine is not ready</h2><p>Open and trust a local workspace, then refresh.</p><button data-action="refresh">Refresh</button></div>`;
   const active = dashboard.activeScan;
   const selected = dashboard.selectedScan;
+  const agentReady = snapshot?.agentIntegration?.state === "verified";
   const progress = active?.progress?.overall_percent ?? 0;
   const coverage = selected?.coverage;
   const history = (dashboard.scans ?? []).filter((scan: any) => scan.id !== active?.id && (active || scan.id !== selected?.id)).slice(0, 20);
@@ -199,13 +196,13 @@ function dashboardView(): string {
       ${phaseStepper(active)}<div class="progress-label"><strong>${h(progressLabel(active.phase, progress))}</strong><span>${h(active.progress?.message ?? "Working…")}</span></div>
       <progress max="100" value="${attr(progress)}">${h(progress)}%</progress>
       <div class="metrics"><div><strong>${h(active.files_completed)}/${h(active.files_total)}</strong><span>files</span></div><div><strong>${h(active.progress?.reportable_findings_count ?? 0)}</strong><span>findings</span></div><div><strong>${h(elapsed(active))}</strong><span>elapsed</span></div></div>
-      <button class="danger" data-action="cancel" data-scan-id="${attr(active.id)}">Cancel scan</button></section>` : selected ? `<section class="card scan-state"><div class="card-title"><div><h2>${h(scanLabel(selected))}</h2><p>${selected.status === "completed" ? "Completed" : "Updated"} ${h(date(selected.completed_at ?? selected.updated_at))}</p></div>${statusBadge(selected.status)}</div>
-      <div class="metrics"><div><strong>${h(selected.files_total)}</strong><span>files scanned</span></div><div><strong>${h(dashboard.findings.length)}</strong><span>findings</span></div>${coverage?.completeness ? `<div><strong>${h(coverage.completeness)}</strong><span>coverage</span></div>` : ""}</div>
+      </section>` : selected ? `<section class="card scan-state"><div class="card-title"><div><h2>${h(scanLabel(selected))}</h2><p>${selected.status === "completed" ? "Completed" : "Updated"} ${h(date(selected.completed_at ?? selected.updated_at))}</p></div>${statusBadge(selected.status)}</div>
+      <div class="metrics"><div><strong>${h(selected.files_total)}</strong><span>review inputs</span></div><div><strong>${h(dashboard.findings.length)}</strong><span>findings</span></div>${coverage?.completeness ? `<div><strong>${h(coverage.completeness)}</strong><span>coverage</span></div>` : ""}</div>
       ${severitySummary(dashboard.findings)}
-      ${!snapshot?.agentIntegration?.configured ? `<div class="handoff-note"><strong>Want deeper analysis?</strong><span>Connect Kiro Agent to unlock Standard, Diff, and Deep scans.</span><div class="button-row"><button data-action="go-setup">Connect Kiro Agent</button></div></div>` : ""}
-      <div class="button-row"><button class="primary" data-action="show-findings">View findings</button>${["interrupted", "failed"].includes(selected.status) ? `<button data-action="resume" data-scan-id="${attr(selected.id)}">Resume</button>` : ""}<details class="more-menu" id="dashboard-more-actions"><summary aria-label="More scan actions" title="More scan actions">⋯</summary><div class="more-menu-panel"><button data-action="hardening" data-scan-id="${attr(selected.id)}">Hardening proposal</button><label>Export format<select id="export-format"><option value="markdown">Markdown</option><option value="json">JSON</option><option value="csv">CSV</option><option value="sarif">SARIF</option></select></label><button data-action="export" data-scan-id="${attr(selected.id)}">Export</button>${(selected.artifacts ?? []).length ? `<h3>Artifacts</h3><ul class="artifact-list">${selected.artifacts.map((artifact: any) => `<li><button class="link" data-action="artifact" data-path="${attr(artifact.path)}">${h(artifact.kind)}</button><span class="muted mono">${h(String(artifact.sha256).slice(0, 12))}</span></li>`).join("")}</ul>` : ""}</div></details></div>
-    </section>` : `<section class="card scan-state empty"><h2>No scans yet</h2><p>Ask Kiro Agent to run a security scan for this repository.</p>${!snapshot?.agentIntegration?.configured ? `<button data-action="go-setup">Connect Kiro Agent</button>` : ""}</section>`;
-  return `<div class="stack">${state}${history.length ? `<details class="card setup-disclosure" id="recent-scans"><summary><span><strong>Recent scans</strong><small>${h(history.length)} available</small></span></summary><div class="history-list setup-disclosure-body">${history.map((scan: any) => `<div class="history-row"><button class="link" data-action="select-scan" data-scan-id="${attr(scan.id)}">${h(scanLabel(scan))}</button><span class="muted">${h(elapsed(scan))} · ${h(scan.files_completed)}/${h(scan.files_total)} files</span>${statusBadge(scan.status)}${["interrupted", "failed"].includes(scan.status) ? `<button data-action="resume" data-scan-id="${attr(scan.id)}" ${active ? "disabled" : ""}>Resume</button>` : `<button class="danger" data-action="cleanup" data-scan-id="${attr(scan.id)}">Cleanup</button>`}</div>`).join("")}</div></details>` : ""}
+      ${!agentReady ? `<div class="handoff-note"><strong>Finish Agent setup</strong><span>Install and verify the native Power before requesting Standard, Diff, or Deep scans.</span><div class="button-row"><button data-action="go-setup">Open setup</button></div></div>` : ""}
+      <div class="button-row"><button class="primary" data-action="show-findings">View findings</button><details class="more-menu" id="dashboard-more-actions"><summary aria-label="More scan actions" title="More scan actions">⋯</summary><div class="more-menu-panel"><label>Export format<select id="export-format"><option value="markdown">Markdown</option><option value="json">JSON</option><option value="csv">CSV</option><option value="sarif">SARIF</option></select></label><button data-action="export" data-scan-id="${attr(selected.id)}">Export</button>${(selected.artifacts ?? []).length ? `<h3>Artifacts</h3><ul class="artifact-list">${selected.artifacts.map((artifact: any) => `<li><button class="link" data-action="artifact" data-path="${attr(artifact.path)}">${h(artifact.kind)}</button><span class="muted mono">${h(String(artifact.sha256).slice(0, 12))}</span></li>`).join("")}</ul>` : ""}</div></details></div>
+    </section>` : `<section class="card scan-state empty"><h2>No scans yet</h2><p>Ask Kiro Agent to run a security scan for this repository.</p>${!agentReady ? `<button data-action="go-setup">Finish Agent setup</button>` : ""}</section>`;
+  return `<div class="stack">${state}${history.length ? `<details class="card setup-disclosure" id="recent-scans"><summary><span><strong>Recent scans</strong><small>${h(history.length)} available</small></span></summary><div class="history-list setup-disclosure-body">${history.map((scan: any) => `<div class="history-row"><button class="link" data-action="select-scan" data-scan-id="${attr(scan.id)}">${h(scanLabel(scan))}</button><span class="muted">${h(elapsed(scan))} · ${h(scan.files_completed)}/${h(scan.files_total)} files</span>${statusBadge(scan.status)}${scan.status === "running" ? "" : `<button class="danger" data-action="cleanup" data-scan-id="${attr(scan.id)}">Cleanup</button>`}</div>`).join("")}</div></details>` : ""}
   </div>`;
 }
 
@@ -277,7 +274,7 @@ function detailView(finding: any): string {
     <section class="setup-options"><h3>Evidence</h3>${evidence.length ? evidenceView(evidence[0]) : `<p class="muted">No evidence recorded.</p>`}${evidence.length > 1 ? `<details id="additional-evidence"><summary>${h(evidence.length - 1)} more evidence item${evidence.length === 2 ? "" : "s"}</summary><div class="setup-options-body">${evidence.slice(1).map(evidenceView).join("")}</div></details>` : ""}</section>
     <section class="setup-options"><h3>Why it matters</h3>${attack ? `<p>${h(attack.narrative)}</p><dl><dt>Exploitability</dt><dd>${h(attack.exploitability)}</dd><dt>Impact</dt><dd>${h(attack.impact)}</dd>${severityRationale ? `<dt>Severity rationale</dt><dd>${h(severityRationale)}</dd>` : ""}</dl>${attackSteps(attack)}` : `<p>${h(finding.summary)}</p><p class="muted">Attack-path analysis is not recorded yet.</p>`}</section>
     <details class="setup-options" id="finding-status"><summary><span>Status and validation</span>${statusBadge(finding.validationStatus)}</summary><div class="setup-options-body">
-      ${finding.validation ? `<p>${h(finding.validation.rationale)}</p><p class="muted">Method: ${h(finding.validation.method)}${finding.validation.createdAt ? ` · ${h(date(finding.validation.createdAt))}` : ""}</p>` : `<p class="muted">This finding has not been validated.</p><button data-action="validate" data-occurrence-id="${attr(finding.occurrenceId)}">Validate finding</button>`}
+      ${finding.validation ? `<p>${h(finding.validation.rationale)}</p><p class="muted">Method: ${h(finding.validation.method)}${finding.validation.createdAt ? ` · ${h(date(finding.validation.createdAt))}` : ""}</p>` : `<p class="muted">No canonical validation record is available.</p>`}
       <div class="stack"><label>Mark as<select id="triage-decision">${[["open","Open"],["accepted_risk","Accept risk"],["false_positive","False positive"],["already_fixed","Already fixed"],["wont_fix","Won't fix"]].map(([value,label]) => `<option value="${value}" ${finding.triageStatus === value ? "selected" : ""}>${label}</option>`).join("")}</select></label><label>Decision note<textarea id="triage-note" data-occurrence-id="${attr(finding.occurrenceId)}" maxlength="4000" placeholder="Required for Accept risk and Won't fix">${h(finding.triage?.note ?? "")}</textarea></label><button data-action="triage" data-occurrence-id="${attr(finding.occurrenceId)}">Apply status</button></div>
     </div></details>
     <details class="setup-options" id="finding-remediation"><summary>Remediation</summary><div class="setup-options-body"><p>${h(finding.remediation)}</p><button data-action="remediation" data-occurrence-id="${attr(finding.occurrenceId)}">Create remediation guidance</button>${remediationHistory(finding.remediationRecords ?? [])}</div></details>
@@ -304,7 +301,7 @@ function render(): void {
   }
   const dirtyFields = new Map<string, string>();
   document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input[id], textarea[id]").forEach((field) => {
-    if (field.value !== field.defaultValue) dirtyFields.set(`${field.id} ${field.dataset.occurrenceId ?? ""}`, field.value);
+    if (field.value !== field.defaultValue) dirtyFields.set(`${field.id}::${field.dataset.occurrenceId ?? ""}`, field.value);
   });
   app.setAttribute("aria-busy", "false");
   if (!snapshot) {
@@ -317,7 +314,7 @@ function render(): void {
     if (setupDisclosureState.has(detail.id)) detail.open = Boolean(setupDisclosureState.get(detail.id));
   });
   document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input[id], textarea[id]").forEach((field) => {
-    const dirty = dirtyFields.get(`${field.id} ${field.dataset.occurrenceId ?? ""}`);
+    const dirty = dirtyFields.get(`${field.id}::${field.dataset.occurrenceId ?? ""}`);
     if (dirty !== undefined) field.value = dirty;
   });
   bindControls();
@@ -340,23 +337,6 @@ function bindControls(): void {
     persist();
     render();
   }));
-  const kind = document.getElementById("scan-kind") as HTMLSelectElement | null;
-  const mode = document.getElementById("scan-mode") as HTMLSelectElement | null;
-  const agentOptions = document.getElementById("agent-scan-options");
-  const diffOptions = document.getElementById("diff-options");
-  const startScan = document.getElementById("start-scan");
-  const syncMode = () => {
-    if (!kind) return;
-    const agent = kind.value === "agent";
-    ui.scanMode = agent ? (mode?.value as PersistedState["scanMode"]) ?? "standard" : "fast";
-    persist();
-    agentOptions?.classList.toggle("hidden", !agent);
-    diffOptions?.classList.toggle("hidden", !agent || mode?.value !== "diff");
-    if (startScan) startScan.textContent = agent ? "Continue in Kiro Agent" : "Scan this repository";
-  };
-  kind?.addEventListener("change", syncMode);
-  mode?.addEventListener("change", syncMode);
-  syncMode();
   const filterInputs: Array<[string, keyof FindingFilters]> = [
     ["filter-query", "query"], ["filter-severity", "severity"], ["filter-confidence", "confidence"],
     ["filter-validation", "validation"], ["filter-triage", "triage"], ["filter-sort", "sort"],
@@ -398,6 +378,7 @@ async function handleAction(element: HTMLElement): Promise<void> {
   if (action === "settings") post({ type: "openSettings" });
   if (action === "logs") post({ type: "openLogs" });
   if (action === "copy-mcp") post({ type: "copyMcpConfig" });
+  if (action === "copy-power-path") post({ type: "copyPowerPath" });
   if (action === "install-agent") {
     const scope = (document.getElementById("agent-scope") as HTMLSelectElement | null)?.value ?? "workspace";
     const autoApprovePolicy = (document.getElementById("agent-auto-approve") as HTMLSelectElement | null)?.value ?? "read_only";
@@ -409,25 +390,9 @@ async function handleAction(element: HTMLElement): Promise<void> {
   if (action === "retry-engine") post({ type: "retryEngine" });
   if (action === "show-findings") { ui.tab = "findings"; persist(); render(); }
   if (action === "go-setup") { ui.tab = "setup"; persist(); render(); }
-  if (action === "start") {
-    const mode = ui.scanMode ?? "fast";
-    const scope = (document.getElementById("scan-scope") as HTMLInputElement)?.value ?? ".";
-    const message: any = { type: "startScan", mode: mode === "fast" ? "standard" : mode, scope, analysisProfile: mode === "fast" ? "fast" : "model" };
-    if (mode === "diff") {
-      message.diffTargetKind = (document.getElementById("diff-kind") as HTMLSelectElement)?.value ?? "working_tree";
-      const base = (document.getElementById("diff-base") as HTMLInputElement)?.value;
-      const head = (document.getElementById("diff-head") as HTMLInputElement)?.value;
-      if (base) message.diffBaseRevision = base;
-      if (head) message.diffHeadRevision = head;
-    }
-    post(message);
-  }
-  if (action === "resume") post({ type: "resumeScan", scanId: element.dataset.scanId });
-  if (action === "cancel") post({ type: "cancelScan", scanId: element.dataset.scanId });
   if (action === "select-scan") { ui.tab = "dashboard"; persist(); post({ type: "selectScan", scanId: element.dataset.scanId }); }
   if (action === "finding") post({ type: "openFinding", occurrenceId: element.dataset.occurrenceId });
   if (action === "open-source") post({ type: "openSource", occurrenceId: element.dataset.occurrenceId });
-  if (action === "validate") post({ type: "validateFinding", occurrenceId: element.dataset.occurrenceId });
   if (action === "triage") {
     const decision = element.dataset.decision ?? (document.getElementById("triage-decision") as HTMLSelectElement | null)?.value;
     const noteInput = document.getElementById("triage-note") as HTMLTextAreaElement | null;
@@ -441,7 +406,6 @@ async function handleAction(element: HTMLElement): Promise<void> {
   }
   if (action === "remediation") post({ type: "createRemediation", occurrenceId: element.dataset.occurrenceId });
   if (action === "tracking") post({ type: "createTrackingHandoff", occurrenceId: element.dataset.occurrenceId, provider: element.dataset.provider });
-  if (action === "hardening") post({ type: "createHardening", scanId: element.dataset.scanId });
   if (action === "cleanup") post({ type: "cleanupScan", scanId: element.dataset.scanId });
   if (action === "artifact") post({ type: "openArtifact", path: element.dataset.path });
   if (action === "copy-link") post({ type: "copyFindingLink", occurrenceId: element.dataset.occurrenceId });

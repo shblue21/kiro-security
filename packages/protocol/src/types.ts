@@ -45,7 +45,7 @@ export interface AgentIntegrationStatus {
     prepared: boolean;
     preparedPath?: string;
     manifestValid: boolean;
-    registration: "not_prepared" | "import_required" | "user_confirmed" | "detected";
+    registration: "not_prepared" | "import_required" | "detected";
     importRequiresKiroConfirmation: boolean;
   };
   autoApprovePolicy?: AgentAutoApprovePolicy;
@@ -61,7 +61,6 @@ export interface ProgressRecord {
   review_items_total: number;
   review_items_completed: number;
   reportable_findings_count: number;
-  deep_review_pass: number | null;
   message: string | null;
   updated_at: string;
 }
@@ -84,14 +83,14 @@ export interface ScanRecord {
   diff_target_kind: "working_tree" | "commit" | "range" | null;
   diff_base_revision: string | null;
   diff_head_revision: string | null;
-  status: "queued" | "running" | "interrupted" | "completed" | "cancelled" | "failed";
+  status: "running" | "completed" | "cancelled" | "failed";
   phase: ScanPhase;
   phase_index: number;
   artifact_dir: string;
+  target_identity: string | null;
   target_revision: string | null;
   snapshot_digest: string | null;
   cancellation_requested: boolean;
-  handoff_state: "none" | "available" | "claimed";
   failure_code: string | null;
   failure_message: string | null;
   started_at: string | null;
@@ -104,6 +103,12 @@ export interface ScanRecord {
   artifacts: ArtifactRecord[];
   coverage?: CoverageDocument | null;
   capabilities?: Record<string, unknown> | null;
+  coordinatorLease?: {
+    state: "acquired" | "busy" | "available" | "released";
+    token?: string;
+    generation?: number;
+    expiresAt?: string;
+  };
 }
 
 export interface FindingLocation {
@@ -205,44 +210,31 @@ export interface FindingDetail extends FindingSummary {
   relatedFindings: FindingSummary[];
 }
 
-export type CoverageDisposition = "reportable" | "suppressed" | "not_applicable" | "deferred";
+export type CoverageDisposition = "reported" | "no_issue_found" | "rejected" | "not_applicable" | "needs_follow_up";
 
 export interface CoverageSurfaceReceipt {
   id: string;
-  rowId: string;
-  path: string;
   label: string;
-  surface: string;
-  entrypoint?: string;
-  rootControl?: string;
-  sink?: string;
   disposition: CoverageDisposition;
-  reason: string;
-  receiptDigest: string;
-  receiptRefs: [string];
-  evidenceRefs: string[];
-  candidateIds: string[];
-  workerId: string | null;
+  receiptRefs: string[];
+  riskArea?: string;
+  notes?: string;
 }
 
 export interface CoverageDocument {
   documentType: "kiro-security-power.coverage";
   schemaVersion: "1.0";
   scanId: string;
-  mode: string;
+  mode: "repository" | "scoped_path" | "diff" | "commit" | "branch_diff" | "working_tree" | "deep_repository";
   completeness: "complete" | "partial" | "unknown";
-  inventoryStrategy: string;
+  inventoryStrategy: "repository" | "scoped_path" | "diff" | "directory" | "custom";
   includePaths: string[];
   excludePaths: string[];
-  supportedFileCount: number;
-  inScopeRowCount: number;
-  closedRowCount: number;
-  deepStatus: "awaiting_workers" | "awaiting_merge" | "saturated" | "capped" | null;
   surfaces: CoverageSurfaceReceipt[];
-  unclosedRows: Array<{ rowId: string; path: string; surface: string; reason: string }>;
   explicitExclusions: Array<{ pattern: string; reason: string }>;
-  deferred: Array<{ id: string; rowId: string; path: string; reason: string; receiptDigest: string }>;
-  openQuestions: Array<{ question: string; followUpPrompt?: string }>;
+  deferred: Array<{ id: string; reason: string; paths?: string[]; surfaceIds?: string[] }>;
+  openQuestions?: Array<{ question: string; followUpPrompt?: string }>;
+  extensions?: { capped?: boolean };
 }
 
 export interface DashboardState {
@@ -258,7 +250,6 @@ export interface DashboardState {
   selectedScan: ScanRecord | null;
   scans: ScanRecord[];
   findings: FindingSummary[];
-  latestResumableScan: ScanRecord | null;
 }
 
 export interface EngineCapabilities {
@@ -335,17 +326,12 @@ export type EngineEventName =
 export type WebviewMessage =
   | { type: "ready" }
   | { type: "refresh" }
-  | { type: "startScan"; mode: ScanMode; scope: string; analysisProfile?: "fast" | "model"; diffTargetKind?: "working_tree" | "commit" | "range"; diffBaseRevision?: string; diffHeadRevision?: string }
-  | { type: "resumeScan"; scanId: string }
-  | { type: "cancelScan"; scanId: string }
   | { type: "selectScan"; scanId: string }
   | { type: "openFinding"; occurrenceId: string }
   | { type: "openSource"; occurrenceId: string }
-  | { type: "validateFinding"; occurrenceId: string }
   | { type: "triageFinding"; occurrenceId: string; decision: TriageDecision; note?: string }
   | { type: "createRemediation"; occurrenceId: string }
   | { type: "createTrackingHandoff"; occurrenceId: string; provider: TrackingProvider }
-  | { type: "createHardening"; scanId: string }
   | { type: "cleanupScan"; scanId: string }
   | { type: "exportReport"; scanId: string; format: ExportFormat }
   | { type: "exportFinding"; occurrenceId: string; format: ExportFormat }
@@ -354,6 +340,7 @@ export type WebviewMessage =
   | { type: "openSettings" }
   | { type: "openLogs" }
   | { type: "copyMcpConfig" }
+  | { type: "copyPowerPath" }
   | { type: "installAgentIntegration"; scope: AgentIntegrationScope; autoApprovePolicy: AgentAutoApprovePolicy }
   | { type: "verifyAgentIntegration" }
   | { type: "removeAgentIntegration" }

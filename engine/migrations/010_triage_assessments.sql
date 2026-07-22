@@ -4,7 +4,7 @@ CREATE TABLE triage_assessments (
     input_id TEXT NOT NULL,
     source_type TEXT NOT NULL CHECK (source_type IN (
         'sarif','cve','advisory','scanner_ticket','bug_bounty',
-        'codex_security_finding','freeform','unknown'
+        'kiro_security_finding','freeform','unknown'
     )),
     status TEXT NOT NULL CHECK (status IN ('pending','completed','failed')),
     intake_json TEXT NOT NULL,

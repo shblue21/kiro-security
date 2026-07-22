@@ -4,12 +4,10 @@ from .constants import PHASES, TERMINAL_SCAN_STATUSES
 from .errors import EngineError
 
 _ALLOWED_STATUS_TRANSITIONS: dict[str, set[str]] = {
-    "queued": {"running", "cancelled", "failed"},
-    "running": {"interrupted", "completed", "cancelled", "failed"},
-    "interrupted": {"running", "cancelled", "failed"},
+    "running": {"completed", "cancelled", "failed"},
     "completed": set(),
     "cancelled": set(),
-    "failed": {"running"},
+    "failed": set(),
 }
 
 
@@ -31,14 +29,12 @@ def phase_index(phase: str) -> int:
         raise EngineError("invalid_phase", f"Unknown scan phase: {phase}") from exc
 
 
-def require_phase_transition(current: str, target: str, *, resuming: bool = False) -> None:
+def require_phase_transition(current: str, target: str) -> None:
     current_index = phase_index(current)
     target_index = phase_index(target)
     if target_index == current_index:
         return
     if target_index == current_index + 1:
-        return
-    if resuming and target_index == current_index:
         return
     raise EngineError(
         "invalid_phase_transition",
