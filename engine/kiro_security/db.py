@@ -7,6 +7,7 @@ import shutil
 import sqlite3
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
@@ -56,6 +57,21 @@ def _coordinator_token() -> str:
 
 def _coordinator_token_hash(token: str) -> str:
     return sha256_bytes(token.encode("utf-8"))
+
+
+def _updated_after(current: str) -> str:
+    """Return a workspace version timestamp strictly newer than ``current``."""
+    candidate = datetime.now(timezone.utc)
+    try:
+        previous = datetime.fromisoformat(current.replace("Z", "+00:00"))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise EngineError(
+            "legacy_workspace_incompatible",
+            "The workspace configuration version is invalid.",
+        ) from exc
+    if candidate <= previous:
+        candidate = previous + timedelta(milliseconds=1)
+    return candidate.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 class Workbench:
@@ -130,7 +146,10 @@ class Workbench:
             ).fetchall()
         ]
         for table in tables:
-            if table == "scans":
+            # workspaces.active_scan_id is the current-result pointer, not a
+            # scan-owned child row. v13 may intentionally split legacy
+            # repository workspaces by immutable scan setup.
+            if table in ("scans", "workspaces"):
                 continue
             if any(row[2] == "scans" for row in connection.execute(f'PRAGMA foreign_key_list("{table}")')):
                 counts[table] = int(connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
@@ -245,6 +264,272 @@ class Workbench:
                 )
         cls._create_coordinator_lease_table(connection)
 
+    @classmethod
+    def _apply_lifecycle_authority_migration(cls, connection: sqlite3.Connection) -> None:
+        """Move lifecycle configuration to workspace and scan columns.
+
+        The legacy JSON value is consulted only to migrate the optional user
+        context.  Existing mode, scope, Diff, target, and lifecycle columns are
+        copied verbatim and remain authoritative throughout the rebuild.
+        """
+
+        workspace_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(workspaces)")
+        }
+        for name, declaration in (
+            ("user_context", "TEXT"),
+            (
+                "diff_target_kind",
+                "TEXT CHECK (diff_target_kind IN ('working_tree','commit','range'))",
+            ),
+            ("diff_base_revision", "TEXT"),
+            ("diff_head_revision", "TEXT"),
+        ):
+            if name not in workspace_columns:
+                connection.execute(
+                    f'ALTER TABLE workspaces ADD COLUMN "{name}" {declaration}'
+                )
+
+        scan_columns = {row[1] for row in connection.execute("PRAGMA table_info(scans)")}
+        required_columns = {
+            "id", "workspace_id", "mode", "scope", "diff_target_kind",
+            "diff_base_revision", "diff_head_revision", "status", "phase",
+            "phase_index", "artifact_dir", "target_identity", "target_revision",
+            "snapshot_digest", "cancellation_requested", "failure_code",
+            "failure_message", "started_at", "completed_at", "created_at",
+            "updated_at", "sealed_manifest_digest", "target_device", "target_inode",
+            "files_total", "files_completed", "coverage_json",
+        }
+        missing = sorted(required_columns - scan_columns)
+        if missing:
+            raise EngineError(
+                "legacy_scan_incompatible",
+                "The existing scan schema cannot be converted to column-owned lifecycle state.",
+                {"missingColumns": missing},
+            )
+
+        user_contexts: dict[str, str | None] = {}
+        if "capability_json" in scan_columns:
+            rows = connection.execute(
+                "SELECT id, capability_json FROM scans ORDER BY id"
+            ).fetchall()
+            for row in rows:
+                raw = row["capability_json"]
+                if raw is None:
+                    user_contexts[row["id"]] = None
+                    continue
+                try:
+                    value = json.loads(raw)
+                except (TypeError, json.JSONDecodeError) as exc:
+                    raise EngineError(
+                        "legacy_scan_incompatible",
+                        "A legacy scan has user context that cannot be converted safely.",
+                        {"scanId": row["id"]},
+                    ) from exc
+                context = value.get("userContext") if isinstance(value, dict) else object()
+                if context is not None and (
+                    not isinstance(context, str)
+                    or len(context) > 4000
+                    or "\x00" in context
+                ):
+                    raise EngineError(
+                        "legacy_scan_incompatible",
+                        "A legacy scan has user context that cannot be converted safely.",
+                        {"scanId": row["id"]},
+                    )
+                user_contexts[row["id"]] = context
+        elif "user_context" in scan_columns:
+            user_contexts = {
+                row["id"]: row["user_context"]
+                for row in connection.execute(
+                    "SELECT id, user_context FROM scans ORDER BY id"
+                ).fetchall()
+            }
+        else:
+            user_contexts = {
+                row["id"]: None
+                for row in connection.execute("SELECT id FROM scans ORDER BY id").fetchall()
+            }
+
+        before = cls._scan_child_row_counts(connection)
+        objects = [
+            (row[0], row[1], row[2])
+            for row in connection.execute(
+                """
+                SELECT type, name, sql FROM sqlite_master
+                WHERE tbl_name='scans' AND type IN ('index','trigger') AND sql IS NOT NULL
+                ORDER BY type, name
+                """
+            ).fetchall()
+        ]
+        connection.execute(
+            """
+            CREATE TABLE scans_v013 (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                mode TEXT NOT NULL CHECK (mode IN ('diff','standard','deep')),
+                scope TEXT NOT NULL,
+                user_context TEXT,
+                diff_target_kind TEXT CHECK (diff_target_kind IN ('working_tree','commit','range')),
+                diff_base_revision TEXT,
+                diff_head_revision TEXT,
+                diff_content_digest TEXT,
+                status TEXT NOT NULL CHECK (status IN ('running','completed','cancelled','failed')),
+                phase TEXT NOT NULL CHECK (phase IN ('preflight','threat_model','discovery','validation','attack_path','reporting')),
+                phase_index INTEGER NOT NULL DEFAULT 0 CHECK (phase_index BETWEEN 0 AND 5),
+                artifact_dir TEXT NOT NULL UNIQUE,
+                target_identity TEXT,
+                target_revision TEXT,
+                snapshot_digest TEXT,
+                cancellation_requested INTEGER NOT NULL DEFAULT 0 CHECK (cancellation_requested IN (0,1)),
+                failure_code TEXT,
+                failure_message TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                sealed_manifest_digest TEXT,
+                target_device INTEGER,
+                target_inode INTEGER,
+                files_total INTEGER NOT NULL DEFAULT 0,
+                files_completed INTEGER NOT NULL DEFAULT 0,
+                coverage_json TEXT
+            )
+            """
+        )
+        source_user_context = "user_context" if "user_context" in scan_columns else "NULL"
+        connection.execute(
+            f"""
+            INSERT INTO scans_v013(
+                id,workspace_id,mode,scope,user_context,diff_target_kind,
+                diff_base_revision,diff_head_revision,diff_content_digest,status,phase,phase_index,
+                artifact_dir,target_identity,target_revision,snapshot_digest,
+                cancellation_requested,failure_code,failure_message,started_at,
+                completed_at,created_at,updated_at,sealed_manifest_digest,
+                target_device,target_inode,files_total,files_completed,coverage_json
+            )
+            SELECT
+                id,workspace_id,mode,scope,{source_user_context},diff_target_kind,
+                diff_base_revision,diff_head_revision,NULL,status,phase,phase_index,
+                artifact_dir,target_identity,target_revision,snapshot_digest,
+                cancellation_requested,failure_code,failure_message,started_at,
+                completed_at,created_at,updated_at,sealed_manifest_digest,
+                target_device,target_inode,files_total,files_completed,coverage_json
+            FROM scans
+            """
+        )
+        connection.executemany(
+            "UPDATE scans_v013 SET user_context=? WHERE id=?",
+            [(context, scan_id) for scan_id, context in user_contexts.items()],
+        )
+        connection.execute("DROP TABLE scans")
+        connection.execute("ALTER TABLE scans_v013 RENAME TO scans")
+        for _object_type, _name, sql in objects:
+            connection.execute(sql)
+
+        # A Codex workspace is one immutable submitted setup, not a repository.
+        # Legacy Kiro databases stored every setup under one root-keyed row, so
+        # split its scan history by the scan-row configuration that was already
+        # authoritative.  No legacy JSON value may rewrite those rows.
+        legacy_workspaces = [
+            dict(row) for row in connection.execute(
+                "SELECT * FROM workspaces ORDER BY created_at, id"
+            ).fetchall()
+        ]
+        connection.execute(
+            """
+            CREATE TABLE workspaces_v013 (
+                id TEXT PRIMARY KEY,
+                thread_id TEXT,
+                root_path TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                target_summary TEXT,
+                default_scope TEXT NOT NULL DEFAULT '.',
+                default_mode TEXT NOT NULL DEFAULT 'standard'
+                    CHECK (default_mode IN ('diff','standard','deep')),
+                user_context TEXT,
+                diff_target_kind TEXT
+                    CHECK (diff_target_kind IN ('working_tree','commit','range')),
+                diff_base_revision TEXT,
+                diff_head_revision TEXT,
+                diff_content_digest TEXT,
+                diff_resolution_id TEXT,
+                submitted INTEGER NOT NULL DEFAULT 0 CHECK (submitted IN (0,1)),
+                active_scan_id TEXT REFERENCES scans(id) ON DELETE SET NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        for legacy in legacy_workspaces:
+            scan_rows = [
+                dict(row) for row in connection.execute(
+                    "SELECT * FROM scans WHERE workspace_id=? ORDER BY created_at, id",
+                    (legacy["id"],),
+                ).fetchall()
+            ]
+            groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+            for scan in scan_rows:
+                configuration = (
+                    scan["mode"], scan["scope"], scan["user_context"],
+                    scan["diff_target_kind"], scan["diff_base_revision"],
+                    scan["diff_head_revision"], scan["diff_content_digest"],
+                )
+                groups.setdefault(configuration, []).append(scan)
+            if not groups:
+                groups[(
+                    legacy["default_mode"], legacy["default_scope"],
+                    legacy.get("user_context"), legacy.get("diff_target_kind"),
+                    legacy.get("diff_base_revision"), legacy.get("diff_head_revision"),
+                    None,
+                )] = []
+
+            owner = legacy.get("thread_id") or f"legacy:{legacy['id']}"
+            for configuration, grouped_scans in groups.items():
+                workspace_id = str(uuid.uuid4())
+                current = next(
+                    (scan for scan in grouped_scans if scan["status"] == "running"),
+                    grouped_scans[-1] if grouped_scans else None,
+                )
+                created_at = grouped_scans[0]["created_at"] if grouped_scans else legacy["created_at"]
+                updated_at = current["updated_at"] if current else legacy["updated_at"]
+                connection.execute(
+                    """
+                    INSERT INTO workspaces_v013(
+                        id,thread_id,root_path,display_name,target_summary,
+                        default_mode,default_scope,user_context,diff_target_kind,
+                        diff_base_revision,diff_head_revision,diff_content_digest,
+                        diff_resolution_id,submitted,active_scan_id,created_at,updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
+                    """,
+                    (
+                        workspace_id, owner, legacy["root_path"], legacy["display_name"],
+                        legacy.get("target_summary"), *configuration,
+                        1 if grouped_scans else int(legacy.get("submitted") or 0),
+                        current["id"] if current else None, created_at, updated_at,
+                    ),
+                )
+                if grouped_scans:
+                    connection.executemany(
+                        "UPDATE scans SET workspace_id=? WHERE id=?",
+                        [(workspace_id, scan["id"]) for scan in grouped_scans],
+                    )
+        connection.execute("DROP TABLE workspaces")
+        connection.execute("ALTER TABLE workspaces_v013 RENAME TO workspaces")
+        connection.execute(
+            "CREATE INDEX workspaces_by_root_and_updated_at ON workspaces(root_path, updated_at DESC)"
+        )
+        connection.execute(
+            "CREATE INDEX workspaces_by_thread_and_updated_at ON workspaces(thread_id, updated_at DESC)"
+        )
+        after = cls._scan_child_row_counts(connection)
+        if before != after:
+            raise EngineError(
+                "migration_row_count_changed",
+                "The lifecycle-authority migration changed scan or child-table row counts.",
+                {"before": before, "after": after},
+            )
+
     def apply_migrations(self) -> None:
         migration_files = sorted(self.migrations_dir.glob("[0-9][0-9][0-9]_*.sql"))
         if not migration_files:
@@ -286,6 +571,8 @@ class Workbench:
                 migration_name = path.name
                 if version == 12:
                     self._apply_scan_coordinator_lease_migration(connection)
+                elif version == 13:
+                    self._apply_lifecycle_authority_migration(connection)
                 else:
                     sql = path.read_text(encoding="utf-8")
                     for statement in _sql_statements(sql):
@@ -617,31 +904,155 @@ class Workbench:
                 pass
         return issues
 
-    def register_workspace(self, root: Path, *, default_scope: str = ".", default_mode: str = "standard") -> dict[str, Any]:
-        workspace_id = stable_id("ws", str(root))
+    @staticmethod
+    def _new_workspace_id() -> str:
+        return str(uuid.uuid4())
+
+    def create_workspace(self, root: Path, *, thread_id: str | None = None) -> dict[str, Any]:
         timestamp = utc_now()
+        workspace_id = self._new_workspace_id()
         with self.transaction() as connection:
             connection.execute(
                 """
-                INSERT INTO workspaces(id, root_path, display_name, default_scope, default_mode, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(root_path) DO UPDATE SET display_name=excluded.display_name,
-                    default_scope=excluded.default_scope, default_mode=excluded.default_mode, updated_at=excluded.updated_at
+                INSERT INTO workspaces(
+                    id,thread_id,root_path,display_name,created_at,updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (workspace_id, str(root), root.name or str(root), default_scope, default_mode, timestamp, timestamp),
+                (
+                    workspace_id, thread_id, str(root), root.name or str(root),
+                    timestamp, timestamp,
+                ),
             )
-            row = connection.execute("SELECT * FROM workspaces WHERE root_path=?", (str(root),)).fetchone()
+            row = connection.execute(
+                "SELECT * FROM workspaces WHERE id=?", (workspace_id,)
+            ).fetchone()
         return dict(row)
 
-    def get_workspace(self) -> dict[str, Any]:
+    def register_workspace(self, root: Path, *, thread_id: str | None = None) -> dict[str, Any]:
+        """Read/adopt a logical workspace without mutating its saved setup."""
+        with self.transaction() as connection:
+            row = connection.execute(
+                """
+                SELECT w.* FROM workspaces w
+                LEFT JOIN scans s ON s.id=w.active_scan_id
+                WHERE w.root_path=? AND (? IS NULL OR w.thread_id=?)
+                ORDER BY CASE WHEN s.status='running' THEN 0 ELSE 1 END,
+                         w.updated_at DESC, w.created_at DESC
+                LIMIT 1
+                """,
+                (str(root), thread_id, thread_id),
+            ).fetchone()
+            if row is None:
+                timestamp = utc_now()
+                workspace_id = self._new_workspace_id()
+                connection.execute(
+                    """
+                    INSERT INTO workspaces(
+                        id,thread_id,root_path,display_name,created_at,updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        workspace_id, thread_id, str(root), root.name or str(root),
+                        timestamp, timestamp,
+                    ),
+                )
+                row = connection.execute(
+                    "SELECT * FROM workspaces WHERE id=?", (workspace_id,)
+                ).fetchone()
+        return dict(row)
+
+    def get_workspace(
+        self, workspace_id: str | None = None, *, thread_id: str | None = None
+    ) -> dict[str, Any]:
         connection = self._connect()
         try:
-            row = connection.execute("SELECT * FROM workspaces WHERE root_path=?", (str(self.workspace),)).fetchone()
+            if workspace_id is not None:
+                row = connection.execute(
+                    "SELECT * FROM workspaces WHERE id=?", (workspace_id,)
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    """
+                    SELECT w.* FROM workspaces w
+                    LEFT JOIN scans s ON s.id=w.active_scan_id
+                    WHERE w.root_path=? AND (? IS NULL OR w.thread_id=?)
+                    ORDER BY CASE WHEN s.status='running' THEN 0 ELSE 1 END,
+                             w.updated_at DESC, w.created_at DESC
+                    LIMIT 1
+                    """,
+                    (str(self.workspace), thread_id, thread_id),
+                ).fetchone()
             if row is None:
-                return self.register_workspace(self.workspace)
+                raise EngineError("workspace_not_found", "The logical security workspace was not found.")
+            if thread_id is not None and row["thread_id"] != thread_id:
+                raise EngineError(
+                    "workspace_not_found",
+                    "The logical security workspace does not belong to this task.",
+                )
             return dict(row)
         finally:
             connection.close()
+
+    @staticmethod
+    def workspace_configuration(row: dict[str, Any] | sqlite3.Row) -> tuple[Any, ...]:
+        return (
+            row["default_mode"], row["default_scope"], row["user_context"],
+            row["diff_target_kind"], row["diff_base_revision"], row["diff_head_revision"],
+            row["diff_content_digest"],
+        )
+
+    def save_workspace(
+        self,
+        workspace_id: str,
+        *,
+        mode: str,
+        scope: str,
+        user_context: str | None,
+        diff_target_kind: str | None,
+        diff_base_revision: str | None,
+        diff_head_revision: str | None,
+        diff_content_digest: str | None = None,
+    ) -> dict[str, Any]:
+        requested = (
+            mode, scope, user_context, diff_target_kind,
+            diff_base_revision, diff_head_revision, diff_content_digest,
+        )
+        with self.transaction() as connection:
+            self._require_workspace_scan_invariants(connection, workspace_id)
+            workspace = connection.execute(
+                "SELECT * FROM workspaces WHERE id=?", (workspace_id,)
+            ).fetchone()
+            if workspace is None:
+                raise EngineError("workspace_not_found", f"Workspace not found: {workspace_id}")
+            if workspace["active_scan_id"] is not None:
+                raise EngineError(
+                    "workspace_setup_locked",
+                    "This workspace already has a scan. Open a new workspace to change setup.",
+                    {"workspaceId": workspace_id, "activeScanId": workspace["active_scan_id"]},
+                )
+            timestamp = _updated_after(workspace["updated_at"])
+            updated = connection.execute(
+                """
+                UPDATE workspaces
+                SET default_mode=?, default_scope=?, user_context=?, diff_target_kind=?,
+                    diff_base_revision=?, diff_head_revision=?, diff_content_digest=?,
+                    submitted=1, updated_at=?
+                WHERE id=? AND active_scan_id IS NULL
+                """,
+                (*requested, timestamp, workspace_id),
+            )
+            if updated.rowcount != 1:
+                raise EngineError(
+                    "workspace_setup_locked",
+                    "This workspace already has a scan. Open a new workspace to change setup.",
+                )
+            workspace = connection.execute(
+                "SELECT * FROM workspaces WHERE id=?", (workspace_id,)
+            ).fetchone()
+        return dict(workspace)
+
+    # Backwards-compatible Engine name; it now has Codex save-workspace semantics.
+    configure_workspace = save_workspace
 
     @staticmethod
     def _require_workspace_scan_invariants(
@@ -661,10 +1072,21 @@ class Workbench:
         if workspace_id is not None and not rows:
             raise EngineError("workspace_not_found", f"Workspace not found: {workspace_id}")
         for row in rows:
-            if int(row["running_count"]) > 1 or row["active_scan_id"] != row["running_id"]:
+            active_belongs = (
+                row["active_scan_id"] is None
+                or connection.execute(
+                    "SELECT 1 FROM scans WHERE id=? AND workspace_id=?",
+                    (row["active_scan_id"], row["id"]),
+                ).fetchone() is not None
+            )
+            if (
+                int(row["running_count"]) > 1
+                or not active_belongs
+                or (row["running_id"] is not None and row["active_scan_id"] != row["running_id"])
+            ):
                 raise EngineError(
                     "workspace_scan_invariant",
-                    "The workspace active scan pointer does not match its running scan.",
+                    "The workspace current-result pointer is inconsistent with its scan rows.",
                     {
                         "workspaceId": row["id"],
                         "activeScanId": row["active_scan_id"],
@@ -673,66 +1095,6 @@ class Workbench:
                     },
                 )
         return rows[0]["running_id"] if workspace_id is not None else None
-
-    @staticmethod
-    def _scan_start_contract(scan: dict[str, Any] | sqlite3.Row) -> dict[str, Any]:
-        raw_capabilities = scan.get("capabilities") if isinstance(scan, dict) else None
-        if raw_capabilities is None:
-            raw = scan.get("capability_json") if isinstance(scan, dict) else scan["capability_json"]
-            try:
-                raw_capabilities = json.loads(raw) if raw else None
-            except (TypeError, json.JSONDecodeError) as exc:
-                raise EngineError(
-                    "legacy_scan_incompatible",
-                    "The running scan has no valid immutable startContract and cannot be reused.",
-                    {"scanId": scan["id"]},
-                ) from exc
-        contract = raw_capabilities.get("startContract") if isinstance(raw_capabilities, dict) else None
-        required = {
-            "mode", "scope", "diffTargetKind", "diffBaseRevision", "diffHeadRevision",
-            "maxFiles", "maxFileBytes", "userContext",
-        }
-        valid = (
-            isinstance(contract, dict)
-            and set(contract) == required
-            and contract.get("mode") in ("standard", "deep", "diff")
-            and isinstance(contract.get("scope"), str)
-            and bool(contract.get("scope"))
-            and (contract.get("diffTargetKind") is None or contract.get("diffTargetKind") in ("working_tree", "commit", "range"))
-            and (contract.get("diffBaseRevision") is None or isinstance(contract.get("diffBaseRevision"), str))
-            and (contract.get("diffHeadRevision") is None or isinstance(contract.get("diffHeadRevision"), str))
-            and isinstance(contract.get("maxFiles"), int)
-            and not isinstance(contract.get("maxFiles"), bool)
-            and contract["maxFiles"] >= 1
-            and isinstance(contract.get("maxFileBytes"), int)
-            and not isinstance(contract.get("maxFileBytes"), bool)
-            and contract["maxFileBytes"] >= 1
-            and (contract.get("userContext") is None or isinstance(contract.get("userContext"), str))
-        )
-        if not valid:
-            raise EngineError(
-                "legacy_scan_incompatible",
-                "The running scan has no valid immutable startContract and cannot be reused.",
-                {"scanId": scan["id"]},
-            )
-        return contract
-
-    @classmethod
-    def _require_matching_start_contract(
-        cls, scan: dict[str, Any] | sqlite3.Row, requested: dict[str, Any]
-    ) -> None:
-        if cls._scan_start_contract(scan) == requested:
-            return
-        raise EngineError(
-            "scan_already_running",
-            "Another scan with a different immutable request is already running in this workspace.",
-            {
-                "scanId": scan["id"],
-                "mode": scan["mode"],
-                "scope": scan["scope"],
-                "diffTargetKind": scan["diff_target_kind"],
-            },
-        )
 
     def running_scan_for_workspace(self, workspace_id: str) -> dict[str, Any] | None:
         connection = self._connect()
@@ -795,7 +1157,6 @@ class Workbench:
             raise EngineError("scan_not_found", f"Scan not found: {scan_id}")
         if scan["status"] != "running":
             raise EngineError("scan_not_running", f"Scan {scan_id} is {scan['status']}.")
-        cls._scan_start_contract(scan)
         running_id = cls._require_workspace_scan_invariants(connection, scan["workspace_id"])
         if running_id != scan_id:
             raise EngineError(
@@ -934,27 +1295,42 @@ class Workbench:
         self,
         *,
         workspace_id: str,
-        mode: str,
-        scope: str,
         artifact_dir: Path | None,
         session_id: str,
-        capabilities: dict[str, Any],
         setup_scan: Callable[[dict[str, Any]], dict[str, Any]],
-        diff_target_kind: str | None = None,
-        diff_base_revision: str | None = None,
-        diff_head_revision: str | None = None,
     ) -> tuple[dict[str, Any], bool]:
-        start_contract = capabilities["startContract"]
         with self.transaction(immediate=False) as connection:
             running_id = self._require_workspace_scan_invariants(connection, workspace_id)
             active = connection.execute(
                 "SELECT * FROM scans WHERE id=?", (running_id,)
             ).fetchone() if running_id is not None else None
             if active is not None:
-                self._require_matching_start_contract(active, start_contract)
                 return self._scan_with_lease_state(
                     self._get_scan(connection, active["id"]), connection=connection
                 ), False
+
+        with self.transaction() as connection:
+            running_id = self._require_workspace_scan_invariants(connection, workspace_id)
+            active = connection.execute(
+                "SELECT * FROM scans WHERE id=?", (running_id,)
+            ).fetchone() if running_id is not None else None
+            if active is not None:
+                return self._scan_with_lease_state(
+                    self._get_scan(connection, active["id"]), connection=connection
+                ), False
+            workspace = connection.execute(
+                "SELECT * FROM workspaces WHERE id=?", (workspace_id,)
+            ).fetchone()
+            if workspace is None:
+                raise EngineError("workspace_not_found", f"Workspace not found: {workspace_id}")
+            if not bool(workspace["submitted"]):
+                raise EngineError(
+                    "workspace_setup_required",
+                    "Save the security workspace setup before starting a scan.",
+                    {"workspaceId": workspace_id},
+                )
+            setup_workspace = dict(workspace)
+        setup_version = setup_workspace["updated_at"]
         scan_id = random_id("scan")
         lease_token = _coordinator_token()
         lease_token_hash = _coordinator_token_hash(lease_token)
@@ -970,13 +1346,14 @@ class Workbench:
         draft = {
             "id": scan_id,
             "workspace_id": workspace_id,
-            "mode": mode,
-            "scope": scope,
-            "diff_target_kind": diff_target_kind,
-            "diff_base_revision": diff_base_revision,
-            "diff_head_revision": diff_head_revision,
+            "mode": setup_workspace["default_mode"],
+            "scope": setup_workspace["default_scope"],
+            "user_context": setup_workspace["user_context"],
+            "diff_target_kind": setup_workspace["diff_target_kind"],
+            "diff_base_revision": setup_workspace["diff_base_revision"],
+            "diff_head_revision": setup_workspace["diff_head_revision"],
+            "diff_content_digest": setup_workspace["diff_content_digest"],
             "artifact_dir": str(artifact_dir),
-            "capabilities": capabilities,
             "started_at": timestamp,
         }
         try:
@@ -990,27 +1367,43 @@ class Workbench:
                 running_id = self._require_workspace_scan_invariants(connection, workspace_id)
                 active = connection.execute("SELECT * FROM scans WHERE id=?", (running_id,)).fetchone() if running_id else None
                 if active is not None:
-                    self._require_matching_start_contract(active, start_contract)
                     existing_scan = self._scan_with_lease_state(
                         self._get_scan(connection, active["id"]), connection=connection
                     )
                 else:
+                    workspace = connection.execute(
+                        "SELECT * FROM workspaces WHERE id=?", (workspace_id,)
+                    ).fetchone()
+                    if workspace is None:
+                        raise EngineError("workspace_not_found", f"Workspace not found: {workspace_id}")
+                    if (
+                        workspace["updated_at"] != setup_version
+                        or not bool(workspace["submitted"])
+                    ):
+                        raise EngineError(
+                            "scan_setup_changed",
+                            "Workspace scan configuration changed while setup was running. Try again.",
+                            {"workspaceId": workspace_id},
+                        )
                     connection.execute(
                         """
                         INSERT INTO scans(
-                            id, workspace_id, mode, scope, diff_target_kind, diff_base_revision, diff_head_revision,
+                            id, workspace_id, mode, scope, user_context,
+                            diff_target_kind, diff_base_revision, diff_head_revision,
+                            diff_content_digest,
                             status, phase, phase_index, artifact_dir,
                             started_at, created_at, updated_at, target_device, target_inode,
-                            target_identity, target_revision, snapshot_digest, capability_json,
-                            files_total, files_completed
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'running', 'preflight', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                            target_identity, target_revision, snapshot_digest, files_total, files_completed
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', 'preflight', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
                         """,
                         (
-                            scan_id, workspace_id, mode, scope, diff_target_kind,
+                            scan_id, workspace_id, workspace["default_mode"],
+                            workspace["default_scope"], workspace["user_context"],
+                            workspace["diff_target_kind"],
                             prepared.get("diffBaseRevision"), prepared.get("diffHeadRevision"),
+                            workspace["diff_content_digest"],
                             str(artifact_dir), timestamp, timestamp, timestamp, device, inode,
                             prepared["targetIdentity"], prepared.get("targetRevision"), prepared["snapshotDigest"],
-                            json.dumps(capabilities, separators=(",", ":"), allow_nan=False),
                             int(prepared["filesTotal"]),
                         ),
                     )
@@ -1078,10 +1471,6 @@ class Workbench:
             result["coverage"] = json.loads(result["coverage_json"])
         else:
             result["coverage"] = None
-        if result.get("capability_json"):
-            result["capabilities"] = json.loads(result["capability_json"])
-        else:
-            result["capabilities"] = None
         return result
 
     def get_scan(self, scan_id: str) -> dict[str, Any]:
@@ -1095,7 +1484,12 @@ class Workbench:
         connection = self._connect()
         try:
             rows = connection.execute(
-                "SELECT id FROM scans WHERE workspace_id=(SELECT id FROM workspaces WHERE root_path=?) ORDER BY created_at DESC LIMIT ?",
+                """
+                SELECT s.id FROM scans s
+                JOIN workspaces w ON w.id=s.workspace_id
+                WHERE w.root_path=?
+                ORDER BY s.created_at DESC LIMIT ?
+                """,
                 (str(self.workspace), max(1, min(limit, 200))),
             ).fetchall()
         finally:
@@ -1107,9 +1501,10 @@ class Workbench:
         try:
             row = connection.execute(
                 """
-                SELECT id FROM scans
-                WHERE workspace_id=(SELECT id FROM workspaces WHERE root_path=?) AND status='running'
-                ORDER BY created_at DESC LIMIT 1
+                SELECT s.id FROM scans s
+                JOIN workspaces w ON w.id=s.workspace_id
+                WHERE w.root_path=? AND s.status='running'
+                ORDER BY s.created_at DESC LIMIT 1
                 """,
                 (str(self.workspace),),
             ).fetchone()
@@ -1323,7 +1718,7 @@ class Workbench:
                 ),
             )
             connection.execute(
-                "UPDATE workspaces SET active_scan_id=NULL, updated_at=? WHERE id=? AND active_scan_id=?",
+                "UPDATE workspaces SET updated_at=? WHERE id=? AND active_scan_id=?",
                 (timestamp, row["workspace_id"], scan_id),
             )
             connection.execute("DELETE FROM scan_coordinator_leases WHERE scan_id=?", (scan_id,))
@@ -1481,7 +1876,7 @@ class Workbench:
             if updated.rowcount != 1:
                 raise EngineError("finalizer_wrong_state", "Only a running scan can be atomically completed and sealed.")
             connection.execute(
-                "UPDATE workspaces SET active_scan_id=NULL, updated_at=? WHERE id=? AND active_scan_id=?",
+                "UPDATE workspaces SET updated_at=? WHERE id=? AND active_scan_id=?",
                 (timestamp, scan["workspace_id"], scan_id),
             )
             connection.execute("DELETE FROM scan_coordinator_leases WHERE scan_id=?", (scan_id,))

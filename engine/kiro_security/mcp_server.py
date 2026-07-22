@@ -120,11 +120,13 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "security_start_scan",
-        "description": "Start a chat-coordinated Skill-driven Standard, Deep, or Git-diff scan and create its deterministic context and worklists.",
+        "description": "Start a scan in a new logical workspace, or rerun the immutable setup identified by sessionId.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "workspaceRoot": {"type": "string", "description": "Optional. Defaults to the workspace bound by the VSIX installer."},
+                "sessionId": {"type": "string", "description": "Optional logical workspace id returned by an earlier scan."},
+                "taskId": {"type": "string", "description": "Stable opaque identity for the current Kiro task; reuse it with sessionId."},
                 "mode": {"type": "string", "enum": ["standard", "deep", "diff"]},
                 "scope": {"type": "string", "minLength": 1, "default": "."},
                 "diffTargetKind": {"type": "string", "enum": ["working_tree", "commit", "range"]},
@@ -132,7 +134,7 @@ TOOLS: list[dict[str, Any]] = [
                 "diffHeadRevision": {"type": "string"},
                 "userContext": {"type": "string", "description": "Optional bounded user-supplied scan context."},
             },
-            "required": ["mode"],
+            "required": ["taskId", "mode"],
             "additionalProperties": False,
         },
     },
@@ -241,7 +243,7 @@ TOOLS: list[dict[str, Any]] = [
 ]
 
 _TOOL_STRING_LIMITS = {
-    "workspaceRoot": 8192, "mode": 16, "scope": 4096,
+    "workspaceRoot": 8192, "sessionId": 128, "taskId": 512, "mode": 16, "scope": 4096,
     "diffTargetKind": 32, "diffBaseRevision": 256, "diffHeadRevision": 256,
     "userContext": 4000, "scanId": 256, "reason": 4000, "phase": 32, "message": 1000,
     "search": 200, "occurrenceId": 256, "findingId": 256,
@@ -381,6 +383,9 @@ class McpServer:
                 raise ValueError("mode must be standard, deep, or diff.")
             scope = _bounded_string(params["scope"], "scope") if "scope" in params else "."
             request = {"mode": mode, "scope": scope}
+            if "sessionId" in params:
+                request["workspaceId"] = _bounded_string(params.get("sessionId"), "sessionId", 128)
+            request["taskId"] = _bounded_string(params.get("taskId"), "taskId", 512)
             if "userContext" in params:
                 request["userContext"] = _bounded_string(params.get("userContext"), "userContext", 4000)
             if mode == "diff":
@@ -394,7 +399,8 @@ class McpServer:
                         "diffHeadRevision": _safe_git_ref(params.get("diffHeadRevision"), "diffHeadRevision"),
                     }
                 )
-            return service.start_scan(request)
+            scan = service.start_scan(request)
+            return {**scan, "sessionId": scan["workspace_id"]}
         if name == "security_acquire_scan_coordinator":
             return service.acquire_scan_coordinator({"scanId": _bounded_string(params.get("scanId"), "scanId", 256)})
         if name == "security_renew_scan_coordinator":

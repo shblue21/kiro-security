@@ -1,10 +1,19 @@
 CREATE TABLE workspaces (
     id TEXT PRIMARY KEY,
-    root_path TEXT NOT NULL UNIQUE,
+    thread_id TEXT,
+    root_path TEXT NOT NULL,
     display_name TEXT NOT NULL,
+    target_summary TEXT,
     default_scope TEXT NOT NULL DEFAULT '.',
     default_mode TEXT NOT NULL DEFAULT 'standard' CHECK (default_mode IN ('diff','standard','deep')),
-    active_scan_id TEXT,
+    user_context TEXT,
+    diff_target_kind TEXT CHECK (diff_target_kind IN ('working_tree','commit','range')),
+    diff_base_revision TEXT,
+    diff_head_revision TEXT,
+    diff_content_digest TEXT,
+    diff_resolution_id TEXT,
+    submitted INTEGER NOT NULL DEFAULT 0 CHECK (submitted IN (0,1)),
+    active_scan_id TEXT REFERENCES scans(id) ON DELETE SET NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -14,9 +23,11 @@ CREATE TABLE scans (
     workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
     mode TEXT NOT NULL CHECK (mode IN ('diff','standard','deep')),
     scope TEXT NOT NULL,
+    user_context TEXT,
     diff_target_kind TEXT CHECK (diff_target_kind IN ('working_tree','commit','range')),
     diff_base_revision TEXT,
     diff_head_revision TEXT,
+    diff_content_digest TEXT,
     status TEXT NOT NULL CHECK (status IN ('running','completed','cancelled','failed')),
     phase TEXT NOT NULL CHECK (phase IN ('preflight','threat_model','discovery','validation','attack_path','reporting')),
     phase_index INTEGER NOT NULL DEFAULT 0 CHECK (phase_index BETWEEN 0 AND 5),
@@ -102,4 +113,6 @@ CREATE INDEX scans_by_workspace_updated ON scans(workspace_id, updated_at DESC);
 CREATE UNIQUE INDEX scans_one_running_per_workspace
 ON scans(workspace_id)
 WHERE status = 'running';
+CREATE INDEX workspaces_by_root_and_updated_at ON workspaces(root_path, updated_at DESC);
+CREATE INDEX workspaces_by_thread_and_updated_at ON workspaces(thread_id, updated_at DESC);
 CREATE INDEX occurrences_by_scan ON finding_occurrences(scan_id, severity, updated_at DESC);

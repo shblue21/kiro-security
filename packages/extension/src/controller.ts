@@ -11,7 +11,6 @@ import {
   ExportFormat,
   FindingDetail,
   FindingSummary,
-  ScanMode,
   ScanRecord,
   TriageDecision,
   TrackingProvider,
@@ -43,7 +42,7 @@ export class SecurityController implements vscode.Disposable {
   private lastEventSequence = 0;
   private lastSnapshotJson: string | undefined;
   private disposed = false;
-  private registeredDefaultsKey: string | undefined;
+  private workspaceRegistered = false;
   private readonly agentIntegration: AgentIntegrationManager;
   private agentIntegrationLastChecked = 0;
   private agentIntegrationStatus: AgentIntegrationStatus = {
@@ -136,15 +135,11 @@ export class SecurityController implements vscode.Disposable {
       this.context.subscriptions.push(this.engine.onEvent((event) => this.onEngineEvent(event)));
     }
     await this.engine.start();
-    const config = vscode.workspace.getConfiguration("kiroSecurity");
-    const defaultScope = this.validateScope(config.get<string>("defaultScope", "."));
-    const defaultMode: ScanMode = "standard";
-    const defaultsKey = `${defaultMode}\0${defaultScope}`;
-    if (this.registeredDefaultsKey !== defaultsKey) {
+    if (!this.workspaceRegistered) {
       await this.engine.request("register_workspace", {
-        workspaceRoot: this.workspaceRoot, defaultScope, defaultMode,
+        workspaceRoot: this.workspaceRoot,
       }, 10_000, false);
-      this.registeredDefaultsKey = defaultsKey;
+      this.workspaceRegistered = true;
     }
     return this.engine;
   }
@@ -205,7 +200,9 @@ export class SecurityController implements vscode.Disposable {
         return;
       }
       const engine = await this.ensureEngine();
-      const dashboard = await engine.request<DashboardState>("get_dashboard", { limit: 30 }, 20_000);
+      const dashboard = await engine.request<DashboardState>(
+        "get_dashboard", { limit: 30, selectedScanId: this.selectedScanId }, 20_000,
+      );
       if (this.selectedScanId && dashboard.selectedScan?.id !== this.selectedScanId) {
         const selected = dashboard.scans.find((scan) => scan.id === this.selectedScanId) ?? await engine.request<ScanRecord>("get_scan", { scanId: this.selectedScanId });
         const findings = await engine.request<FindingSummary[]>("list_findings", { scanId: selected.id, limit: 2000 });
@@ -266,14 +263,6 @@ export class SecurityController implements vscode.Disposable {
     if (serialized === this.lastSnapshotJson) return;
     this.lastSnapshotJson = serialized;
     this.viewSink?.postSnapshot(snapshot);
-  }
-
-  private validateScope(scope: string): string {
-    if (!this.workspaceRoot) throw new Error("No workspace is open.");
-    if (!scope || scope.length > 4096 || scope.includes("\0") || path.isAbsolute(scope)) throw new Error("Scope must be a bounded workspace-relative path.");
-    const resolved = path.resolve(this.workspaceRoot, scope);
-    if (!isPathWithin(this.workspaceRoot, resolved)) throw new Error("Scope escapes the workspace boundary.");
-    return path.relative(this.workspaceRoot, resolved) || ".";
   }
 
   async selectScan(scanId: string): Promise<void> {
@@ -652,7 +641,7 @@ export class SecurityController implements vscode.Disposable {
       await this.engine?.stop();
       this.engine?.dispose();
       this.engine = undefined;
-      this.registeredDefaultsKey = undefined;
+      this.workspaceRegistered = false;
       this.dashboard = null;
       this.agentIntegrationLastChecked = 0;
       await this.refreshAgentIntegration(true, "checking");

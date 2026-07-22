@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import sqlite3
 from pathlib import Path
 
@@ -16,22 +17,15 @@ from kiro_security.security import utc_now
 def create_scan(workbench: Workbench, session: str = "session-a") -> dict:
     workbench.register_session(session, 12345, "test", PROTOCOL_VERSION)
     workspace = workbench.register_workspace(workbench.workspace)
-    contract = {
-        "mode": "standard", "scope": ".", "diffTargetKind": None,
-        "diffBaseRevision": None, "diffHeadRevision": None,
-        "maxFiles": 10_000, "maxFileBytes": 1_048_576, "userContext": None,
-    }
-    capabilities = {
-        "maxFiles": 10_000, "maxFileBytes": 1_048_576,
-        "userContext": None, "startContract": contract,
-    }
+    if not workspace["submitted"]:
+        workspace = workbench.save_workspace(
+            workspace["id"], mode="standard", scope=".", user_context=None,
+            diff_target_kind=None, diff_base_revision=None, diff_head_revision=None,
+        )
     scan, _ = workbench.create_scan(
         workspace_id=workspace["id"],
-        mode="standard",
-        scope=".",
         artifact_dir=None,
         session_id=session,
-        capabilities=capabilities,
         setup_scan=lambda draft: setup_model_scan(workbench, draft),
     )
     return scan
@@ -40,7 +34,7 @@ def create_scan(workbench: Workbench, session: str = "session-a") -> dict:
 def test_fresh_migrations_have_lifecycle_only_schema_and_allow_gate_observation(workspace: Path, tmp_path: Path) -> None:
     workbench = Workbench(workspace)
     info = workbench.database_info()
-    assert info["schemaVersion"] == 12
+    assert info["schemaVersion"] == 13
     assert info["journalMode"].lower() == "wal"
     assert info["integrity"] == "ok"
     scan = create_scan(workbench)
@@ -64,9 +58,13 @@ def test_fresh_migrations_have_lifecycle_only_schema_and_allow_gate_observation(
         scan_table_sql = connection.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='scans'"
         ).fetchone()[0]
+        scan_columns = {row[1] for row in connection.execute("PRAGMA table_info(scans)")}
+        workspace_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(workspaces)")
+        }
     finally:
         connection.close()
-    assert versions == [1, 2, 3, 4, 5, 6, 8, 10, 11, 12]
+    assert versions == [1, 2, 3, 4, 5, 6, 8, 10, 11, 12, 13]
     assert not {
         "deep_scan_state", "deep_workers", "deep_merge_records",
         "deep_worker_coverage_receipts", "deep_tail_assignments",
@@ -74,6 +72,12 @@ def test_fresh_migrations_have_lifecycle_only_schema_and_allow_gate_observation(
     assert not bad_columns
     assert "'queued'" not in scan_table_sql
     assert "'interrupted'" not in scan_table_sql
+    assert "capability_json" not in scan_columns
+    assert "user_context" in scan_columns
+    assert {
+        "thread_id", "user_context", "diff_target_kind", "diff_base_revision",
+        "diff_head_revision", "diff_content_digest", "submitted",
+    } <= workspace_columns
     snapshot = workbench.snapshot(tmp_path / "snapshot.sqlite")
     connection = sqlite3.connect(snapshot)
     try:
@@ -90,7 +94,7 @@ def test_migration_11_adds_one_running_scan_guard_to_existing_schema(workspace: 
         connection.execute("DELETE FROM schema_migrations WHERE version=11")
 
     migrated = Workbench(workspace)
-    assert migrated.database_info()["schemaVersion"] == 12
+    assert migrated.database_info()["schemaVersion"] == 13
     connection = migrated._connect()
     try:
         row = connection.execute(
@@ -135,7 +139,7 @@ def test_concurrent_fresh_database_initialization_is_serialized(tmp_path: Path) 
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         results = [future.result(timeout=20) for future in [executor.submit(initialize) for _ in range(4)]]
-    assert {result["schemaVersion"] for result in results} == {12}
+    assert {result["schemaVersion"] for result in results} == {13}
     assert {result["integrity"] for result in results} == {"ok"}
 
 
@@ -171,9 +175,10 @@ def test_failed_scan_is_terminal_and_preserves_failure_metadata(workspace: Path)
     assert unchanged["failure_code"] == "unrecoverable"
     assert unchanged["failure_message"] == "Terminal failure"
     assert unchanged["completed_at"] == completed_at
+    assert workbench.get_workspace(scan["workspace_id"])["active_scan_id"] == scan["id"]
 
 
-def test_migration_12_rebuilds_legacy_scan_table_without_losing_children(workspace: Path) -> None:
+def test_migration_13_rebuilds_v12_scan_table_without_losing_children(workspace: Path) -> None:
     workbench = Workbench(workspace)
     scan = create_scan(workbench)
     with workbench.transaction() as connection:
@@ -183,14 +188,12 @@ def test_migration_12_rebuilds_legacy_scan_table_without_losing_children(workspa
             "artifacts": connection.execute("SELECT COUNT(*) FROM scan_artifacts").fetchone()[0],
             "occurrences": connection.execute("SELECT COUNT(*) FROM finding_occurrences").fetchone()[0],
         }
-        connection.execute("DELETE FROM scan_coordinator_leases")
-        connection.execute("DROP TABLE scan_coordinator_leases")
-        connection.execute("ALTER TABLE scans ADD COLUMN owner_session_id TEXT")
-        connection.execute("ALTER TABLE scans ADD COLUMN heartbeat_at TEXT")
-        connection.execute("ALTER TABLE scans ADD COLUMN handoff_state TEXT NOT NULL DEFAULT 'none'")
-        connection.execute("ALTER TABLE scans ADD COLUMN resumed_at TEXT")
-        connection.execute("ALTER TABLE scans ADD COLUMN resume_count INTEGER NOT NULL DEFAULT 0")
-        connection.execute("DELETE FROM schema_migrations WHERE version=12")
+        connection.execute("ALTER TABLE scans ADD COLUMN capability_json TEXT")
+        connection.execute(
+            "UPDATE scans SET capability_json=? WHERE id=?",
+            (json.dumps({"userContext": "migrated context"}), scan["id"]),
+        )
+        connection.execute("DELETE FROM schema_migrations WHERE version=13")
 
     migrated = Workbench(workspace)
     connection = migrated._connect()
@@ -207,34 +210,37 @@ def test_migration_12_rebuilds_legacy_scan_table_without_losing_children(workspa
     finally:
         connection.close()
     assert before == after
-    assert not {"owner_session_id", "heartbeat_at", "handoff_state", "resumed_at", "resume_count"} & columns
-    assert migrated.get_scan(scan["id"])["status"] == "running"
+    assert "capability_json" not in columns
+    migrated_scan = migrated.get_scan(scan["id"])
+    assert migrated_scan["status"] == "running"
+    assert migrated_scan["mode"] == scan["mode"]
+    assert migrated_scan["scope"] == scan["scope"]
+    assert migrated_scan["user_context"] == "migrated context"
+    assert migrated.get_workspace()["user_context"] == "migrated context"
 
 
-def test_migration_12_failure_rolls_back_parent_rebuild(
+def test_migration_13_failure_rolls_back_parent_rebuild(
     workspace: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workbench = Workbench(workspace)
     scan = create_scan(workbench)
     with workbench.transaction() as connection:
-        connection.execute("DELETE FROM scan_coordinator_leases")
-        connection.execute("DROP TABLE scan_coordinator_leases")
-        connection.execute("ALTER TABLE scans ADD COLUMN owner_session_id TEXT")
-        connection.execute("ALTER TABLE scans ADD COLUMN heartbeat_at TEXT")
-        connection.execute("ALTER TABLE scans ADD COLUMN handoff_state TEXT NOT NULL DEFAULT 'none'")
-        connection.execute("ALTER TABLE scans ADD COLUMN resumed_at TEXT")
-        connection.execute("ALTER TABLE scans ADD COLUMN resume_count INTEGER NOT NULL DEFAULT 0")
-        connection.execute("DELETE FROM schema_migrations WHERE version=12")
+        connection.execute("ALTER TABLE scans ADD COLUMN capability_json TEXT")
+        connection.execute(
+            "UPDATE scans SET capability_json=? WHERE id=?",
+            (json.dumps({"userContext": "rollback context"}), scan["id"]),
+        )
+        connection.execute("DELETE FROM schema_migrations WHERE version=13")
         before = Workbench._scan_child_row_counts(connection)
 
-    original = Workbench._apply_scan_coordinator_lease_migration
+    original = Workbench._apply_lifecycle_authority_migration
 
     def fail_after_rebuild(cls: type[Workbench], connection: sqlite3.Connection) -> None:
         original(connection)
         raise sqlite3.OperationalError("controlled migration failure")
 
     monkeypatch.setattr(
-        Workbench, "_apply_scan_coordinator_lease_migration", classmethod(fail_after_rebuild)
+        Workbench, "_apply_lifecycle_authority_migration", classmethod(fail_after_rebuild)
     )
     with pytest.raises(EngineError) as error:
         Workbench(workspace)
@@ -243,12 +249,9 @@ def test_migration_12_failure_rolls_back_parent_rebuild(
     connection = sqlite3.connect(workbench.db_path)
     try:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(scans)")}
-        assert "owner_session_id" in columns
+        assert "capability_json" in columns
         assert connection.execute(
-            "SELECT COUNT(*) FROM schema_migrations WHERE version=12"
-        ).fetchone() == (0,)
-        assert connection.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='scan_coordinator_leases'"
+            "SELECT COUNT(*) FROM schema_migrations WHERE version=13"
         ).fetchone() == (0,)
         assert Workbench._scan_child_row_counts(connection) == before
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []

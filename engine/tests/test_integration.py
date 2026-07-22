@@ -169,13 +169,23 @@ def _reportable_finding() -> dict[str, Any]:
 def test_standard_rank_input_is_not_premature_deep_input() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         service = _service(_workspace(Path(temporary)))
+        original_rank_input = model.generate_rank_input.make_repo_rank_input
+        observed_preview_bytes = []
+
+        def capture_rank_input(args: Any) -> None:
+            observed_preview_bytes.append(args.preview_bytes)
+            original_rank_input(args)
+
+        model.generate_rank_input.make_repo_rank_input = capture_rank_input
         try:
             scan = service.start_scan({"mode": "standard", "scope": "."})
             context = service.get_scan_context({"scanId": scan["id"]})
             row = json.loads(Path(context["inputs"]["rankInput"]).read_text(encoding="utf-8").splitlines()[0])
             assert set(row) == {"path", "area", "preview"}
+            assert observed_preview_bytes == [model.generate_rank_input.DEFAULT_PREVIEW_BYTES]
             assert context["inputs"]["deepReviewInputReady"] is False
         finally:
+            model.generate_rank_input.make_repo_rank_input = original_rank_input
             service.shutdown({})
 
 
@@ -191,6 +201,7 @@ def test_rejected_and_ignored_candidates_are_auditable_but_not_canonical() -> No
             ])
             completed = service.complete_scan(_lease_params(suppressed))
             assert completed["status"] == "completed"
+            assert service.workbench.get_workspace(suppressed["workspace_id"])["active_scan_id"] == suppressed["id"]
             assert json.loads((root / "findings.json").read_text(encoding="utf-8"))["findings"] == []
             assert '"suppressed"' in ledger.read_text(encoding="utf-8")
 
@@ -335,6 +346,9 @@ def test_commit_diff_requires_checked_out_clean_evidence_target() -> None:
         try:
             scan = service.start_scan({"mode": "diff", "scope": ".", "diffTargetKind": "commit"})
             context = service.get_scan_context({"scanId": scan["id"]})
+            assert scan["diff_target_kind"] == "commit"
+            assert len(scan["diff_base_revision"]) == 40
+            assert len(scan["diff_head_revision"]) == 40
             assert context["target"]["headRevision"] == scan["diff_head_revision"]
             assert service.cancel_scan(_lease_params(scan))["status"] == "cancelled"
             (workspace / "src/app.py").write_text("def app(value):\n    return value + 'drift'\n", encoding="utf-8")
@@ -390,8 +404,12 @@ def test_failed_scan_is_terminal_and_engine_shutdown_preserves_running_scan() ->
             assert unchanged["failure_code"] == "scan_failed"
             assert unchanged["failure_message"] == "Unrecoverable test failure"
             assert unchanged["completed_at"] == completed_at
-            running = service.start_scan({"mode": "standard", "scope": "."})
-            repeated = second.start_scan({"mode": "standard", "scope": "."})
+            assert service.workbench.get_workspace(scan["workspace_id"])["active_scan_id"] == scan["id"]
+            rerun_request = {
+                "workspaceId": scan["workspace_id"], "mode": "standard", "scope": ".",
+            }
+            running = service.start_scan(rerun_request)
+            repeated = second.start_scan(rerun_request)
             assert repeated["id"] == running["id"]
             assert repeated["coordinatorLease"]["state"] == "busy"
             try:
@@ -416,53 +434,67 @@ def test_failed_scan_is_terminal_and_engine_shutdown_preserves_running_scan() ->
             second.shutdown({})
 
 
-def test_workspace_has_exactly_one_running_scan_across_starts() -> None:
+def test_logical_workspace_owns_one_running_scan_and_terminal_pointer() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         workspace = _workspace(Path(temporary))
         first = _service(workspace)
         second = _service(workspace)
         try:
             standard = first.start_scan({"mode": "standard", "scope": "."})
+            standard_workspace_id = standard["workspace_id"]
             running_id = standard["id"]
-            repeated = second.start_scan({"mode": "standard", "scope": "."})
+            repeated = second.start_scan({
+                "workspaceId": standard_workspace_id, "mode": "standard", "scope": ".",
+            })
             assert repeated["id"] == running_id
+            assert repeated["coordinatorLease"]["state"] == "busy"
+            assert "token" not in repeated["coordinatorLease"]
             for incompatible in (
                 {"mode": "deep", "scope": "."},
-                {"mode": "standard", "scope": ".", "maxFiles": 1},
+                {"mode": "standard", "scope": "src"},
                 {"mode": "standard", "scope": ".", "userContext": "different"},
+                {"mode": "diff", "scope": ".", "diffTargetKind": "working_tree"},
             ):
                 try:
-                    second.start_scan(incompatible)
+                    second.start_scan({**incompatible, "workspaceId": standard_workspace_id})
                 except EngineError as error:
-                    assert error.code == "scan_already_running"
-                    assert error.data == {
-                        "scanId": running_id,
-                        "mode": "standard",
-                        "scope": ".",
-                        "diffTargetKind": None,
-                    }
+                    assert error.code == "workspace_setup_locked"
+                    assert error.data["workspaceId"] == standard_workspace_id
+                    assert error.data["activeScanId"] == running_id
                 else:
                     raise AssertionError(f"an incompatible start request reused the running scan: {incompatible}")
+            deep = second.start_scan({"mode": "deep", "scope": "."})
+            assert deep["workspace_id"] != standard_workspace_id
+            assert deep["id"] != running_id
+            adopted = second.register_workspace({})
+            assert adopted["active_scan_id"] in {running_id, deep["id"]}
             with sqlite3.connect(first.workbench.db_path) as connection:
                 assert connection.execute(
                     "SELECT COUNT(*) FROM scans WHERE workspace_id=? AND status='running'",
-                    (standard["workspace_id"],),
+                    (standard_workspace_id,),
                 ).fetchone() == (1,)
                 assert connection.execute(
-                    "SELECT active_scan_id FROM workspaces WHERE id=?", (standard["workspace_id"],)
+                    "SELECT active_scan_id FROM workspaces WHERE id=?", (standard_workspace_id,)
                 ).fetchone() == (running_id,)
+                assert connection.execute(
+                    "SELECT COUNT(*) FROM scans WHERE status='running'"
+                ).fetchone() == (2,)
                 index_sql = connection.execute(
                     "SELECT sql FROM sqlite_master WHERE type='index' AND name='scans_one_running_per_workspace'"
                 ).fetchone()
                 assert index_sql is not None
                 assert "WHERE status = 'running'" in index_sql[0]
+                foreign_keys = connection.execute("PRAGMA foreign_key_list(workspaces)").fetchall()
+                assert any(row[2:7] == ("scans", "active_scan_id", "id", "NO ACTION", "SET NULL") for row in foreign_keys)
 
             with first.workbench.transaction() as connection:
                 connection.execute(
-                    "UPDATE workspaces SET active_scan_id=NULL WHERE id=?", (standard["workspace_id"],)
+                    "UPDATE workspaces SET active_scan_id=NULL WHERE id=?", (standard_workspace_id,)
                 )
             try:
-                second.start_scan({"mode": "standard", "scope": "."})
+                second.start_scan({
+                    "workspaceId": standard_workspace_id, "mode": "standard", "scope": ".",
+                })
             except EngineError as error:
                 assert error.code == "workspace_scan_invariant"
                 assert error.data == {
@@ -486,16 +518,23 @@ def test_workspace_has_exactly_one_running_scan_across_starts() -> None:
                     raise AssertionError("an orphan running scan remained mutable through its coordinator lease")
             with first.workbench.transaction() as connection:
                 connection.execute(
-                    "UPDATE workspaces SET active_scan_id=? WHERE id=?", (running_id, standard["workspace_id"])
+                    "UPDATE workspaces SET active_scan_id=? WHERE id=?", (running_id, standard_workspace_id)
                 )
 
             assert first.cancel_scan(_lease_params(standard))["status"] == "cancelled"
+            assert second.cancel_scan(_lease_params(deep))["status"] == "cancelled"
             with sqlite3.connect(first.workbench.db_path) as connection:
                 assert connection.execute(
                     "SELECT COUNT(*) FROM scan_coordinator_leases WHERE scan_id=?", (running_id,)
                 ).fetchone() == (0,)
-            active = first.start_scan({"mode": "deep", "scope": "."})
+                assert connection.execute(
+                    "SELECT active_scan_id FROM workspaces WHERE id=?", (standard_workspace_id,)
+                ).fetchone() == (running_id,)
+            active = first.start_scan({
+                "workspaceId": standard_workspace_id, "mode": "standard", "scope": ".",
+            })
             assert active["id"] != running_id
+            assert active["workspace_id"] == standard_workspace_id
 
             try:
                 with first.workbench.transaction() as connection:
@@ -514,60 +553,59 @@ def test_workspace_has_exactly_one_running_scan_across_starts() -> None:
                 ).fetchone() == (0,)
                 assert connection.execute(
                     "SELECT active_scan_id FROM workspaces WHERE id=?", (active["workspace_id"],)
-                ).fetchone() == (None,)
+                ).fetchone() == (active["id"],)
         finally:
             second.shutdown({})
             first.shutdown({})
 
 
-def test_running_scan_without_start_contract_fails_closed() -> None:
+def test_scan_row_is_the_only_lifecycle_configuration_authority() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         workspace = _workspace(Path(temporary))
         first = _service(workspace)
         second = _service(workspace)
-        first_closed = False
+        third = None
         try:
-            scan = first.start_scan({"mode": "standard", "scope": "."})
-            with first.workbench.transaction() as connection:
-                capabilities = json.loads(connection.execute(
-                    "SELECT capability_json FROM scans WHERE id=?", (scan["id"],)
-                ).fetchone()[0])
-                capabilities.pop("startContract")
-                connection.execute(
-                    "UPDATE scans SET capability_json=? WHERE id=?",
-                    (json.dumps(capabilities, separators=(",", ":")), scan["id"]),
-                )
-            try:
-                second.start_scan({"mode": "standard", "scope": "."})
-            except EngineError as error:
-                assert error.code == "legacy_scan_incompatible"
-                assert error.data == {"scanId": scan["id"]}
-            else:
-                raise AssertionError("a running scan without startContract was reused")
-            for mutation in (
-                lambda: first.update_scan_progress({**_lease_params(scan), "phasePercent": 33}),
-                lambda: first.fail_scan({**_lease_params(scan), "reason": "must fail closed"}),
-            ):
-                try:
-                    mutation()
-                except EngineError as error:
-                    assert error.code == "legacy_scan_incompatible"
-                else:
-                    raise AssertionError("a running scan without startContract remained mutable")
-            first.shutdown({})
-            first_closed = True
-            try:
-                second.acquire_scan_coordinator({"scanId": scan["id"]})
-            except EngineError as error:
-                assert error.code == "legacy_scan_incompatible"
-            else:
-                raise AssertionError("a running scan without startContract issued a coordinator lease")
-            assert second.get_scan({"scanId": scan["id"]})["status"] == "running"
-            assert second.get_scan({"scanId": scan["id"]})["id"] == scan["id"]
+            request = {"mode": "deep", "scope": "src", "userContext": "review auth boundaries"}
+            scan = first.start_scan(request)
+            projected = second.start_scan({**request, "workspaceId": scan["workspace_id"]})
+            assert projected["id"] == scan["id"]
+            assert projected["coordinatorLease"]["state"] == "busy"
+            assert "token" not in projected["coordinatorLease"]
+            assert scan["mode"] == "deep"
+            assert scan["scope"] == "src"
+            assert scan["user_context"] == request["userContext"]
+            assert "capabilities" not in scan
+            context = first.get_scan_context({"scanId": scan["id"]})
+            assert context["userContext"] == scan["user_context"]
+            assert first.update_scan_progress({
+                **_lease_params(scan), "phasePercent": 33,
+            })["phase_percent"] == 33
+            with first.workbench.transaction(immediate=False) as connection:
+                scan_columns = {
+                    row[1] for row in connection.execute("PRAGMA table_info(scans)")
+                }
+                workspace_row = connection.execute(
+                    """
+                    SELECT default_mode, default_scope, user_context,
+                           diff_target_kind, diff_base_revision, diff_head_revision
+                    FROM workspaces WHERE id=?
+                    """,
+                    (scan["workspace_id"],),
+                ).fetchone()
+            assert "capability_json" not in scan_columns
+            assert tuple(workspace_row) == ("deep", "src", request["userContext"], None, None, None)
+            third = _service(workspace)
+            assert (
+                third.workspace_record["default_mode"],
+                third.workspace_record["default_scope"],
+                third.workspace_record["user_context"],
+            ) == ("deep", "src", request["userContext"])
         finally:
+            if third is not None:
+                third.shutdown({})
             second.shutdown({})
-            if not first_closed:
-                first.shutdown({})
+            first.shutdown({})
 
 
 def test_start_scan_never_combines_a_terminal_scan_with_available_lease_state() -> None:
@@ -592,7 +630,8 @@ def test_start_scan_never_combines_a_terminal_scan_with_available_lease_state() 
             scan = first.start_scan({"mode": "standard", "scope": "."})
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                 repeated_start = executor.submit(
-                    second.start_scan, {"mode": "standard", "scope": "."}
+                    second.start_scan,
+                    {"workspaceId": scan["workspace_id"], "mode": "standard", "scope": "."},
                 )
                 assert active_observed.wait(20)
                 assert first.cancel_scan(_lease_params(scan))["status"] == "cancelled"
@@ -741,6 +780,8 @@ def test_scan_setup_is_complete_before_running_publication() -> None:
         original_setup = service_module.setup_model_scan
         first_setup_entered = threading.Event()
         release_first_setup = threading.Event()
+        incompatible_setup_entered = threading.Event()
+        release_incompatible_setup = threading.Event()
         call_lock = threading.Lock()
         calls = 0
 
@@ -752,17 +793,24 @@ def test_scan_setup_is_complete_before_running_publication() -> None:
             if call_number == 1:
                 first_setup_entered.set()
                 assert release_first_setup.wait(20)
+            elif call_number == 3:
+                incompatible_setup_entered.set()
+                assert release_incompatible_setup.wait(20)
             return original_setup(workbench, draft)
 
         service_module.setup_model_scan = controlled_setup
         try:
+            logical_workspace = first.workbench.create_workspace(workspace)
+            shared_request = {
+                "workspaceId": logical_workspace["id"], "mode": "standard", "scope": ".",
+            }
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                first_start = executor.submit(first.start_scan, {"mode": "standard", "scope": "."})
+                first_start = executor.submit(first.start_scan, shared_request)
                 assert first_setup_entered.wait(20)
                 with sqlite3.connect(first.workbench.db_path) as connection:
                     assert connection.execute("SELECT COUNT(*) FROM scans WHERE status='running'").fetchone() == (0,)
 
-                second_start = second.start_scan({"mode": "standard", "scope": "."})
+                second_start = second.start_scan(shared_request)
                 assert second_start["target_identity"]
                 assert second_start["snapshot_digest"]
                 assert {item["kind"] for item in second_start["artifacts"]} >= {"securityGuidance", "rankInput"}
@@ -772,8 +820,44 @@ def test_scan_setup_is_complete_before_running_publication() -> None:
                 first_result = first_start.result(timeout=20)
                 assert first_result["id"] == second_start["id"]
                 assert first_result["target_identity"] == second_start["target_identity"]
+                with sqlite3.connect(first.workbench.db_path) as connection:
+                    assert connection.execute(
+                        "SELECT COUNT(*) FROM scans WHERE status='running'"
+                    ).fetchone() == (1,)
+                    assert connection.execute(
+                        "SELECT active_scan_id FROM workspaces WHERE id=?",
+                        (logical_workspace["id"],),
+                    ).fetchone() == (second_start["id"],)
+
+            assert second.cancel_scan(_lease_params(second_start))["status"] == "cancelled"
+            incompatible_workspace = first.workbench.create_workspace(workspace)
+            standard_request = {
+                "workspaceId": incompatible_workspace["id"], "mode": "standard", "scope": ".",
+            }
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                stale_start = executor.submit(first.start_scan, standard_request)
+                assert incompatible_setup_entered.wait(20)
+                winner = second.start_scan({
+                    "workspaceId": incompatible_workspace["id"], "mode": "deep", "scope": ".",
+                })
+                release_incompatible_setup.set()
+                stale_result = stale_start.result(timeout=20)
+                assert stale_result["id"] == winner["id"]
+                assert stale_result["mode"] == "deep"
+                assert stale_result["coordinatorLease"]["state"] == "busy"
+            with sqlite3.connect(first.workbench.db_path) as connection:
+                assert connection.execute(
+                    "SELECT COUNT(*) FROM scans WHERE workspace_id=? AND status='running'",
+                    (incompatible_workspace["id"],),
+                ).fetchone() == (1,)
+                assert connection.execute(
+                    "SELECT active_scan_id FROM workspaces WHERE id=?",
+                    (incompatible_workspace["id"],),
+                ).fetchone() == (winner["id"],)
+            assert first.cancel_scan(_lease_params(winner))["status"] == "cancelled"
         finally:
             release_first_setup.set()
+            release_incompatible_setup.set()
             service_module.setup_model_scan = original_setup
             second.shutdown({})
             first.shutdown({})
@@ -799,6 +883,8 @@ def test_failed_setup_never_publishes_a_scan() -> None:
                 raise AssertionError("a controlled setup failure was accepted")
             with sqlite3.connect(service.workbench.db_path) as connection:
                 assert connection.execute("SELECT COUNT(*) FROM scans").fetchone() == (0,)
+                assert connection.execute("SELECT COUNT(*) FROM scan_progress").fetchone() == (0,)
+                assert connection.execute("SELECT COUNT(*) FROM scan_coordinator_leases").fetchone() == (0,)
                 assert connection.execute("SELECT active_scan_id FROM workspaces").fetchone() == (None,)
             assert list(service.workbench.artifacts_dir.iterdir()) == []
         finally:
@@ -976,8 +1062,8 @@ def main() -> None:
         test_commit_diff_requires_checked_out_clean_evidence_target,
         test_target_drift_fails_before_finalization_and_leaves_running_scan,
         test_failed_scan_is_terminal_and_engine_shutdown_preserves_running_scan,
-        test_workspace_has_exactly_one_running_scan_across_starts,
-        test_running_scan_without_start_contract_fails_closed,
+        test_logical_workspace_owns_one_running_scan_and_terminal_pointer,
+        test_scan_row_is_the_only_lifecycle_configuration_authority,
         test_start_scan_never_combines_a_terminal_scan_with_available_lease_state,
         test_coordinator_lease_generation_expiry_and_secret_projection,
         test_expired_lease_takeover_is_single_winner,

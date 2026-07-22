@@ -80,9 +80,11 @@ export interface ScanRecord {
   workspace_id: string;
   mode: ScanMode;
   scope: string;
+  user_context: string | null;
   diff_target_kind: "working_tree" | "commit" | "range" | null;
   diff_base_revision: string | null;
   diff_head_revision: string | null;
+  diff_content_digest: string | null;
   status: "running" | "completed" | "cancelled" | "failed";
   phase: ScanPhase;
   phase_index: number;
@@ -102,7 +104,6 @@ export interface ScanRecord {
   progress: ProgressRecord | null;
   artifacts: ArtifactRecord[];
   coverage?: CoverageDocument | null;
-  capabilities?: Record<string, unknown> | null;
   coordinatorLease?: {
     state: "acquired" | "busy" | "available" | "released";
     token?: string;
@@ -240,10 +241,15 @@ export interface CoverageDocument {
 export interface DashboardState {
   workspace: {
     id: string;
+    thread_id: string | null;
     root_path: string;
     display_name: string;
+    target_summary: string | null;
     default_scope: string;
     default_mode: ScanMode;
+    user_context: string | null;
+    submitted: number;
+    active_scan_id: string | null;
   };
   engine: EngineCapabilities;
   activeScan: ScanRecord | null;

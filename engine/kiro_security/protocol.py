@@ -15,8 +15,8 @@ ENGINE_EVENT_NAMES = frozenset({
 _REQUEST_FIELDS = frozenset({"jsonrpc", "protocolVersion", "id", "method", "params"})
 _METHOD_PARAMS = {
     "initialize": {"protocolVersion", "clientInfo"},
-    "register_workspace": {"workspaceRoot", "defaultScope", "defaultMode"},
-    "start_scan": {"mode", "scope", "diffTargetKind", "diffBaseRevision", "diffHeadRevision", "maxFiles", "maxFileBytes", "userContext"},
+    "register_workspace": {"workspaceRoot", "workspaceId", "taskId"},
+    "start_scan": {"workspaceId", "taskId", "mode", "scope", "diffTargetKind", "diffBaseRevision", "diffHeadRevision", "userContext"},
     **{method: {"scanId"} for method in ("acquire_scan_coordinator", "get_scan", "get_progress", "get_scan_context", "cleanup_scan")},
     **{method: {"scanId", "coordinatorToken", "coordinatorGeneration"} for method in ("renew_scan_coordinator", "release_scan_coordinator", "cancel_scan", "complete_scan")},
     "update_scan_progress": {"scanId", "coordinatorToken", "coordinatorGeneration", "phase", "phasePercent", "itemsTotal", "itemsCompleted", "reportableFindingsCount", "message"},
@@ -34,7 +34,7 @@ _METHOD_PARAMS = {
     "record_tracking_result": {"recordId", "payloadSha256", "outcome", "externalMutationPerformed", "externalId", "externalUrl", "reason", "approval", "readback"},
     "export_report": {"scanId", "format", "destination", "allowedRoot", "occurrenceId"},
     **{method: set() for method in ("get_capabilities", "database_info", "shutdown")},
-    "get_dashboard": {"limit"},
+    "get_dashboard": {"workspaceId", "selectedScanId", "limit"},
     "poll_events": {"afterSequence", "limit"},
 }
 
@@ -123,11 +123,11 @@ def validate_method(method: str, raw_params: Any) -> dict[str, Any]:
         optional_string(client, "version", max_length=64)
     elif method == "register_workspace":
         optional_string(params, "workspaceRoot", max_length=8192)
-        optional_string(params, "defaultScope", max_length=4096)
-        default_mode = optional_string(params, "defaultMode", max_length=16)
-        if default_mode is not None and default_mode not in MODES:
-            raise EngineError("invalid_params", f"defaultMode must be one of {MODES}.")
+        optional_string(params, "workspaceId", max_length=128)
+        optional_string(params, "taskId", max_length=512)
     elif method == "start_scan":
+        optional_string(params, "workspaceId", max_length=128)
+        optional_string(params, "taskId", max_length=512)
         mode = required_string(params, "mode", max_length=16)
         if mode not in MODES:
             raise EngineError("invalid_params", f"mode must be one of {MODES}.")
@@ -137,9 +137,11 @@ def validate_method(method: str, raw_params: Any) -> dict[str, Any]:
             raise EngineError("invalid_params", "diffTargetKind must be working_tree, commit, or range.")
         optional_string(params, "diffBaseRevision", max_length=256)
         optional_string(params, "diffHeadRevision", max_length=256)
-        optional_int(params, "maxFiles", minimum=1, maximum=100_000)
-        optional_int(params, "maxFileBytes", minimum=1024, maximum=10_485_760)
         optional_string(params, "userContext", max_length=4000)
+    elif method == "get_dashboard":
+        optional_string(params, "workspaceId", max_length=128)
+        optional_string(params, "selectedScanId", max_length=256)
+        optional_int(params, "limit", minimum=1, maximum=200)
     elif method in {"acquire_scan_coordinator", "get_scan", "get_progress", "get_scan_context", "cleanup_scan"}:
         required_string(params, "scanId", max_length=256)
     elif method in {"renew_scan_coordinator", "release_scan_coordinator", "cancel_scan", "complete_scan"}:

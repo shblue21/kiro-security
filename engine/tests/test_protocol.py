@@ -25,15 +25,22 @@ def test_initialize_and_start_scan_validation() -> None:
         {"protocolVersion": PROTOCOL_VERSION, "clientInfo": {"name": "test", "version": "1"}},
     )
     assert params["protocolVersion"] == PROTOCOL_VERSION
-    assert validate_method("start_scan", {"mode": "deep", "scope": "src", "maxFiles": 100})["mode"] == "deep"
+    assert validate_method("start_scan", {"mode": "deep", "scope": "src"})["mode"] == "deep"
+    resumed = validate_method(
+        "start_scan",
+        {"workspaceId": "workspace-session", "taskId": "task-1", "mode": "deep"},
+    )
+    assert resumed["workspaceId"] == "workspace-session"
+    assert resumed["taskId"] == "task-1"
     assert validate_method("start_scan", {"mode": "standard", "scope": "src"})["mode"] == "standard"
     assert validate_method("start_scan", {"mode": "diff"})["mode"] == "diff"
     with pytest.raises(EngineError, match="Unexpected parameter"):
         validate_method("start_scan", {"mode": "deep", "scope": "src", "hostProof": {}})
     with pytest.raises(EngineError, match="mode"):
         validate_method("start_scan", {"mode": "arbitrary"})
-    with pytest.raises(EngineError, match="maxFiles"):
-        validate_method("start_scan", {"mode": "standard", "maxFiles": 0})
+    for removed_limit in ("maxFiles", "maxFileBytes"):
+        with pytest.raises(EngineError, match=removed_limit):
+            validate_method("start_scan", {"mode": "standard", removed_limit: 1024})
     # Removed worker/result and planner methods are unknown.
     for method in (
         "deep_claim_worker", "deep_submit_worker", "deep_retry_worker", "deep_claim_merge",
@@ -53,7 +60,10 @@ def test_initialize_and_start_scan_validation() -> None:
         validate_method("resume_scan", {"scanId": "scan_x"})
     with pytest.raises(EngineError, match="Unexpected parameter"):
         validate_method("complete_scan", {**lease, "candidates": []})
-    assert validate_method("get_dashboard", {"limit": 30})["limit"] == 30
+    dashboard = validate_method(
+        "get_dashboard", {"workspaceId": "workspace-session", "selectedScanId": "scan-1", "limit": 30},
+    )
+    assert dashboard["selectedScanId"] == "scan-1"
     with pytest.raises(EngineError, match="limit"):
         validate_method("get_dashboard", {"limit": 201})
 

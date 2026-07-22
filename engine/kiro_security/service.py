@@ -19,7 +19,10 @@ from .remediation import (
     expected_post_apply_digests, normalize_verification_receipt, parse_remediation_patch, prepare_patch_artifact,
     reconcile_patch_application, touched_file_digests, verify_patch_inputs, verify_unmodified_files,
 )
-from .model import complete_model_scan, get_model_context, revalidate_model_target, setup_model_scan
+from .model import (
+    complete_model_scan, get_model_context, resolve_diff_target_configuration,
+    revalidate_model_target, setup_model_scan,
+)
 from .git_safety import git_filter_overrides
 from .security import (
     atomic_write, canonical_workspace, random_id, redact, resolve_within, run_process,
@@ -203,13 +206,12 @@ class SecurityService:
             canonical = canonical_workspace(requested)
             if canonical != self.workspace:
                 raise EngineError("workspace_mismatch", "This engine process is bound to a different workspace root.")
-        default_scope = params.get("defaultScope") or self.workspace_record.get("default_scope") or "."
-        default_mode = params.get("defaultMode") or self.workspace_record.get("default_mode") or "standard"
-        if default_mode not in MODES:
-            raise EngineError("invalid_mode", f"Unsupported default mode: {default_mode}")
-        resolve_within(self.workspace, default_scope, must_exist=True)
-        self.workspace_record = self.workbench.register_workspace(
-            self.workspace, default_scope=default_scope, default_mode=default_mode
+        workspace_id = params.get("workspaceId")
+        task_id = params.get("taskId")
+        self.workspace_record = (
+            self.workbench.get_workspace(workspace_id, thread_id=task_id)
+            if workspace_id
+            else self.workbench.register_workspace(self.workspace, thread_id=task_id)
         )
         return self.workspace_record
 
@@ -218,39 +220,55 @@ class SecurityService:
         requested_scope = params.get("scope") or "."
         scope_path = resolve_within(self.workspace, requested_scope, must_exist=True)
         scope = "." if scope_path == self.workspace else scope_path.relative_to(self.workspace).as_posix()
-        max_files = int(params.get("maxFiles") or 10_000)
-        max_file_bytes = int(params.get("maxFileBytes") or 1_048_576)
-        diff_target_kind = (params.get("diffTargetKind") or "working_tree") if mode == "diff" else None
-        diff_base_revision = params.get("diffBaseRevision") if mode == "diff" else None
-        diff_head_revision = params.get("diffHeadRevision") if mode == "diff" else None
-        start_contract = {
-            "mode": mode,
-            "scope": scope,
-            "diffTargetKind": diff_target_kind,
-            "diffBaseRevision": diff_base_revision,
-            "diffHeadRevision": diff_head_revision,
-            "maxFiles": max_files,
-            "maxFileBytes": max_file_bytes,
-            "userContext": params.get("userContext"),
-        }
-        capabilities = {
-            "maxFiles": max_files,
-            "maxFileBytes": max_file_bytes,
-            "userContext": params.get("userContext"),
-            "startContract": start_contract,
-        }
+        diff_target_kind = None
+        diff_base_revision = None
+        diff_head_revision = None
+        diff_content_digest = None
+        if mode == "diff":
+            resolved = resolve_diff_target_configuration(
+                self.workbench,
+                scope=scope,
+                kind=params.get("diffTargetKind") or "working_tree",
+                base_revision=params.get("diffBaseRevision"),
+                head_revision=params.get("diffHeadRevision"),
+            )
+            diff_target_kind = resolved["kind"]
+            diff_base_revision = resolved["baseRevision"]
+            diff_head_revision = resolved["headRevision"]
+            diff_content_digest = resolved.get("contentDigest")
+        workspace_id = params.get("workspaceId")
+        task_id = params.get("taskId")
+        workspace = (
+            self.workbench.get_workspace(workspace_id, thread_id=task_id)
+            if workspace_id
+            else self.workbench.create_workspace(self.workspace, thread_id=task_id)
+        )
+        requested = (
+            mode, scope, params.get("userContext"), diff_target_kind,
+            diff_base_revision, diff_head_revision, diff_content_digest,
+        )
+        if workspace["active_scan_id"] is None:
+            workspace = self.workbench.save_workspace(
+                workspace["id"], mode=mode, scope=scope,
+                user_context=params.get("userContext"),
+                diff_target_kind=diff_target_kind,
+                diff_base_revision=diff_base_revision,
+                diff_head_revision=diff_head_revision,
+                diff_content_digest=diff_content_digest,
+            )
+        elif self.workbench.workspace_configuration(workspace) != requested:
+            raise EngineError(
+                "workspace_setup_locked",
+                "This workspace already has a scan. Open a new workspace to use different setup.",
+                {"workspaceId": workspace["id"], "activeScanId": workspace["active_scan_id"]},
+            )
         scan, _created = self.workbench.create_scan(
-            workspace_id=self.workspace_record["id"],
-            mode=mode,
-            scope=scope,
+            workspace_id=workspace["id"],
             artifact_dir=None,
             session_id=self.session_id,
-            capabilities=capabilities,
             setup_scan=lambda draft: setup_model_scan(self.workbench, draft),
-            diff_target_kind=diff_target_kind,
-            diff_base_revision=diff_base_revision,
-            diff_head_revision=diff_head_revision,
         )
+        self.workspace_record = self.workbench.get_workspace(workspace["id"])
         return scan
 
     def acquire_scan_coordinator(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -667,10 +685,23 @@ class SecurityService:
     def get_dashboard(self, params: dict[str, Any]) -> dict[str, Any]:
         scans = self.workbench.list_scans(int(params.get("limit") or 25))
         active = next((scan for scan in scans if scan["status"] == "running"), None)
-        selected = active or next((scan for scan in scans if scan["status"] == "completed"), scans[0] if scans else None)
+        selected_id = params.get("selectedScanId")
+        selected = self.workbench.get_scan(selected_id) if selected_id else None
+        if selected is not None:
+            selected_workspace = self.workbench.get_workspace(selected["workspace_id"])
+            if selected_workspace["root_path"] != str(self.workspace):
+                raise EngineError("scan_not_found", "The selected scan is outside this workbench.")
+        selected = selected or active or next(
+            (scan for scan in scans if scan["status"] == "completed"),
+            scans[0] if scans else None,
+        )
         findings = self.workbench.list_findings(selected["id"], limit=500) if selected else []
+        workspace = self.workbench.get_workspace(
+            selected["workspace_id"] if selected else params.get("workspaceId")
+        )
+        self.workspace_record = workspace
         return {
-            "workspace": self.workspace_record,
+            "workspace": workspace,
             "engine": self.capabilities(),
             "activeScan": active,
             "selectedScan": selected,

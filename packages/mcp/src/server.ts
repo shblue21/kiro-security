@@ -247,8 +247,8 @@ const toolDefinitions = [
   },
   {
     name: "security_start_scan",
-    description: "Start a chat-coordinated Skill-driven Standard, Deep, or Git-diff scan and create deterministic context and worklists.",
-    inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, mode: { type: "string", enum: ["standard", "deep", "diff"] }, scope: { type: "string", minLength: 1, default: "." }, diffTargetKind: { type: "string", enum: ["working_tree", "commit", "range"] }, diffBaseRevision: { type: "string" }, diffHeadRevision: { type: "string" }, userContext: { type: "string", maxLength: 4000 } }, required: ["workspaceRoot", "mode"], additionalProperties: false },
+    description: "Start a chat-coordinated scan in a new logical workspace, or rerun the immutable setup identified by sessionId.",
+    inputSchema: { type: "object", properties: { workspaceRoot: { type: "string" }, sessionId: { type: "string", description: "Optional logical workspace id returned by an earlier scan." }, taskId: { type: "string", description: "Stable opaque identity for the current Kiro task; reuse it with sessionId." }, mode: { type: "string", enum: ["standard", "deep", "diff"] }, scope: { type: "string", minLength: 1, default: "." }, diffTargetKind: { type: "string", enum: ["working_tree", "commit", "range"] }, diffBaseRevision: { type: "string" }, diffHeadRevision: { type: "string" }, userContext: { type: "string", maxLength: 4000 } }, required: ["workspaceRoot", "taskId", "mode"], additionalProperties: false },
   },
   { name: "security_acquire_scan_coordinator", description: "Acquire an available or expired transient coordinator lease for a durable running scan.", inputSchema: idSchema("scanId") },
   { name: "security_renew_scan_coordinator", description: "Renew the current transient coordinator lease with generation-based CAS.", inputSchema: leaseSchema() },
@@ -275,7 +275,7 @@ const toolDefinitions = [
 ];
 
 const TOOL_STRING_LIMITS: Record<string, number> = {
-  workspaceRoot: 8192, mode: 16, scope: 4096,
+  workspaceRoot: 8192, sessionId: 128, taskId: 512, mode: 16, scope: 4096,
   diffTargetKind: 32, diffBaseRevision: 256, diffHeadRevision: 256,
   userContext: 4000, scanId: 256, coordinatorToken: 128, reason: 4000, phase: 32, message: 1000,
   search: 200, occurrenceId: 256, findingId: 256,
@@ -332,7 +332,9 @@ async function callTool(name: string, rawArguments: unknown): Promise<unknown> {
       const mode = requiredString(params, "mode", 16);
       if (!["standard", "deep", "diff"].includes(mode)) throw new Error("mode must be standard, deep, or diff.");
       const scope = params.scope === undefined ? "." : requiredString(params, "scope");
-      return engine.request("start_scan", {
+      const scan = await engine.request<Record<string, unknown>>("start_scan", {
+        workspaceId: params.sessionId === undefined ? undefined : requiredString(params, "sessionId", 128),
+        taskId: requiredString(params, "taskId", 512),
         mode,
         scope,
         userContext: params.userContext === undefined ? undefined : requiredString(params, "userContext", 4000),
@@ -340,6 +342,7 @@ async function callTool(name: string, rawArguments: unknown): Promise<unknown> {
         diffBaseRevision: mode === "diff" ? safeGitRef(params.diffBaseRevision, "diffBaseRevision") : undefined,
         diffHeadRevision: mode === "diff" ? safeGitRef(params.diffHeadRevision, "diffHeadRevision") : undefined,
       });
+      return { ...scan, sessionId: scan.workspace_id };
     }
     case "security_acquire_scan_coordinator": return engine.request("acquire_scan_coordinator", { scanId: requiredString(params, "scanId", 256) });
     case "security_renew_scan_coordinator": return engine.request("renew_scan_coordinator", leaseRequest(params));

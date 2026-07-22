@@ -100,8 +100,15 @@ def _diff_target(
             raise EngineError("invalid_diff_target", "Working-tree diffBaseRevision must match current HEAD.")
         if requested_head and _git_revision(workspace, requested_head, "diffHeadRevision") != head:
             raise EngineError("invalid_diff_target", "Working-tree diffHeadRevision must match current HEAD.")
+        content_digest = workbench_target.kiro_workspace_content_digest(workspace, state_root)
+        if scan.get("diff_content_digest") and scan["diff_content_digest"] != content_digest:
+            raise EngineError(
+                "diff_target_changed",
+                "Working-tree contents changed after this Diff workspace was saved.",
+            )
         return "local-patch", head, head, {
-            "kind": kind, "baseRevision": head, "headRevision": head, "scope": scan["scope"],
+            "kind": kind, "baseRevision": head, "headRevision": head,
+            "contentDigest": content_digest, "scope": scan["scope"],
         }
     if kind == "commit":
         head = _git_revision(workspace, requested_head or "HEAD", "diffHeadRevision")
@@ -130,11 +137,37 @@ def _diff_target(
     }
 
 
+def resolve_diff_target_configuration(
+    workbench: Workbench,
+    *,
+    scope: str,
+    kind: str,
+    base_revision: str | None,
+    head_revision: str | None,
+) -> dict[str, str]:
+    """Resolve a Kiro Diff request before storing it as workspace setup."""
+    _mode, base, head, target = _diff_target(
+        {
+            "scope": scope,
+            "diff_target_kind": kind,
+            "diff_base_revision": base_revision,
+            "diff_head_revision": head_revision,
+        },
+        workbench.workspace,
+        workbench.state_dir,
+    )
+    return {
+        "kind": target["kind"],
+        "baseRevision": base,
+        "headRevision": head,
+        **({"contentDigest": target["contentDigest"]} if "contentDigest" in target else {}),
+    }
+
+
 def _write_rank_input(
     scan: dict[str, Any], workspace: Path, state_root: Path, output: Path
 ) -> dict[str, Any] | None:
-    limits = scan.get("capabilities") or {}
-    preview_bytes = min(int(limits.get("maxFileBytes") or 1_048_576), 1_048_576)
+    preview_bytes = generate_rank_input.DEFAULT_PREVIEW_BYTES
     if scan["mode"] != "diff":
         scope = _scope_path(workspace, scan["scope"])
         if not scope.is_dir():
@@ -271,6 +304,8 @@ def _expected_target(workbench: Workbench, scan: dict[str, Any]) -> dict[str, An
             target["baseRevision"] = scan["diff_base_revision"]
         if scan.get("diff_head_revision"):
             target["headRevision"] = scan["diff_head_revision"]
+        if scan.get("diff_content_digest"):
+            target["contentDigest"] = scan["diff_content_digest"]
     return target
 
 
@@ -290,7 +325,7 @@ def get_model_context(workbench: Workbench, scan_id: str) -> dict[str, Any]:
         "target": {"root": str(workbench.workspace), **_expected_target(workbench, scan)},
         "artifactRoot": str(root),
         "producer": {"name": "kiro-security-power", "version": __version__},
-        "userContext": (scan.get("capabilities") or {}).get("userContext"),
+        "userContext": scan["user_context"],
         "artifactDirectories": {name: str(resolve_within(root, name)) for name in _PHASE_DIRECTORIES},
         "inputs": {
             "securityGuidance": str(resolve_within(root, _SETUP_ARTIFACTS["securityGuidance"])),

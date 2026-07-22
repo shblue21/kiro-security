@@ -120,11 +120,12 @@ test("MCP and a second engine client share Skill-driven scan lifecycle state", {
     const started = await mcp.request("tools/call", {
       name: "security_start_scan",
       arguments: {
-        workspaceRoot: workspace, mode: "standard", scope: ".",
+        workspaceRoot: workspace, taskId: "contract-task", mode: "standard", scope: ".",
       },
     });
     assert.equal(started.isError, false, started.content?.[0]?.text);
     const startedScan = started.structuredContent.result;
+    assert.equal(startedScan.sessionId, startedScan.workspace_id);
     const scanId = startedScan.id;
     const mcpLease = startedScan.coordinatorLease;
 
@@ -143,7 +144,9 @@ test("MCP and a second engine client share Skill-driven scan lifecycle state", {
     const cancelled = await waitForScan(mcp, workspace, scanId);
     assert.equal(cancelled.status, "cancelled", cancelled.failure_message);
 
-    const startedByExtensionSide = await engine.request("start_scan", { mode: "standard", scope: "." });
+    const startedByExtensionSide = await engine.request(
+      "start_scan", { taskId: "contract-task", mode: "standard", scope: "." },
+    );
     const visibleThroughMcp = await mcp.request("tools/call", {
       name: "security_get_scan", arguments: { workspaceRoot: workspace, scanId: startedByExtensionSide.id },
     });
@@ -152,7 +155,11 @@ test("MCP and a second engine client share Skill-driven scan lifecycle state", {
     assert.equal(visibleThroughMcp.structuredContent.result.status, "running");
     const repeatedThroughMcp = await mcp.request("tools/call", {
       name: "security_start_scan",
-      arguments: { workspaceRoot: workspace, mode: "standard", scope: "." },
+      arguments: {
+        workspaceRoot: workspace, taskId: "contract-task",
+        sessionId: startedByExtensionSide.workspace_id,
+        mode: "standard", scope: ".",
+      },
     });
     assert.equal(repeatedThroughMcp.isError, false, repeatedThroughMcp.content?.[0]?.text);
     assert.equal(repeatedThroughMcp.structuredContent.result.id, startedByExtensionSide.id);
