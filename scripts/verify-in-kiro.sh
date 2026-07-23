@@ -105,9 +105,7 @@ JS
 
 cat <<MSG
 
-Complete the interactive checklist in:
-  ${ROOT_DIR}/docs/local-kiro-smoke-test.md
-
+Complete the generated interactive checks against the current architecture and Power contracts.
 Record results in:
   ${RESULT_FILE}
 Validate the file against:

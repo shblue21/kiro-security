@@ -15,7 +15,17 @@ Version 0.3.0 provides an approval-driven one-click Agent integration:
 5. Return to Setup and select **Verify after import**. Setup reports **Verified** only after it detects and probes Kiro's native Power registration.
 6. Start a new Kiro Agent conversation, then ask it to run a Standard, Diff, or Deep scan. Scan starts are chat-only and Power-coordinated; the Dashboard consumes lifecycle and sealed results.
 
-The functional setup does not require a separate Node installation. Native Power import is required because `POWER.md` and phase steering—not the MCP runtime—own Standard, Diff, and Deep semantics. Kiro's own permission confirmation is intentionally not bypassed. Details and rollback behavior are documented in `docs/agent-integration.md`.
+The functional setup does not require a separate Node installation. Native Power import is required because `POWER.md` and phase steering—not the MCP runtime—own Standard, Diff, and Deep semantics. Kiro's own permission confirmation is intentionally not bypassed.
+
+## Documentation
+
+Current product decisions have one authority per concern. The `docs/` files below are repository-maintainer material and are deliberately excluded from the VSIX:
+
+- `docs/architecture.md` defines the technical architecture, workspace and scan lifecycle, and component boundaries.
+- `docs/codex-security-plugin-0.1.11-architecture.md` is a non-normative, version-pinned analysis of the upstream Codex Security Plugin used for parity review.
+- `powers/kiro-security-power/POWER.md`, its `steering/` workflows, and its `references/` define Agent execution behavior and artifact contracts.
+
+Historical migration plans, parity scorecards, and one-off verification records are retained in Git history, not as current product documentation. A mismatch between implementation and the documents above is a defect, not an alternate supported contract.
 
 ## Build and verify
 
@@ -35,8 +45,8 @@ Native workers and connectors remain separate trust boundaries. The Engine valid
 
 ## Publisher
 
-The development publisher is defined once in the root `package.json` as `kiro-security-power-dev`. Replace that value with the approved publisher before controlled distribution. Do not publish to Marketplace or Open VSX without the review described in `LICENSE-NOTICE.md` and `docs/provenance.md`.
+The development publisher is defined once in the root `package.json` as `kiro-security-power-dev`. Replace that value with the approved publisher before controlled distribution. Do not publish to Marketplace or Open VSX without the review described in `LICENSE-NOTICE.md`.
 
 ## Kiro desktop validation
 
-Cloud build and VS Code-compatible API tests do not prove Kiro desktop behavior. Use `scripts/verify-in-kiro.sh` or `scripts/verify-in-kiro.ps1` and follow `docs/local-kiro-smoke-test.md`. Installation automation does not by itself prove a delegated multi-round Deep run; retain the manual result record and receipt digests. The exact cloud command record is in `docs/cloud-verification.md`.
+Cloud build and VS Code-compatible API tests do not prove Kiro desktop behavior. Use `scripts/verify-in-kiro.sh` or `scripts/verify-in-kiro.ps1` to install the exact VSIX in an isolated Kiro profile. Installation automation does not by itself prove a delegated multi-round Deep run; assess the current architecture and Power contracts and retain the manual result record and receipt digests with the tested release.

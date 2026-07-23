@@ -96,6 +96,6 @@ $Result = [ordered]@{
     notes = @()
 }
 $Result | ConvertTo-Json -Depth 6 | Set-Content $ResultFile -Encoding UTF8
-Write-Host "Installation was reported by Kiro. Complete docs/local-kiro-smoke-test.md."
+Write-Host "Installation was reported by Kiro. Complete the generated checks against the current architecture and Power contracts."
 Write-Host "Record results in $ResultFile. Installation is the only automated check marked true."
 & $Kiro @Common --new-window $Workspace

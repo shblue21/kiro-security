@@ -20,7 +20,7 @@ if (listing.status !== 0) {
   process.exit(listing.status ?? 1);
 }
 const forbiddenInputs = listing.stdout.split(/\r?\n/).filter((entry) =>
-  /(?:^|\/)__pycache__(?:\/|$)|\.pyc$/i.test(entry),
+  /(?:^|\/)docs(?:\/|$)|(?:^|\/)__pycache__(?:\/|$)|\.pyc$/i.test(entry),
 );
 if (forbiddenInputs.length) {
   console.error(`Forbidden package inputs detected: ${forbiddenInputs.join(", ")}`);

@@ -6,6 +6,7 @@ tests/**
 dist/tests/**
 fixtures/**
 packages/**
+docs/**
 requirements-dev.txt
 pytest.ini
 tsconfig.json
