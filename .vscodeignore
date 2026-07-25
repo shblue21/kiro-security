@@ -1,0 +1,13 @@
+.git/**
+.gitignore
+.kiro/**
+docs/**
+engine/tests/**
+tests/**
+node_modules/**
+packages/**
+scripts/**
+**/*.pyc
+**/__pycache__/**
+package-lock.json
+tsconfig.json

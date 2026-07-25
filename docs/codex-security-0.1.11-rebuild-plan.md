@@ -10,7 +10,7 @@ Kiro Security Power를 로컬에 설치된 Codex Security Plugin 0.1.11의 실�
 
 - 아키텍처 사실의 기준: 설치된 `codex-security@0.1.11`의 실행 계약과 스키마 → 스킬 문서 → OpenAI 공개 문서
 - `docs/codex-security-plugin-0.1.11-architecture.md`는 위 원본을 찾고 해석하기 위한 버전 고정형 참고 자료다.
-- Kiro 제품 적응의 기준: Kiro Power, Agent chat, VSIX, workspace-local shared workbench
+- Kiro 제품 적응의 기준: Kiro Power, Agent chat, VSIX, scan target 밖의 extension-global shared workbench
 - 구현 판단의 기준: 20개 아키텍처 주제
 - 과거 Kiro migration, parity 보고서와 기존 내부 계약은 새 구현의 요구사항이 아니다. Fresh schema에는 이후 릴리스를 위한 forward migration 기반만 둔다.
 - 별도의 전수 계약 매트릭스는 만들지 않는다.
@@ -29,8 +29,8 @@ Kiro Security Power를 로컬에 설치된 Codex Security Plugin 0.1.11의 실�
 
 ### 0. 전환 기준 확정
 
-- Kiro는 VSIX-backed shared workbench 경로만 제품 topology로 지원한다. Codex의 prompt-only terminal/chat 경로는 의도적인 Kiro adaptation으로 제외한다.
-- Scan 시작은 Kiro Agent chat과 Power만 소유한다. 시작 호출은 같은 Agent task에 `scanId`를 반환하고, Agent는 별도 context 조회로 authoritative snapshot을 즉시 읽는다. VSIX에는 Start 동작을 두지 않는다.
+- Kiro는 VSIX `globalStorageUri`에 둔 하나의 전역 SQLite와 외부 scan artifact root를 shared workbench topology로 지원한다. 논리 workspace들은 이 DB의 행이며, 저장소 안에는 `.kiro/security-power`를 만들지 않는다. Codex의 prompt-only terminal/chat 경로는 의도적인 Kiro adaptation으로 제외한다.
+- Scan 시작은 Kiro Agent chat과 Power만 소유한다. 시작 호출은 Hook으로 증명된 같은 Kiro chat에 `scanId`를 반환하고, Agent는 별도 context 조회로 authoritative snapshot을 즉시 읽는다. VSIX에는 Start 동작을 두지 않는다.
 - Codex App의 start waiter, initial handoff delivery와 host `sendMessage` continuation은 Kiro에서 사용하지 않는다. Process/task loss 뒤에는 durable scan을 사용자가 Agent chat에서 명시적으로 재개한다.
 - Kiro 직접-resume에서는 VSIX가 exact scan/request identity를 가진 durable recovery/remediation request와 재개 정보를 저장한다. 새 Agent chat은 먼저 MCP claim을 호출해 identity와 적용되는 CAS를 검증하고 token을 받은 뒤, 두 번째 context 조회에 그 token을 제시해 delivered 전환과 authoritative context 반환을 수행한다. Delivery 전 scan recovery/remediation claim은 120초 뒤에만 takeover할 수 있고, delivered remediation worker는 900초 뒤에만 takeover할 수 있다. 실패·취소는 단계에 따라 claim을 release하거나 action을 cancel한다.
 - Deep은 라운드마다 동일 canonical brief를 받은 정확히 여섯 개의 독립 discovery worker를 사용하고 최대 10라운드를 실행한다. 신규 canonical merged candidate가 없는 첫 완전한 라운드에서 종료하며, 정해진 복구 후에도 여섯 개의 usable output을 확보하지 못하면 크기를 줄이지 않고 미완료 상태를 보존한다.
@@ -39,8 +39,8 @@ Kiro Security Power를 로컬에 설치된 Codex Security Plugin 0.1.11의 실�
 
 ### 1. 기반
 
-- plugin/Power entry point
-- logical workspace와 task identity
+- VSIX `globalStorageUri` 기반 plugin/Power entry point와 build/test/package 뼈대
+- logical workspace와 Kiro `PreToolUse` Hook의 one-time attestation으로 얻는 trusted chat identity
 - fresh SQLite schema와 current-result pointer
 - target/snapshot identity
 - scan start transaction과 lifecycle
@@ -48,8 +48,12 @@ Kiro Security Power를 로컬에 설치된 Codex Security Plugin 0.1.11의 실�
 ### 2. 실행 경계
 
 - Agent chat 전용 scan start
-- shared MCP transport
-- `scanId` 반환과 authoritative context 조회를 잇는 Agent task 직접 continuation
+- VSIX 명령이 `globalStorageUri`에 self-contained Power와 절대 Python/Engine/state 경로의 `mcp.json`을 원자적으로 준비하고, 사용자가 Kiro Powers 패널에서 그 폴더를 import해 등록하는 설치 경계
+- 이전 설치 화면 패턴을 따르는 명시적 사용자 승인 UI로 `~/.kiro/agents/default.json`의 Kiro Security 전용 Hook만 설치·검증·복구·제거하고, 기존 설정 보존·backup·rollback을 적용
+- newline-delimited JSON-RPC stdio shared MCP transport와 schema-validated workbench tool
+- 읽기 도구만 auto-approve하고 workspace 생성·setup 저장·scan start/progress/fail/cancel은 명시적 tool approval 대상으로 유지
+- 매 chat-bound 호출의 새 `requestNonce`를 실제 Kiro `session_id`, tool name과 exact argument digest에 짧게 결합하고 MCP에서 원자적으로 한 번만 소비
+- `scanId` 반환과 authoritative context 조회를 잇는 attested Agent chat 직접 continuation
 - durable scan의 명시적 Agent chat recovery
 - direct-resume request claim/delivery/release와 stale takeover
 - progress와 `failed + canceled_at` cancellation
@@ -93,11 +97,13 @@ Kiro Security Power를 로컬에 설치된 Codex Security Plugin 0.1.11의 실�
 - 20개 아키텍처 주제가 새 구현과 테스트에 모두 대응한다.
 - 기존 Kiro 구현 전용 compatibility와 pre-release DB backfill path가 남아 있지 않고 forward migration 기반은 검증된다.
 - workspace setup과 scan snapshot의 authority가 분리되어 있다.
+- 모든 논리 workspace가 하나의 extension-global SQLite에 저장되고 scan artifact도 target 밖에 있으며, 저장소 내부 runtime state가 없다.
 - `active_scan_id`가 current result pointer로 동작하고 terminal transition에서 유지된다.
 - Scan progress/complete/fail은 `scanId`와 transaction guard를 사용하고 별도 coordinator lease를 요구하지 않는다. Remediation 등 action별 mutation만 대응 계약의 action token, expected version과 CAS guard를 사용한다.
 - 취소는 `failed + canceled_at`으로 저장되고 UI에서 canceled로 projection된다.
 - Deep의 각 완전한 라운드는 정확히 6개의 usable worker output을 가지며 saturation 또는 10라운드 cap 전에는 centralized tail로 넘어가지 않는다.
 - Extension 재시작이나 다른 MCP process가 실행 중인 scan을 방해하지 않는다.
+- 모델이 만든 identity가 아니라 Kiro Hook이 전달한 실제 chat `session_id`가 workspace owner이며, 누락·만료·재사용·argument mismatch와 다른 chat 접근은 fail closed 한다.
 - Process/task가 종료돼도 running scan이 보존되고 새 Agent chat에서 명시적으로 재개할 수 있다.
 - Direct-resume의 claim/token 발급과 token 기반 context-delivery가 분리되고, release/cancel 및 120초·900초 stale takeover 경계가 검증된다.
 - Dashboard는 SQLite의 선택된 logical workspace와 pointer를 매번 다시 읽는다.
