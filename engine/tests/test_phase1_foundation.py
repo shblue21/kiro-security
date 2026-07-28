@@ -356,8 +356,10 @@ class PhaseOneFoundationTests(unittest.TestCase):
             inside.start_scan(workspace["id"])
         self.assertEqual(raised.exception.code, "scan_root_inside_target")
 
-    def test_all_engine_sources_parse_as_python_3_9(self):
-        for path in sorted((REPOSITORY_ROOT / "engine").rglob("*.py")):
+    def test_all_runtime_sources_parse_as_python_3_9(self):
+        paths = list((REPOSITORY_ROOT / "engine").rglob("*.py"))
+        paths.extend((REPOSITORY_ROOT / "hook").rglob("*.py"))
+        for path in sorted(paths):
             source = path.read_text(encoding="utf-8")
             try:
                 ast.parse(source, filename=str(path), feature_version=(3, 9))

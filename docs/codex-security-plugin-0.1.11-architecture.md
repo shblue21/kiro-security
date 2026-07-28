@@ -383,7 +383,7 @@ Start waiter는 scan의 handoff delivery를 claim하고 UUID token을 받는다.
 
 - 결과: `started`, `already_delivered`, `timed_out`
 - stale scan handoff claim: 120초 뒤 회수 가능
-- explicit recovery: recovery token prefix를 통해 cross-thread 복구 가능
+- explicit recovery: `handoff_status = pending`인 최초 handoff에 한해 `recovery_<UUID>` token으로 cross-thread delivery가 가능하다. 이미 `delivered`인 scan의 continuation ownership을 다른 thread로 이전하는 기능은 아니다.
 - token의 범위: context delivery 및 continuation claim
 - token이 하지 않는 일: progress/update/complete/fail mutation의 bearer authorization
 

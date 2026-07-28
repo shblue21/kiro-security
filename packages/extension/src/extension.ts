@@ -14,7 +14,7 @@ export async function activate(
   const paths = await prepareFoundationStorage(context);
   const status = describeFoundation(paths);
   output.appendLine(status.join("\n"));
-  const setupView = new SecuritySetupView(paths);
+  const setupView = new SecuritySetupView(context, paths, output);
   const setupRegistration = vscode.window.registerWebviewViewProvider(
     SecuritySetupView.viewId,
     setupView,

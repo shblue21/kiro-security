@@ -37,7 +37,7 @@ export async function preparePowerIntegration(
   return { powerRoot, pythonExecutable };
 }
 
-async function resolvePythonExecutable(): Promise<string> {
+export async function resolvePythonExecutable(): Promise<string> {
   const configured = vscode.workspace
     .getConfiguration("kiroSecurity")
     .get<string>("pythonPath", "")

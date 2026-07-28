@@ -1,26 +1,233 @@
+import { randomBytes } from "node:crypto";
+import { lstat } from "node:fs/promises";
 import * as path from "node:path";
 
 import * as vscode from "vscode";
 
+import {
+  ChatBindingManager,
+  type ChatBindingInspection,
+} from "./chatBinding";
 import type { FoundationPaths } from "./foundation";
+import { preparePowerIntegration } from "./powerIntegration";
 
 const VIEW_ID = "kiroSecurity.setup";
 
+type SetupCommand =
+  | "refresh"
+  | "enableChatBinding"
+  | "verifyChatBinding"
+  | "showHookFile"
+  | "repairChatBinding"
+  | "removeChatBinding"
+  | "preparePower"
+  | "revealPower";
+
 export class SecuritySetupView implements vscode.WebviewViewProvider {
   static readonly viewId = VIEW_ID;
+  private readonly chatBinding: ChatBindingManager;
+  private readonly powerRoot: string;
+  private busy = false;
+  private feedback: string | undefined;
 
-  constructor(private readonly paths: FoundationPaths) {}
+  constructor(
+    private readonly context: vscode.ExtensionContext,
+    private readonly paths: FoundationPaths,
+    private readonly output: vscode.OutputChannel,
+  ) {
+    this.chatBinding = new ChatBindingManager(context, paths);
+    this.powerRoot = path.join(
+      paths.stateRoot.fsPath,
+      "agent-integration",
+      "kiro-security-power",
+    );
+  }
 
   resolveWebviewView(view: vscode.WebviewView): void {
-    view.webview.options = { enableScripts: false };
+    view.webview.options = { enableScripts: true };
+    const messageSubscription = view.webview.onDidReceiveMessage(
+      async (message: unknown) => this.handleMessage(view, message),
+    );
+    view.onDidDispose(() => messageSubscription.dispose());
+    void this.refresh(view);
+  }
+
+  private async handleMessage(
+    view: vscode.WebviewView,
+    message: unknown,
+  ): Promise<void> {
+    if (this.busy || !isSetupMessage(message)) {
+      return;
+    }
+    this.busy = true;
+    this.feedback = undefined;
+    try {
+      switch (message.command) {
+        case "refresh":
+          break;
+        case "enableChatBinding":
+          await this.enableChatBinding();
+          break;
+        case "verifyChatBinding":
+          await this.chatBinding.verify();
+          this.feedback = "Hook registration and bridge probe passed.";
+          await vscode.window.showInformationMessage(
+            "Kiro Security Hook transport verification passed.",
+          );
+          break;
+        case "showHookFile":
+          await this.showHookFile();
+          break;
+        case "repairChatBinding":
+          await this.repairChatBinding();
+          break;
+        case "removeChatBinding":
+          await this.removeChatBinding();
+          break;
+        case "preparePower":
+          await this.preparePower();
+          break;
+        case "revealPower":
+          await this.revealPower();
+          break;
+      }
+    } catch (error) {
+      const detail = errorMessage(error);
+      this.feedback = `Action failed: ${detail}`;
+      this.output.appendLine(`Setup action ${message.command} failed: ${detail}`);
+      await vscode.window.showErrorMessage(`Kiro Security setup failed: ${detail}`);
+    } finally {
+      try {
+        await this.refresh(view);
+      } finally {
+        this.busy = false;
+      }
+    }
+  }
+
+  private async enableChatBinding(): Promise<void> {
+    const approved = await vscode.window.showWarningMessage(
+      "Enable the Kiro Security Hook transport for this user?",
+      {
+        modal: true,
+        detail: [
+          `This creates only ${this.chatBinding.hookPath} outside Extension global storage.`,
+          "The user-level Hook is visible to all Kiro chats, but it matches only the Kiro Powers wrapper and the bridge accepts only this Power's exact server and tools.",
+          "No Agent configuration or other Hook file is changed.",
+        ].join("\n\n"),
+      },
+      "Enable",
+    );
+    if (approved !== "Enable") {
+      return;
+    }
+    const result = await this.chatBinding.install();
+    this.feedback = result.changed
+      ? "Hook transport installed and verified."
+      : "Hook transport was already current and verified.";
+    this.output.appendLine(this.feedback);
+  }
+
+  private async repairChatBinding(): Promise<void> {
+    const approved = await vscode.window.showWarningMessage(
+      "Repair the dedicated Kiro Security Hook registration?",
+      {
+        modal: true,
+        detail:
+          "The dedicated file will be replaced atomically. Other Hook and Agent files are not touched.",
+      },
+      "Repair",
+    );
+    if (approved !== "Repair") {
+      return;
+    }
+    const result = await this.chatBinding.repair();
+    this.feedback = result.changed
+      ? "Hook transport repaired."
+      : "Hook transport is current and verified.";
+    this.output.appendLine(this.feedback);
+  }
+
+  private async removeChatBinding(): Promise<void> {
+    const approved = await vscode.window.showWarningMessage(
+      "Remove the dedicated Kiro Security Hook registration?",
+      {
+        modal: true,
+        detail:
+          "Only the dedicated ~/.kiro/hooks/kiro-security-power.json file is removed. Database and scan data are preserved.",
+      },
+      "Remove",
+    );
+    if (approved !== "Remove") {
+      return;
+    }
+    const result = await this.chatBinding.remove();
+    this.feedback = result.changed
+      ? "Hook registration removed."
+      : "Hook registration was already absent.";
+    this.output.appendLine(this.feedback);
+  }
+
+  private async showHookFile(): Promise<void> {
+    if (!(await regularFileExists(this.chatBinding.hookPath))) {
+      await vscode.window.showInformationMessage(
+        "The Kiro Security Hook registration does not exist yet.",
+      );
+      return;
+    }
+    await vscode.commands.executeCommand(
+      "vscode.open",
+      vscode.Uri.file(this.chatBinding.hookPath),
+    );
+  }
+
+  private async preparePower(): Promise<void> {
+    const prepared = await preparePowerIntegration(this.context, this.paths);
+    this.feedback = `Power prepared at ${prepared.powerRoot}`;
+    this.output.appendLine(this.feedback);
+    this.output.appendLine(`Python runtime: ${prepared.pythonExecutable}`);
+    const selection = await vscode.window.showInformationMessage(
+      "Kiro Security Power is ready to import from its global-storage folder.",
+      "Reveal Folder",
+    );
+    if (selection === "Reveal Folder") {
+      await this.revealPower();
+    }
+  }
+
+  private async revealPower(): Promise<void> {
+    if (!(await regularDirectoryExists(this.powerRoot))) {
+      await vscode.window.showInformationMessage(
+        "Prepare the Power integration before revealing its folder.",
+      );
+      return;
+    }
+    await vscode.commands.executeCommand(
+      "revealFileInOS",
+      vscode.Uri.file(this.powerRoot),
+    );
+  }
+
+  private async refresh(view: vscode.WebviewView): Promise<void> {
+    let chatBinding: ChatBindingInspection;
+    try {
+      chatBinding = await this.chatBinding.inspect();
+    } catch (error) {
+      chatBinding = {
+        state: "unavailable",
+        registrationState: "absent",
+        hookPath: this.chatBinding.hookPath,
+        bridgePath: this.chatBinding.bridgePath,
+        detail: errorMessage(error),
+      };
+    }
     view.webview.html = renderSetupHtml({
       webview: view.webview,
       stateRoot: this.paths.stateRoot.fsPath,
-      powerRoot: path.join(
-        this.paths.stateRoot.fsPath,
-        "agent-integration",
-        "kiro-security-power",
-      ),
+      powerRoot: this.powerRoot,
+      powerReady: await regularDirectoryExists(this.powerRoot),
+      chatBinding,
+      feedback: this.feedback,
     });
   }
 }
@@ -29,11 +236,20 @@ export function renderSetupHtml(input: {
   readonly webview: vscode.Webview;
   readonly stateRoot: string;
   readonly powerRoot: string;
+  readonly powerReady: boolean;
+  readonly chatBinding: ChatBindingInspection;
+  readonly feedback?: string;
 }): string {
+  const nonce = randomBytes(16).toString("base64");
   const csp = [
     "default-src 'none'",
     `style-src ${input.webview.cspSource} 'unsafe-inline'`,
+    `script-src 'nonce-${nonce}'`,
   ].join("; ");
+  const presentation = bindingPresentation(input.chatBinding);
+  const canRemove =
+    input.chatBinding.registrationState === "installed" ||
+    input.chatBinding.registrationState === "repairable";
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -49,7 +265,7 @@ export function renderSetupHtml(input: {
       <h1>Kiro Security Power</h1>
       <p>Repository security</p>
     </div>
-    <button class="icon-button" disabled title="UI preview" aria-label="Refresh setup state">↻</button>
+    <button class="icon-button" data-command="refresh" title="Refresh setup state" aria-label="Refresh setup state">↻</button>
   </header>
 
   <nav class="tabs" aria-label="Security panel sections">
@@ -59,23 +275,31 @@ export function renderSetupHtml(input: {
   </nav>
 
   <main class="content">
-    <div class="preview-note">
-      <span class="preview-dot" aria-hidden="true"></span>
-      UI preview only · setup actions are not connected yet
-    </div>
+    ${
+      input.feedback
+        ? `<div class="feedback">${escapeHtml(input.feedback)}</div>`
+        : ""
+    }
 
     <section class="card">
       <div class="card-title">
         <div>
           <h2>Connect Kiro Chat</h2>
-          <p>Bind security workspaces to the Kiro chat that started them.</p>
+          <p>Install the user-level Hook transport used by normal Kiro chats.</p>
         </div>
-        <span class="badge badge-neutral">not configured</span>
+        <span class="badge ${presentation.badgeClass}">${escapeHtml(
+          presentation.badge,
+        )}</span>
       </div>
-      <p class="setup-status"><strong>Secure chat binding is not configured</strong></p>
-      <p class="muted">This screen currently presents the intended setup experience only. It does not install Hooks or change Kiro user settings.</p>
+      <p class="setup-status"><strong>${escapeHtml(
+        presentation.heading,
+      )}</strong></p>
+      <p class="muted">${escapeHtml(input.chatBinding.detail)}</p>
+      <p class="scope-note">This phase validates Kiro's Hook-delivered <code>session_id</code> at the transport boundary. End-to-end one-time MCP attestation is not implemented yet, so this is not full trusted chat ownership parity.</p>
       <div class="button-row">
-        <button class="primary" disabled>Enable secure chat binding</button>
+        <button class="primary" data-command="enableChatBinding" ${
+          input.chatBinding.state === "absent" ? "" : "disabled"
+        }>Enable Hook transport</button>
       </div>
 
       <details class="setup-options">
@@ -84,10 +308,12 @@ export function renderSetupHtml(input: {
           <dl>
             <dt>Installation scope</dt>
             <dd>Current user · all Kiro chats</dd>
-            <dt>Changed file</dt>
-            <dd>Not selected</dd>
-            <dt>Matched tools</dt>
-            <dd>Kiro Security workspace and scan calls</dd>
+            <dt>Changed Kiro file</dt>
+            <dd class="mono">${escapeHtml(input.chatBinding.hookPath)}</dd>
+            <dt>Matcher</dt>
+            <dd><code>^kiro_powers$</code>; bridge filters exact Power, server, and tool names</dd>
+            <dt>Bridge</dt>
+            <dd class="mono">${escapeHtml(input.chatBinding.bridgePath)}</dd>
           </dl>
         </div>
       </details>
@@ -96,10 +322,20 @@ export function renderSetupHtml(input: {
         <summary>Advanced and troubleshooting</summary>
         <div class="setup-options-body">
           <div class="button-row">
-            <button disabled>Verify again</button>
-            <button disabled>Show changed file</button>
-            <button disabled>Repair</button>
-            <button class="danger" disabled>Remove chat binding</button>
+            <button data-command="verifyChatBinding" ${
+              input.chatBinding.state === "ready" ? "" : "disabled"
+            }>Verify again</button>
+            <button data-command="showHookFile" ${
+              input.chatBinding.registrationState === "absent"
+                ? "disabled"
+                : ""
+            }>Show changed file</button>
+            <button data-command="repairChatBinding" ${
+              input.chatBinding.state === "repairable" ? "" : "disabled"
+            }>Repair</button>
+            <button class="danger" data-command="removeChatBinding" ${
+              canRemove ? "" : "disabled"
+            }>Remove Hook transport</button>
           </div>
         </div>
       </details>
@@ -111,7 +347,9 @@ export function renderSetupHtml(input: {
           <h2>Power integration</h2>
           <p>Prepare the self-contained Power, then import it in Kiro.</p>
         </div>
-        <span class="badge badge-neutral">not configured</span>
+        <span class="badge ${
+          input.powerReady ? "badge-ready" : "badge-neutral"
+        }">${input.powerReady ? "prepared" : "not prepared"}</span>
       </div>
       <ol class="steps">
         <li>Prepare the Power folder from this Extension.</li>
@@ -119,8 +357,10 @@ export function renderSetupHtml(input: {
         <li>Start a new normal chat after setup is complete.</li>
       </ol>
       <div class="button-row">
-        <button class="primary" disabled>Prepare Power</button>
-        <button disabled>Reveal folder</button>
+        <button class="primary" data-command="preparePower">Prepare Power</button>
+        <button data-command="revealPower" ${
+          input.powerReady ? "" : "disabled"
+        }>Reveal folder</button>
       </div>
       <p class="mono muted">${escapeHtml(input.powerRoot)}</p>
     </section>
@@ -129,18 +369,75 @@ export function renderSetupHtml(input: {
       <summary>
         <span>
           <strong>System checks</strong>
-          <small>Foundation and integration preview</small>
+          <small>Storage and integration boundaries</small>
         </span>
       </summary>
       <div class="checks">
         ${checkRow("Global storage", input.stateRoot, true)}
-        ${checkRow("Secure chat binding", "Not configured", false)}
-        ${checkRow("Power runtime", "Not configured", false)}
+        ${checkRow(
+          "Kiro Hook transport",
+          presentation.heading,
+          input.chatBinding.state === "ready",
+        )}
+        ${checkRow(
+          "Power runtime",
+          input.powerReady ? "Prepared" : "Not prepared",
+          input.powerReady,
+        )}
       </div>
     </details>
   </main>
+  <script nonce="${nonce}">
+    const vscode = acquireVsCodeApi();
+    for (const button of document.querySelectorAll('[data-command]')) {
+      button.addEventListener('click', () => {
+        if (!button.disabled) {
+          vscode.postMessage({ command: button.dataset.command });
+        }
+      });
+    }
+  </script>
 </body>
 </html>`;
+}
+
+function bindingPresentation(binding: ChatBindingInspection): {
+  readonly badge: string;
+  readonly badgeClass: string;
+  readonly heading: string;
+} {
+  switch (binding.state) {
+    case "ready":
+      return {
+        badge: "installed",
+        badgeClass: "badge-ready",
+        heading: "Hook transport is installed",
+      };
+    case "repairable":
+      return {
+        badge: "repair needed",
+        badgeClass: "badge-warning",
+        heading: "Dedicated Hook transport needs repair",
+      };
+    case "conflict":
+      return {
+        badge: "conflict",
+        badgeClass: "badge-error",
+        heading: "The dedicated Hook path is occupied",
+      };
+    case "unavailable":
+      return {
+        badge: "unavailable",
+        badgeClass: "badge-error",
+        heading: "Hook transport cannot be configured",
+      };
+    case "absent":
+      return {
+        badge: "not installed",
+        badgeClass: "badge-neutral",
+        heading: "Hook transport is not installed",
+      };
+  }
 }
 
 function setupStyles(): string {
@@ -160,6 +457,7 @@ function setupStyles(): string {
       padding: 6px 10px;
       color: var(--vscode-button-secondaryForeground);
       background: var(--vscode-button-secondaryBackground);
+      cursor: pointer;
     }
     button:disabled { opacity: .5; cursor: default; }
     button.primary {
@@ -167,6 +465,7 @@ function setupStyles(): string {
       background: var(--vscode-button-background);
     }
     button.danger { color: var(--vscode-errorForeground); }
+    code, .mono { font-family: var(--vscode-editor-font-family); }
     .topbar {
       display: flex;
       align-items: center;
@@ -198,18 +497,11 @@ function setupStyles(): string {
       opacity: 1;
     }
     .content { padding: 12px; display: grid; gap: 12px; }
-    .preview-note {
-      display: flex;
-      align-items: center;
-      gap: 7px;
-      color: var(--vscode-descriptionForeground);
-      font-size: 12px;
-    }
-    .preview-dot {
-      width: 7px;
-      height: 7px;
-      border-radius: 50%;
-      background: var(--vscode-editorWarning-foreground);
+    .feedback {
+      border-left: 3px solid var(--vscode-focusBorder);
+      padding: 7px 9px;
+      background: var(--vscode-textBlockQuote-background);
+      overflow-wrap: anywhere;
     }
     .card {
       border: 1px solid var(--vscode-panel-border);
@@ -231,19 +523,25 @@ function setupStyles(): string {
       padding: 2px 7px;
       font-size: 11px;
       text-transform: lowercase;
+      border: 1px solid currentColor;
     }
-    .badge-neutral {
-      color: var(--vscode-descriptionForeground);
-      border: 1px solid var(--vscode-panel-border);
-      background: transparent;
-    }
+    .badge-neutral { color: var(--vscode-descriptionForeground); }
+    .badge-ready { color: var(--vscode-testing-iconPassed); }
+    .badge-warning { color: var(--vscode-editorWarning-foreground); }
+    .badge-error { color: var(--vscode-errorForeground); }
     .setup-status { margin-top: 14px !important; }
+    .scope-note {
+      margin-top: 10px !important;
+      padding: 8px;
+      border-radius: 3px;
+      color: var(--vscode-descriptionForeground);
+      background: var(--vscode-textBlockQuote-background);
+    }
     .muted {
       color: var(--vscode-descriptionForeground);
       overflow-wrap: anywhere;
     }
     .mono {
-      font-family: var(--vscode-editor-font-family);
       font-size: 11px;
       white-space: pre-wrap;
       overflow-wrap: anywhere;
@@ -318,4 +616,46 @@ function escapeHtml(value: unknown): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
+}
+
+function isSetupMessage(value: unknown): value is { command: SetupCommand } {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !("command" in value) ||
+    typeof (value as { command?: unknown }).command !== "string"
+  ) {
+    return false;
+  }
+  return new Set<SetupCommand>([
+    "refresh",
+    "enableChatBinding",
+    "verifyChatBinding",
+    "showHookFile",
+    "repairChatBinding",
+    "removeChatBinding",
+    "preparePower",
+    "revealPower",
+  ]).has((value as { command: SetupCommand }).command);
+}
+
+async function regularFileExists(candidate: string): Promise<boolean> {
+  try {
+    return (await lstat(candidate)).isFile();
+  } catch {
+    return false;
+  }
+}
+
+async function regularDirectoryExists(candidate: string): Promise<boolean> {
+  try {
+    const metadata = await lstat(candidate);
+    return metadata.isDirectory() && !metadata.isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

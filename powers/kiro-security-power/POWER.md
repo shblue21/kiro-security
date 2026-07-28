@@ -19,9 +19,12 @@ The selected target is an explicit absolute directory and is not confined to whi
 ## Onboarding
 
 1. Install the Kiro Security Power VSIX.
-2. Run **Kiro Security: Prepare Power Integration** from the command palette.
-3. Import the revealed folder with **Powers → Add Custom Power → Import power from a folder**. The prepared copy contains an absolute Python runtime and storage configuration; the repository `mcp.json` is only its portable template.
-4. The Extension setup view is a UI-only preview in this rebuild phase. It does not install Hooks or change Kiro user settings.
+2. Open the Kiro Security setup view and explicitly enable the Hook transport. The Extension creates only `~/.kiro/hooks/kiro-security-power.json` in Kiro user configuration; its bridge and all runtime state remain under VSIX `globalStorageUri`.
+3. Prepare the Power from the same setup view (or run **Kiro Security: Prepare Power Integration** from the command palette).
+4. Import the revealed folder with **Powers → Add Custom Power → Import power from a folder**. The prepared copy contains an absolute Python runtime and storage configuration; the repository `mcp.json` is only its portable template.
+5. Start a new normal Kiro chat.
+
+The user-level `PreToolUse` Hook matches the exact outer `kiro_powers` tool name. The bridge passes unrelated Powers unchanged and accepts only calls whose Power name, MCP server name, and inner Kiro Security tool name exactly match this Power. Setup can verify, repair, or remove the dedicated registration without modifying other Hook or Agent files.
 
 ## Workbench continuation
 
@@ -33,4 +36,4 @@ The selected target is an explicit absolute directory and is not confined to whi
 
 The MCP server owns deterministic state and snapshot operations only. Phase 2 does not yet include Standard, Diff, Deep, completion/finalization, reporting, or finding workflows. A durable running row is not proof that semantic analysis completed; do not claim a completed security scan until those later contracts and artifacts exist.
 
-Until a trusted Kiro chat identity bridge is implemented, the MCP uses possession of opaque logical workspace and scan identifiers as an explicit Kiro adaptation. Do not describe this phase as trusted chat-session parity with Codex Security.
+The installed Hook bridge validates that Kiro supplied a `session_id`, but this phase does not yet issue and atomically consume the one-time MCP attestation. Until that identity phase is implemented, the MCP still uses possession of opaque logical workspace and scan identifiers as an explicit Kiro adaptation. Do not describe this phase as trusted chat-session parity with Codex Security.

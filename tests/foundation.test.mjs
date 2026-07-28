@@ -1,8 +1,15 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -10,7 +17,7 @@ import test from "node:test";
 const require = createRequire(import.meta.url);
 const manifest = JSON.parse(readFileSync("package.json", "utf8"));
 
-test("extension manifest exposes a UI-only setup view and existing foundation commands", () => {
+test("extension manifest exposes the setup view and foundation commands", () => {
   assert.equal(manifest.main, "./out/packages/extension/src/extension.js");
   assert.deepEqual(manifest.extensionKind, ["workspace"]);
   assert.deepEqual(manifest.activationEvents, [
@@ -45,7 +52,7 @@ test("extension manifest exposes a UI-only setup view and existing foundation co
   assert.equal(existsSync(manifest.main), true);
 });
 
-test("setup view is a static preview with no Hook or Power actions", () => {
+test("setup view connects explicit Hook and Power actions without Agent config writes", () => {
   const setup = readFileSync(
     "packages/extension/src/setupView.ts",
     "utf8",
@@ -54,15 +61,324 @@ test("setup view is a static preview with no Hook or Power actions", () => {
     "packages/extension/src/extension.ts",
     "utf8",
   );
-  assert.match(setup, /UI preview only/);
-  assert.match(setup, /does not install Hooks or change Kiro user settings/);
-  assert.match(setup, /enableScripts: false/);
-  assert.doesNotMatch(setup, /onDidReceiveMessage|preparePowerIntegration/);
-  assert.doesNotMatch(extension, /ChatBindingManager|enableChatBinding/);
-  assert.equal(
-    existsSync("packages/extension/src/chatBinding.ts"),
-    false,
+  assert.match(setup, /enableScripts: true/);
+  assert.match(setup, /onDidReceiveMessage/);
+  assert.match(setup, /preparePowerIntegration/);
+  assert.match(setup, /showWarningMessage/);
+  assert.match(extension, /new SecuritySetupView\(context, paths, output\)/);
+});
+
+test("Hook registration uses one dedicated user file and an exact Kiro Powers matcher", () => {
+  const {
+    buildHookRegistrationDocument,
+    getHookBridgePath,
+    getHookRegistrationPath,
+    HOOK_FILE_NAME,
+    POWER_TOOL_MATCHER,
+  } = require(
+    "../out/packages/extension/src/chatBindingFiles.js",
   );
+  const hookPath = getHookRegistrationPath("/users/tester");
+  const bridgePath = getHookBridgePath("/global/storage");
+  const document = buildHookRegistrationDocument({
+    pythonExecutable: "/runtime/python3",
+    bridgePath,
+    platform: "darwin",
+  });
+
+  assert.equal(
+    hookPath,
+    join("/users/tester", ".kiro", "hooks", HOOK_FILE_NAME),
+  );
+  assert.equal(document.version, "v1");
+  assert.equal(document.hooks.length, 1);
+  assert.equal(document.hooks[0].trigger, "PreToolUse");
+  assert.equal(document.hooks[0].matcher, POWER_TOOL_MATCHER);
+  assert.equal(POWER_TOOL_MATCHER, "^kiro_powers$");
+  assert.match(document.hooks[0].action.command, /\/runtime\/python3/);
+  assert.match(document.hooks[0].action.command, /\/global\/storage\/runtime\/hook-bridge/);
+  assert.doesNotMatch(
+    JSON.stringify(document),
+    /workbench\.sqlite3|scanRoot/,
+  );
+});
+
+test("Hook install, atomic repair, and removal stay in the dedicated-file boundary", async () => {
+  const {
+    buildHookRegistrationDocument,
+    getHookBridgePath,
+    getHookRegistrationPath,
+    inspectHookRegistration,
+    installHookRegistration,
+    removeHookRegistration,
+  } = require(
+    "../out/packages/extension/src/chatBindingFiles.js",
+  );
+  const temporary = await mkdtemp(join(tmpdir(), "kiro-hook-files-test-"));
+  try {
+    const home = join(temporary, "home");
+    const stateRoot = join(temporary, "global-storage");
+    const hookPath = getHookRegistrationPath(home);
+    const document = buildHookRegistrationDocument({
+      pythonExecutable: "/runtime/python3",
+      bridgePath: getHookBridgePath(stateRoot),
+      platform: "darwin",
+    });
+
+    assert.equal(
+      (await inspectHookRegistration({ hookPath, expected: document })).state,
+      "absent",
+    );
+    const installed = await installHookRegistration({
+      hookPath,
+      document,
+      repair: false,
+    });
+    assert.equal(installed.changed, true);
+    assert.equal(
+      (await inspectHookRegistration({ hookPath, expected: document })).state,
+      "installed",
+    );
+    if (process.platform !== "win32") {
+      assert.equal((await stat(hookPath)).mode & 0o777, 0o600);
+    }
+
+    const idempotent = await installHookRegistration({
+      hookPath,
+      document,
+      repair: false,
+    });
+    assert.equal(idempotent.changed, false);
+
+    const drifted = {
+      ...document,
+      hooks: [{ ...document.hooks[0], timeout: 11 }],
+    };
+    const driftedText = `${JSON.stringify(drifted, null, 2)}\n`;
+    await writeFile(hookPath, driftedText, "utf8");
+    assert.equal(
+      (await inspectHookRegistration({ hookPath, expected: document })).state,
+      "repairable",
+    );
+    await assert.rejects(
+      installHookRegistration({
+        hookPath,
+        document,
+        repair: false,
+      }),
+      /requires repair/,
+    );
+
+    const repaired = await installHookRegistration({
+      hookPath,
+      document,
+      repair: true,
+    });
+    assert.equal(repaired.changed, true);
+    assert.equal(
+      (await inspectHookRegistration({ hookPath, expected: document })).state,
+      "installed",
+    );
+
+    const removed = await removeHookRegistration({ hookPath });
+    assert.equal(removed.changed, true);
+    assert.equal(existsSync(hookPath), false);
+    assert.equal(
+      (await inspectHookRegistration({ hookPath, expected: document })).state,
+      "absent",
+    );
+  } finally {
+    await rm(temporary, { force: true, recursive: true });
+  }
+});
+
+test("dedicated Hook path refuses symlink targets", async () => {
+  const {
+    buildHookRegistrationDocument,
+    getHookRegistrationPath,
+    inspectHookRegistration,
+    installHookRegistration,
+  } = require(
+    "../out/packages/extension/src/chatBindingFiles.js",
+  );
+  const temporary = await mkdtemp(join(tmpdir(), "kiro-hook-conflict-test-"));
+  try {
+    if (process.platform === "win32") {
+      return;
+    }
+    const hookPath = getHookRegistrationPath(join(temporary, "home"));
+    await mkdir(join(temporary, "home", ".kiro", "hooks"), {
+      recursive: true,
+    });
+    const existingText = '{"version":"v1","hooks":[]}\n';
+    const symlinkTarget = join(temporary, "other-hook.json");
+    await writeFile(symlinkTarget, existingText, "utf8");
+    await symlink(symlinkTarget, hookPath);
+    const document = buildHookRegistrationDocument({
+      pythonExecutable: "/runtime/python3",
+      bridgePath: join(temporary, "state", "runtime", "bridge.py"),
+      platform: "darwin",
+    });
+    assert.equal(
+      (await inspectHookRegistration({ hookPath, expected: document })).state,
+      "conflict",
+    );
+    await assert.rejects(
+      installHookRegistration({
+        hookPath,
+        document,
+        repair: true,
+      }),
+      /symlink/,
+    );
+    assert.equal(readFileSync(symlinkTarget, "utf8"), existingText);
+  } finally {
+    await rm(temporary, { force: true, recursive: true });
+  }
+});
+
+test("Hook bridge is materialized under global storage and validates only exact Power calls", async () => {
+  const {
+    getHookBridgePath,
+    getPackagedHookBridgePath,
+    inspectHookBridge,
+    materializeHookBridge,
+  } = require(
+    "../out/packages/extension/src/chatBindingFiles.js",
+  );
+  const temporary = await mkdtemp(join(tmpdir(), "kiro-hook-bridge-test-"));
+  try {
+    const sourcePath = getPackagedHookBridgePath(resolve("."));
+    const bridgePath = getHookBridgePath(join(temporary, "global-storage"));
+    assert.equal(
+      await materializeHookBridge({ sourcePath, bridgePath }),
+      true,
+    );
+    assert.equal(
+      await materializeHookBridge({ sourcePath, bridgePath }),
+      false,
+    );
+    assert.equal(
+      (await inspectHookBridge({ sourcePath, bridgePath })).ready,
+      true,
+    );
+    if (process.platform !== "win32") {
+      assert.equal((await stat(bridgePath)).mode & 0o777, 0o700);
+    }
+
+    const python = execFileSync(
+      process.platform === "win32" ? "python" : "python3",
+      ["-c", "import sys; print(sys.executable)"],
+      { encoding: "utf8" },
+    ).trim();
+    const toolContract = JSON.parse(
+      execFileSync(
+        python,
+        [
+          "-B",
+          "-S",
+          "-c",
+          "import json,runpy,sys; from kiro_security.mcp_tools import TOOL_DEFINITIONS; bridge=runpy.run_path(sys.argv[1]); print(json.dumps({'tools':[tool['name'] for tool in TOOL_DEFINITIONS],'allowed':sorted(bridge['ALLOWED_TOOL_NAMES'])}))",
+          bridgePath,
+        ],
+        {
+          encoding: "utf8",
+          env: { ...process.env, PYTHONPATH: resolve("engine") },
+        },
+      ),
+    );
+    const toolNames = toolContract.tools;
+    assert.deepEqual([...toolContract.allowed].sort(), [...toolNames].sort());
+    const base = {
+      hook_event_name: "PreToolUse",
+      cwd: temporary,
+      tool_name: "kiro_powers",
+      tool_input: {
+        action: "use",
+        powerName: "kiro-security-power",
+        serverName: "kiro-security-workbench",
+        toolName: "kiro_security_get_capabilities",
+        arguments: {},
+      },
+    };
+    const runBridge = (payload) =>
+      spawnSync(python, ["-B", bridgePath], {
+        encoding: "utf8",
+        input: JSON.stringify(payload),
+      });
+    for (const toolName of toolNames) {
+      const valid = runBridge({
+        ...base,
+        session_id: "chat-a",
+        tool_input: { ...base.tool_input, toolName },
+      });
+      assert.equal(valid.status, 0, toolName);
+      assert.equal(valid.stdout, "", toolName);
+      assert.equal(valid.stderr, "", toolName);
+    }
+
+    const missingSession = runBridge(base);
+    assert.equal(missingSession.status, 2);
+    assert.match(missingSession.stderr, /session_id/);
+
+    const unrelatedPower = runBridge({
+      ...base,
+      tool_input: { ...base.tool_input, powerName: "another-power" },
+    });
+    assert.equal(unrelatedPower.status, 0);
+
+    const largeUnrelatedPower = runBridge({
+      ...base,
+      tool_input: {
+        ...base.tool_input,
+        powerName: "another-power",
+        arguments: { data: "x".repeat(1024 * 1024) },
+      },
+    });
+    assert.equal(largeUnrelatedPower.status, 0);
+
+    const wrongServer = runBridge({
+      ...base,
+      session_id: "chat-a",
+      tool_input: { ...base.tool_input, serverName: "another-server" },
+    });
+    assert.equal(wrongServer.status, 2);
+    assert.match(wrongServer.stderr, /server/);
+
+    const { serverName: _serverName, ...withoutServer } = base.tool_input;
+    const missingServer = runBridge({
+      ...base,
+      session_id: "chat-a",
+      tool_input: withoutServer,
+    });
+    assert.equal(missingServer.status, 2);
+    assert.match(missingServer.stderr, /server/);
+
+    const unknownSecurityTool = runBridge({
+      ...base,
+      session_id: "chat-a",
+      tool_input: { ...base.tool_input, toolName: "other_tool" },
+    });
+    assert.equal(unknownSecurityTool.status, 2);
+
+    const nonStringTool = runBridge({
+      ...base,
+      session_id: "chat-a",
+      tool_input: { ...base.tool_input, toolName: [] },
+    });
+    assert.equal(nonStringTool.status, 2);
+    assert.doesNotMatch(nonStringTool.stderr, /Traceback|TypeError/);
+
+    const nonStringEvent = runBridge({
+      ...base,
+      session_id: "chat-a",
+      hook_event_name: [],
+    });
+    assert.equal(nonStringEvent.status, 2);
+    assert.doesNotMatch(nonStringEvent.stderr, /Traceback|TypeError/);
+  } finally {
+    await rm(temporary, { force: true, recursive: true });
+  }
 });
 
 test("extension entry point prepares one external global workbench boundary", () => {
@@ -88,6 +404,8 @@ test("Power entry point preserves the Agent-chat ownership boundary", () => {
   assert.match(power, /start_scan.*get_scan_context/s);
   assert.match(power, /does not yet include Standard, Diff, Deep/);
   assert.match(power, /workspace and scan identifiers as an explicit Kiro adaptation/);
+  assert.match(power, /matches the exact outer `kiro_powers` tool name/);
+  assert.match(power, /does not yet issue and atomically consume the one-time MCP attestation/);
   assert.equal(existsSync("powers/kiro-security-power/mcp.json"), true);
 });
 
@@ -259,7 +577,7 @@ test("internal reference documents are excluded from the VSIX", () => {
   assert.ok(!ignored.includes("powers/**"));
 });
 
-test("actual VSIX file selection contains runtime files and no chat binding implementation", () => {
+test("actual VSIX file selection contains the Hook bridge and chat binding runtime", () => {
   const binary = resolve(
     "node_modules",
     ".bin",
@@ -273,6 +591,7 @@ test("actual VSIX file selection contains runtime files and no chat binding impl
   assert.ok(files.includes("media/security.svg"));
   assert.ok(files.includes("powers/kiro-security-power/POWER.md"));
   assert.ok(files.includes("powers/kiro-security-power/mcp.json"));
+  assert.ok(files.includes("hook/kiro_security_hook_bridge.py"));
   assert.ok(files.includes("engine/kiro_security/workbench.py"));
   assert.ok(files.includes("engine/kiro_security/mcp_server.py"));
   assert.ok(files.includes("engine/kiro_security/mcp_tools.py"));
@@ -292,7 +611,10 @@ test("actual VSIX file selection contains runtime files and no chat binding impl
     files.includes("out/packages/extension/src/powerIntegration.js"),
   );
   assert.ok(files.includes("out/packages/extension/src/setupView.js"));
-  assert.ok(!files.includes("out/packages/extension/src/chatBinding.js"));
+  assert.ok(files.includes("out/packages/extension/src/chatBinding.js"));
+  assert.ok(
+    files.includes("out/packages/extension/src/chatBindingFiles.js"),
+  );
   assert.ok(!files.includes("engine/kiro_security/identity.py"));
   assert.ok(!files.includes("engine/kiro_security/identity_hook.py"));
   assert.ok(!files.some((entry) => entry.startsWith("docs/")));

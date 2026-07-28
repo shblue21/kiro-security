@@ -48,8 +48,8 @@ Kiro Security Power를 로컬에 설치된 Codex Security Plugin 0.1.11의 실�
 ### 2. 실행 경계
 
 - Agent chat 전용 scan start
-- VSIX 명령이 `globalStorageUri`에 self-contained Power와 절대 Python/Engine/state 경로의 `mcp.json`을 원자적으로 준비하고, 사용자가 Kiro Powers 패널에서 그 폴더를 import해 등록하는 설치 경계
-- 이전 설치 화면 패턴을 따르는 명시적 사용자 승인 UI로 `~/.kiro/agents/default.json`의 Kiro Security 전용 Hook만 설치·검증·복구·제거하고, 기존 설정 보존·backup·rollback을 적용
+- VSIX 명령이 `globalStorageUri`에 self-contained Power와 절대 Python/Engine/state 경로의 `mcp.json`을 원자적으로 준비하고, 사용자가 Kiro Powers 패널에서 그 폴더를 import해 등록하는 Power 설치 경계
+- 이전 설치 화면 패턴을 따르는 명시적 사용자 승인 UI가 Hook bridge를 `globalStorageUri`에 준비하고, Kiro의 사용자 전역 Hook 등록 파일 `~/.kiro/hooks/kiro-security-power.json`만 원자적으로 설치·검증·복구·제거하는 별도 Hook 설치 경계. Kiro Hook matcher는 outer `kiro_powers` tool name에 정확히 고정하고 bridge가 Power/server/inner tool을 다시 exact-match한다. 등록 action에는 확인된 Python executable과 `globalStorageUri` Hook bridge의 절대 경로만 두고 DB·scan artifact·runtime state는 두지 않으며, 다른 Hook 및 Agent 설정은 수정하지 않는다.
 - newline-delimited JSON-RPC stdio shared MCP transport와 schema-validated workbench tool
 - 읽기 도구만 auto-approve하고 workspace 생성·setup 저장·scan start/progress/fail/cancel은 명시적 tool approval 대상으로 유지
 - 매 chat-bound 호출의 새 `requestNonce`를 실제 Kiro `session_id`, tool name과 exact argument digest에 짧게 결합하고 MCP에서 원자적으로 한 번만 소비
