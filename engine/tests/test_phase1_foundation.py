@@ -2,8 +2,7 @@
 
 import ast
 import concurrent.futures
-import json
-import os
+import hashlib
 import sqlite3
 import stat
 import subprocess
@@ -44,6 +43,37 @@ def make_repository(root):
     git(root, "commit", "-qm", "initial")
 
 
+def setup_from_workspace(workspace):
+    value = workspace["setup"]["value"]
+    diff_value = value["diffTarget"]
+    return WorkspaceSetup(
+        target_path=value["targetPath"],
+        mode=value["mode"],
+        scope=value["scope"],
+        user_context=value["userContext"],
+        diff_target=(
+            DiffTarget(
+                diff_value["kind"],
+                diff_value["baseRevision"],
+                diff_value["headRevision"],
+                diff_value["contentDigest"],
+            )
+            if diff_value is not None
+            else None
+        ),
+    )
+
+
+def start_approved(workbench, workspace, owner_session_hash):
+    return workbench.start_scan(
+        workspace["id"],
+        expected_setup_revision=workspace["setupRevision"],
+        expected_setup_digest=workspace["setupDigest"],
+        approved_setup=setup_from_workspace(workspace),
+        owner_session_hash=owner_session_hash,
+    )
+
+
 class PhaseOneFoundationTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -53,6 +83,7 @@ class PhaseOneFoundationTests(unittest.TestCase):
         self.scan_root = self.base / "scan-artifacts"
         make_repository(self.root)
         self.workbench = Workbench(str(self.state_root), str(self.scan_root))
+        self.owner_session_hash = hashlib.sha256(b"phase-one-chat").hexdigest()
         self.setup = WorkspaceSetup(str(self.root), mode="standard")
 
     def tearDown(self):
@@ -60,9 +91,16 @@ class PhaseOneFoundationTests(unittest.TestCase):
 
     def submitted_workspace(self, setup=None):
         selected = setup or self.setup
-        draft = self.workbench.create_workspace(selected)
+        draft = self.workbench.create_workspace(
+            selected,
+            owner_session_hash=self.owner_session_hash,
+        )
         self.assertFalse(draft["setup"]["submitted"])
-        return self.workbench.update_workspace_setup(draft["id"], selected)
+        return self.workbench.update_workspace_setup(
+            draft["id"],
+            selected,
+            owner_session_hash=self.owner_session_hash,
+        )
 
     def test_global_schema_pointer_and_storage_boundaries(self):
         state = self.workbench.schema_state()
@@ -79,9 +117,11 @@ class PhaseOneFoundationTests(unittest.TestCase):
             workspace_columns = {
                 row[1]: row for row in connection.execute("PRAGMA table_info(workspaces)")
             }
-            self.assertNotIn("owner_session_id", workspace_columns)
+            self.assertEqual(workspace_columns["owner_session_hash"][3], 1)
             self.assertEqual(workspace_columns["target_path"][3], 0)
             self.assertEqual(workspace_columns["submitted"][4], "0")
+            self.assertEqual(workspace_columns["setup_revision"][3], 1)
+            self.assertEqual(workspace_columns["setup_revision"][4], "0")
             foreign_keys = connection.execute("PRAGMA foreign_key_list(workspaces)").fetchall()
             active_pointer = next(row for row in foreign_keys if row[3] == "active_scan_id")
             self.assertEqual(active_pointer[2], "scans")
@@ -94,17 +134,34 @@ class PhaseOneFoundationTests(unittest.TestCase):
                 """
             ).fetchone()[0]
             self.assertIn("WHERE status = 'running'", index_sql)
+            attestation_columns = {
+                row[1]: row
+                for row in connection.execute("PRAGMA table_info(chat_attestations)")
+            }
+            self.assertEqual(
+                set(attestation_columns),
+                {
+                    "nonce",
+                    "session_hash",
+                    "tool_name",
+                    "arguments_hash",
+                    "expires_at",
+                },
+            )
         finally:
             connection.close()
 
     def test_provisional_workspace_and_unbounded_context(self):
-        empty = self.workbench.create_workspace()
+        empty = self.workbench.create_workspace(
+            owner_session_hash=self.owner_session_hash,
+        )
         self.assertIsNone(empty["targetPath"])
         self.assertFalse(empty["setup"]["submitted"])
         self.assertFalse(empty["setup"]["valid"])
 
         unresolved = self.workbench.create_workspace(
             WorkspaceSetup(str(self.root), mode="diff"),
+            owner_session_hash=self.owner_session_hash,
         )
         self.assertFalse(unresolved["setup"]["submitted"])
         self.assertFalse(unresolved["setup"]["valid"])
@@ -114,14 +171,75 @@ class PhaseOneFoundationTests(unittest.TestCase):
         submitted = self.workbench.update_workspace_setup(
             empty["id"],
             WorkspaceSetup(str(self.root), user_context=long_context),
+            owner_session_hash=self.owner_session_hash,
         )
         self.assertTrue(submitted["setup"]["submitted"])
         self.assertTrue(submitted["setup"]["valid"])
         self.assertEqual(submitted["userContext"], long_context)
+        self.assertEqual(submitted["setupRevision"], 1)
+        self.assertEqual(len(submitted["setupDigest"]), 64)
+        self.assertEqual(submitted["setup"]["value"]["userContext"], long_context)
+
+    def test_start_requires_the_exact_user_approved_setup(self):
+        workspace = self.submitted_workspace()
+        with self.assertRaises(WorkbenchError) as raised:
+            self.workbench.start_scan(
+                workspace["id"],
+                owner_session_hash=self.owner_session_hash,
+            )
+        self.assertEqual(raised.exception.code, "start_approval_incomplete")
+        approved_setup = WorkspaceSetup(
+            target_path=workspace["setup"]["value"]["targetPath"],
+            mode=workspace["setup"]["value"]["mode"],
+            scope=workspace["setup"]["value"]["scope"],
+            user_context=workspace["setup"]["value"]["userContext"],
+        )
+        started = self.workbench.start_scan(
+            workspace["id"],
+            expected_setup_revision=workspace["setupRevision"],
+            expected_setup_digest=workspace["setupDigest"],
+            approved_setup=approved_setup,
+            owner_session_hash=self.owner_session_hash,
+        )
+        self.assertFalse(started["reused"])
+
+        other = self.submitted_workspace()
+        with self.assertRaises(WorkbenchError) as raised:
+            self.workbench.start_scan(
+                other["id"],
+                expected_setup_revision=other["setupRevision"],
+                expected_setup_digest="0" * 64,
+                approved_setup=approved_setup,
+                owner_session_hash=self.owner_session_hash,
+            )
+        self.assertEqual(raised.exception.code, "setup_changed")
+        self.assertIsNone(
+            self.workbench.get_workspace(
+                other["id"],
+                owner_session_hash=self.owner_session_hash,
+            )["activeScanId"]
+        )
+        with self.assertRaises(WorkbenchError) as raised:
+            self.workbench.start_scan(
+                other["id"],
+                expected_setup_revision=other["setupRevision"],
+                expected_setup_digest=other["setupDigest"],
+                approved_setup=WorkspaceSetup(
+                    target_path=str(self.root) + "/.",
+                    mode="standard",
+                    scope=".",
+                ),
+                owner_session_hash=self.owner_session_hash,
+            )
+        self.assertEqual(raised.exception.code, "setup_changed")
 
     def test_setup_locks_after_first_scan_and_pointer_survives_failure(self):
         workspace = self.submitted_workspace()
-        started = self.workbench.start_scan(workspace["id"])
+        started = start_approved(
+            self.workbench,
+            workspace,
+            self.owner_session_hash,
+        )
         scan_id = started["scanId"]
         self.assertEqual(scan_id, started["workspace"]["activeScanId"])
         self.assertEqual(started["workspace"]["currentScan"]["status"], "running")
@@ -129,15 +247,27 @@ class PhaseOneFoundationTests(unittest.TestCase):
             self.workbench.update_workspace_setup(
                 workspace["id"],
                 WorkspaceSetup(str(self.root), mode="deep"),
+                owner_session_hash=self.owner_session_hash,
             )
         self.assertEqual(raised.exception.code, "setup_locked")
 
-        failed = self.workbench.fail_scan(scan_id, "phase 1 test")
+        failed = self.workbench.fail_scan(
+            scan_id,
+            "phase 1 test",
+            owner_session_hash=self.owner_session_hash,
+        )
         self.assertEqual(failed["status"], "failed")
-        after_failure = self.workbench.get_workspace(workspace["id"])
+        after_failure = self.workbench.get_workspace(
+            workspace["id"],
+            owner_session_hash=self.owner_session_hash,
+        )
         self.assertEqual(after_failure["activeScanId"], scan_id)
 
-        rerun = self.workbench.start_scan(workspace["id"])
+        rerun = start_approved(
+            self.workbench,
+            workspace,
+            self.owner_session_hash,
+        )
         self.assertNotEqual(rerun["scanId"], scan_id)
         self.assertEqual(rerun["workspace"]["currentScan"]["status"], "running")
 
@@ -145,8 +275,10 @@ class PhaseOneFoundationTests(unittest.TestCase):
         workspace = self.submitted_workspace()
 
         def start():
-            return Workbench(str(self.state_root), str(self.scan_root)).start_scan(
-                workspace["id"]
+            return start_approved(
+                Workbench(str(self.state_root), str(self.scan_root)),
+                workspace,
+                self.owner_session_hash,
             )
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
@@ -172,7 +304,11 @@ class PhaseOneFoundationTests(unittest.TestCase):
 
         def start_first():
             try:
-                outcome["result"] = first.start_scan(workspace["id"])
+                outcome["result"] = start_approved(
+                    first,
+                    workspace,
+                    self.owner_session_hash,
+                )
             except WorkbenchError as exc:
                 outcome["error"] = exc
 
@@ -180,15 +316,26 @@ class PhaseOneFoundationTests(unittest.TestCase):
         thread.start()
         self.assertTrue(entered_capture.wait(10))
         second = Workbench(str(self.state_root), str(self.scan_root))
-        terminal_id = second.start_scan(workspace["id"])["scanId"]
-        second.fail_scan(terminal_id, "fast terminal")
+        terminal_id = start_approved(
+            second,
+            workspace,
+            self.owner_session_hash,
+        )["scanId"]
+        second.fail_scan(
+            terminal_id,
+            "fast terminal",
+            owner_session_hash=self.owner_session_hash,
+        )
         release_capture.set()
         thread.join(10)
         self.assertFalse(thread.is_alive())
         self.assertNotIn("result", outcome)
         self.assertEqual(outcome["error"].code, "setup_changed")
         self.assertEqual(
-            second.get_workspace(workspace["id"])["activeScanId"],
+            second.get_workspace(
+                workspace["id"],
+                owner_session_hash=self.owner_session_hash,
+            )["activeScanId"],
             terminal_id,
         )
 
@@ -198,7 +345,11 @@ class PhaseOneFoundationTests(unittest.TestCase):
         after = self.workbench.capture_target(self.setup).target_snapshot_digest
         self.assertNotEqual(before, after)
         workspace = self.submitted_workspace()
-        started = self.workbench.start_scan(workspace["id"])
+        started = start_approved(
+            self.workbench,
+            workspace,
+            self.owner_session_hash,
+        )
         self.assertTrue(Path(started["workspace"]["currentScan"]["scanDir"]).is_dir())
         self.assertFalse((self.root / ".kiro" / "security-power").exists())
 
@@ -212,7 +363,11 @@ class PhaseOneFoundationTests(unittest.TestCase):
         workspace = self.submitted_workspace(diff_setup)
         (self.root / "src" / "app.py").write_text("print('second change')\n", encoding="utf-8")
         with self.assertRaises(WorkbenchError) as raised:
-            self.workbench.start_scan(workspace["id"])
+            start_approved(
+                self.workbench,
+                workspace,
+                self.owner_session_hash,
+            )
         self.assertEqual(raised.exception.code, "diff_content_changed")
 
     def test_snapshot_rejects_dirty_nested_submodule(self):
@@ -274,8 +429,15 @@ class PhaseOneFoundationTests(unittest.TestCase):
 
     def test_cancel_projects_canceled(self):
         workspace = self.submitted_workspace()
-        scan_id = self.workbench.start_scan(workspace["id"])["scanId"]
-        canceled = self.workbench.cancel_scan(scan_id)
+        scan_id = start_approved(
+            self.workbench,
+            workspace,
+            self.owner_session_hash,
+        )["scanId"]
+        canceled = self.workbench.cancel_scan(
+            scan_id,
+            owner_session_hash=self.owner_session_hash,
+        )
         self.assertEqual(canceled["activeScanId"], scan_id)
         self.assertEqual(canceled["currentScan"]["status"], "canceled")
         self.assertEqual(canceled["currentScan"]["databaseStatus"], "failed")
@@ -289,18 +451,24 @@ class PhaseOneFoundationTests(unittest.TestCase):
 
         draft = self.workbench.create_workspace(
             WorkspaceSetup(str(self.root), mode="deep", scope="src"),
+            owner_session_hash=self.owner_session_hash,
         )
         with self.assertRaises(WorkbenchError) as raised:
             self.workbench.update_workspace_setup(
                 draft["id"],
                 WorkspaceSetup(str(self.root), mode="deep", scope="src"),
+                owner_session_hash=self.owner_session_hash,
             )
         self.assertEqual(raised.exception.code, "deep_scope")
 
         scoped = self.submitted_workspace(
             WorkspaceSetup(str(self.root / "src"), mode="deep"),
         )
-        started = self.workbench.start_scan(scoped["id"])
+        started = start_approved(
+            self.workbench,
+            scoped,
+            self.owner_session_hash,
+        )
         self.assertEqual(
             started["workspace"]["currentScan"]["target"]["path"],
             str((self.root / "src").resolve()),
@@ -350,10 +518,21 @@ class PhaseOneFoundationTests(unittest.TestCase):
             str(self.base / "other-state"),
             str(self.root / "scan-artifacts"),
         )
-        draft = inside.create_workspace(self.setup)
-        workspace = inside.update_workspace_setup(draft["id"], self.setup)
+        draft = inside.create_workspace(
+            self.setup,
+            owner_session_hash=self.owner_session_hash,
+        )
+        workspace = inside.update_workspace_setup(
+            draft["id"],
+            self.setup,
+            owner_session_hash=self.owner_session_hash,
+        )
         with self.assertRaises(WorkbenchError) as raised:
-            inside.start_scan(workspace["id"])
+            start_approved(
+                inside,
+                workspace,
+                self.owner_session_hash,
+            )
         self.assertEqual(raised.exception.code, "scan_root_inside_target")
 
     def test_all_runtime_sources_parse_as_python_3_9(self):
@@ -365,34 +544,6 @@ class PhaseOneFoundationTests(unittest.TestCase):
                 ast.parse(source, filename=str(path), feature_version=(3, 9))
             except SyntaxError as exc:
                 self.fail("%s is not Python 3.9 compatible: %s" % (path, exc))
-
-    def test_module_cli_initializes_global_schema(self):
-        cli_state = self.base / "cli-state"
-        cli_scans = self.base / "cli-scans"
-        environment = os.environ.copy()
-        environment["PYTHONPATH"] = str(REPOSITORY_ROOT / "engine")
-        completed = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "kiro_security",
-                "--state-root",
-                str(cli_state),
-                "--scan-root",
-                str(cli_scans),
-                "init",
-            ],
-            check=False,
-            capture_output=True,
-            env=environment,
-            text=True,
-        )
-        self.assertEqual(completed.returncode, 0, completed.stderr)
-        payload = json.loads(completed.stdout)
-        self.assertEqual(payload["schemaVersion"], 1)
-        self.assertEqual(payload["databasePath"], str(cli_state / "workbench.sqlite3"))
-        self.assertEqual(payload["scanRoot"], str(cli_scans))
-
 
 if __name__ == "__main__":
     unittest.main()

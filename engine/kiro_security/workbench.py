@@ -1,12 +1,17 @@
 """Global workspace authority, current-result pointer, and scan-start lifecycle."""
 
+import hashlib
+import hmac
+import json
 import os
 import stat
 import tempfile
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .attestation import arguments_hash, require_request_nonce, require_session_hash
 from .db import Database, immediate_transaction, utc_now
 from .errors import WorkbenchError
 from .filesystem_identity import serialize_filesystem_identity
@@ -60,8 +65,49 @@ class Workbench:
         # type: (WorkspaceSetup) -> object
         return self.targets.capture(setup)
 
-    def create_workspace(self, setup=None):
-        # type: (object) -> dict
+    def consume_chat_attestation(self, tool_name, arguments):
+        # type: (str, dict) -> str
+        nonce = require_request_nonce(arguments.get("requestNonce"))
+        expected_arguments_hash = arguments_hash(arguments)
+        now = int(time.time())
+        with self.database.connect() as connection:
+            with immediate_transaction(connection):
+                attestation = connection.execute(
+                    "SELECT * FROM chat_attestations WHERE nonce = ?",
+                    (nonce,),
+                ).fetchone()
+                if attestation is None or attestation["expires_at"] <= now:
+                    raise WorkbenchError(
+                        "chat_attestation_invalid",
+                        "Kiro chat attestation is missing, expired, or already used.",
+                    )
+                tool_matches = hmac.compare_digest(
+                    attestation["tool_name"],
+                    tool_name,
+                )
+                arguments_match = hmac.compare_digest(
+                    attestation["arguments_hash"],
+                    expected_arguments_hash,
+                )
+                if not tool_matches or not arguments_match:
+                    raise WorkbenchError(
+                        "chat_attestation_invalid",
+                        "Kiro chat attestation does not match this tool call.",
+                    )
+                deleted = connection.execute(
+                    "DELETE FROM chat_attestations WHERE nonce = ?",
+                    (nonce,),
+                )
+                if deleted.rowcount != 1:
+                    raise WorkbenchError(
+                        "chat_attestation_invalid",
+                        "Kiro chat attestation was already used.",
+                    )
+                return require_session_hash(attestation["session_hash"])
+
+    def create_workspace(self, setup=None, owner_session_hash=None):
+        # type: (object, object) -> dict
+        owner_hash = require_session_hash(owner_session_hash)
         draft = setup if isinstance(setup, WorkspaceSetup) else WorkspaceSetup()
         normalized = self._normalize_draft_setup(draft)
         workspace_id = str(uuid.uuid4())
@@ -76,8 +122,8 @@ class Workbench:
                         id, target_path, target_title, default_scope, default_mode,
                         user_context, diff_target_kind, diff_base_revision,
                         diff_head_revision, diff_content_digest, submitted,
-                        created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                        owner_session_hash, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
                     """,
                     (
                         workspace_id,
@@ -90,21 +136,27 @@ class Workbench:
                         diff.base_revision if diff else None,
                         diff.head_revision if diff else None,
                         diff.content_digest if diff else None,
+                        owner_hash,
                         timestamp,
                         timestamp,
                     ),
                 )
             return self._workspace_state(connection, workspace_id)
 
-    def update_workspace_setup(self, workspace_id, setup):
-        # type: (str, WorkspaceSetup) -> dict
+    def update_workspace_setup(self, workspace_id, setup, owner_session_hash=None):
+        # type: (str, WorkspaceSetup, object) -> dict
         workspace_uuid = _require_uuid(workspace_id, "workspace")
+        owner_hash = require_session_hash(owner_session_hash)
         inspected = self.targets.inspect_setup(setup)
         diff = inspected.diff_target
         timestamp = utc_now()
         with self.database.connect() as connection:
             with immediate_transaction(connection):
-                workspace = self._require_workspace(connection, workspace_uuid)
+                workspace = self._require_owned_workspace(
+                    connection,
+                    workspace_uuid,
+                    owner_hash,
+                )
                 if workspace["active_scan_id"] is not None:
                     raise WorkbenchError(
                         "setup_locked",
@@ -117,7 +169,8 @@ class Workbench:
                         default_scope = ?, default_mode = ?, user_context = ?,
                         diff_target_kind = ?, diff_base_revision = ?,
                         diff_head_revision = ?, diff_content_digest = ?,
-                        diff_resolution_id = NULL, submitted = 1, updated_at = ?
+                        diff_resolution_id = NULL, submitted = 1,
+                        setup_revision = setup_revision + 1, updated_at = ?
                     WHERE id = ? AND active_scan_id IS NULL
                     """,
                     (
@@ -141,25 +194,45 @@ class Workbench:
                     )
             return self._workspace_state(connection, workspace_uuid)
 
-    def get_workspace(self, workspace_id):
-        # type: (str) -> dict
+    def get_workspace(self, workspace_id, owner_session_hash=None):
+        # type: (str, object) -> dict
         workspace_uuid = _require_uuid(workspace_id, "workspace")
+        owner_hash = require_session_hash(owner_session_hash)
         with self.database.connect() as connection:
-            self._require_workspace(connection, workspace_uuid)
+            self._require_owned_workspace(connection, workspace_uuid, owner_hash)
             return self._workspace_state(connection, workspace_uuid)
 
-    def start_scan(self, workspace_id):
-        # type: (str) -> dict
+    def start_scan(
+        self,
+        workspace_id,
+        expected_setup_revision=None,
+        expected_setup_digest=None,
+        approved_setup=None,
+        owner_session_hash=None,
+    ):
+        # type: (str, object, object, object, object) -> dict
         workspace_uuid = _require_uuid(workspace_id, "workspace")
+        owner_hash = require_session_hash(owner_session_hash)
         with self.database.connect() as connection:
-            workspace = self._require_workspace(connection, workspace_uuid)
-            running = self._running_scan(connection, workspace_uuid)
-            if running is not None:
-                return self._start_result(connection, workspace_uuid, running["id"], True)
+            workspace = self._require_owned_workspace(
+                connection,
+                workspace_uuid,
+                owner_hash,
+            )
             if not workspace["submitted"] or not workspace["target_path"]:
                 raise WorkbenchError("setup_not_submitted", "Save setup before starting a scan.")
             workspace_version = workspace["updated_at"]
             setup = self._setup_from_row(workspace)
+            self._verify_start_approval(
+                workspace,
+                setup,
+                expected_setup_revision,
+                expected_setup_digest,
+                approved_setup,
+            )
+            running = self._running_scan(connection, workspace_uuid)
+            if running is not None:
+                return self._start_result(connection, workspace_uuid, running["id"], True)
 
         captured = self.targets.capture(setup)
         target = Path(captured.target_path)
@@ -175,7 +248,18 @@ class Workbench:
 
         with self.database.connect() as connection:
             with immediate_transaction(connection):
-                workspace = self._require_workspace(connection, workspace_uuid)
+                workspace = self._require_owned_workspace(
+                    connection,
+                    workspace_uuid,
+                    owner_hash,
+                )
+                self._verify_start_approval(
+                    workspace,
+                    self._setup_from_row(workspace),
+                    expected_setup_revision,
+                    expected_setup_digest,
+                    approved_setup,
+                )
                 running = self._running_scan(connection, workspace_uuid)
                 if running is not None:
                     return self._start_result(connection, workspace_uuid, running["id"], True)
@@ -257,12 +341,17 @@ class Workbench:
                 )
             return self._start_result(connection, workspace_uuid, scan_id, False)
 
-    def get_scan_context(self, scan_id):
-        # type: (str) -> dict
+    def get_scan_context(self, scan_id, owner_session_hash=None):
+        # type: (str, object) -> dict
         scan_uuid = _require_uuid(scan_id, "scan")
+        owner_hash = require_session_hash(owner_session_hash)
         with self.database.connect() as connection:
             scan = self._require_scan(connection, scan_uuid)
-            workspace = self._require_workspace(connection, scan["workspace_id"])
+            workspace = self._require_owned_workspace(
+                connection,
+                scan["workspace_id"],
+                owner_hash,
+            )
             return {
                 "scanId": scan_uuid,
                 "workspaceId": workspace["id"],
@@ -282,9 +371,11 @@ class Workbench:
         review_items_completed=None,
         reportable_findings_count=None,
         deep_review_pass=None,
+        owner_session_hash=None,
     ):
-        # type: (str, object, object, object, object, object) -> dict
+        # type: (str, object, object, object, object, object, object) -> dict
         scan_uuid = _require_uuid(scan_id, "scan")
+        owner_hash = require_session_hash(owner_session_hash)
         requested_phase = _optional_phase(phase)
         requested_total = _optional_nonnegative_int(
             review_items_total,
@@ -302,6 +393,11 @@ class Workbench:
         with self.database.connect() as connection:
             with immediate_transaction(connection):
                 scan = self._require_scan(connection, scan_uuid)
+                self._require_owned_workspace(
+                    connection,
+                    scan["workspace_id"],
+                    owner_hash,
+                )
                 if scan["status"] != "running":
                     raise WorkbenchError(
                         "scan_not_running",
@@ -429,13 +525,19 @@ class Workbench:
                 self._require_scan(connection, scan_uuid),
             )
 
-    def fail_scan(self, scan_id, message=None):
-        # type: (str, object) -> dict
+    def fail_scan(self, scan_id, message=None, owner_session_hash=None):
+        # type: (str, object, object) -> dict
         scan_uuid = _require_uuid(scan_id, "scan")
+        owner_hash = require_session_hash(owner_session_hash)
         failure_message = _optional_text(message, 2400)
         with self.database.connect() as connection:
             with immediate_transaction(connection):
                 scan = self._require_scan(connection, scan_uuid)
+                self._require_owned_workspace(
+                    connection,
+                    scan["workspace_id"],
+                    owner_hash,
+                )
                 if scan["status"] == "failed":
                     return self._scan_state(connection, scan)
                 if scan["status"] == "complete":
@@ -472,13 +574,18 @@ class Workbench:
                 self._require_scan(connection, scan_uuid),
             )
 
-    def cancel_scan(self, scan_id):
-        # type: (str) -> dict
+    def cancel_scan(self, scan_id, owner_session_hash=None):
+        # type: (str, object) -> dict
         scan_uuid = _require_uuid(scan_id, "scan")
+        owner_hash = require_session_hash(owner_session_hash)
         with self.database.connect() as connection:
             with immediate_transaction(connection):
                 scan = self._require_scan(connection, scan_uuid)
-                workspace = self._require_workspace(connection, scan["workspace_id"])
+                workspace = self._require_owned_workspace(
+                    connection,
+                    scan["workspace_id"],
+                    owner_hash,
+                )
                 if scan["canceled_at"] is not None:
                     return self._workspace_state(connection, workspace["id"])
                 if scan["status"] != "running":
@@ -552,6 +659,57 @@ class Workbench:
             "workspace": self._workspace_state(connection, workspace_id),
         }
 
+    def _verify_start_approval(
+        self,
+        workspace,
+        authoritative_setup,
+        expected_revision,
+        expected_digest,
+        approved_setup,
+    ):
+        supplied = (
+            expected_revision is not None,
+            expected_digest is not None,
+            approved_setup is not None,
+        )
+        if not all(supplied):
+            raise WorkbenchError(
+                "start_approval_incomplete",
+                "Scan start requires setup revision, digest, and exact setup together.",
+            )
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int):
+            raise WorkbenchError(
+                "start_approval_invalid",
+                "Scan start setup revision must be an integer.",
+            )
+        if expected_revision != workspace["setup_revision"]:
+            raise WorkbenchError(
+                "setup_changed",
+                "Workspace setup changed after scan start was prepared.",
+            )
+        authoritative_digest = _setup_digest(authoritative_setup)
+        if not isinstance(expected_digest, str) or not hmac.compare_digest(
+            expected_digest,
+            authoritative_digest,
+        ):
+            raise WorkbenchError(
+                "setup_changed",
+                "Workspace setup digest does not match the approved scan start.",
+            )
+        if not isinstance(approved_setup, WorkspaceSetup):
+            raise WorkbenchError(
+                "start_approval_invalid",
+                "Scan start requires an exact approved setup.",
+            )
+        if not hmac.compare_digest(
+            _setup_digest(approved_setup),
+            authoritative_digest,
+        ):
+            raise WorkbenchError(
+                "setup_changed",
+                "Approved scan setup does not match the workspace authority.",
+            )
+
     def _workspace_state(self, connection, workspace_id):
         workspace = self._require_workspace(connection, workspace_id)
         current_scan = None
@@ -560,10 +718,19 @@ class Workbench:
                 connection,
                 self._require_scan(connection, workspace["active_scan_id"]),
             )
-        setup_state = {"submitted": bool(workspace["submitted"]), "valid": False}
+        setup_state = {
+            "submitted": bool(workspace["submitted"]),
+            "valid": False,
+            "revision": workspace["setup_revision"],
+        }
+        setup_digest = None
         if workspace["target_path"] is not None:
+            stored_setup = self._setup_from_row(workspace)
+            setup_digest = _setup_digest(stored_setup)
+            setup_state["digest"] = setup_digest
+            setup_state["value"] = _setup_projection(stored_setup)
             try:
-                self.targets.inspect_setup(self._setup_from_row(workspace))
+                self.targets.inspect_setup(stored_setup)
                 setup_state["valid"] = True
             except WorkbenchError as exc:
                 setup_state["error"] = {"code": exc.code, "message": str(exc)}
@@ -577,6 +744,8 @@ class Workbench:
             "userContext": workspace["user_context"],
             "diffTarget": _diff_from_row(workspace),
             "setup": setup_state,
+            "setupRevision": workspace["setup_revision"],
+            "setupDigest": setup_digest,
             "activeScanId": workspace["active_scan_id"],
             "currentScan": current_scan,
             "createdAt": workspace["created_at"],
@@ -681,6 +850,19 @@ class Workbench:
             raise WorkbenchError("workspace_not_found", "Logical workspace was not found.")
         return row
 
+    @classmethod
+    def _require_owned_workspace(cls, connection, workspace_id, owner_session_hash):
+        workspace = cls._require_workspace(connection, workspace_id)
+        if not hmac.compare_digest(
+            workspace["owner_session_hash"],
+            owner_session_hash,
+        ):
+            raise WorkbenchError(
+                "workspace_not_owned",
+                "Logical workspace does not belong to this Kiro chat.",
+            )
+        return workspace
+
     @staticmethod
     def _require_scan(connection, scan_id):
         row = connection.execute("SELECT * FROM scans WHERE id = ?", (scan_id,)).fetchone()
@@ -697,6 +879,39 @@ class Workbench:
             """,
             (workspace_id,),
         ).fetchone()
+
+
+def _setup_projection(setup):
+    # type: (WorkspaceSetup) -> dict
+    diff = setup.diff_target
+    return {
+        "targetPath": setup.target_path,
+        "mode": setup.mode,
+        "scope": setup.scope,
+        "userContext": setup.user_context,
+        "diffTarget": (
+            {
+                "kind": diff.kind,
+                "baseRevision": diff.base_revision,
+                "headRevision": diff.head_revision,
+                "contentDigest": diff.content_digest,
+            }
+            if diff is not None
+            else None
+        ),
+    }
+
+
+def _setup_digest(setup):
+    # type: (WorkspaceSetup) -> str
+    canonical = json.dumps(
+        _setup_projection(setup),
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 def _require_uuid(value, label):
     try:

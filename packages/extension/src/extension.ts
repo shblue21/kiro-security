@@ -4,7 +4,7 @@ import {
   describeFoundation,
   prepareFoundationStorage,
 } from "./foundation";
-import { preparePowerIntegration } from "./powerIntegration";
+import { getOrCreateInstallationServerKey } from "./integrationFiles";
 import { SecuritySetupView } from "./setupView";
 
 export async function activate(
@@ -14,7 +14,16 @@ export async function activate(
   const paths = await prepareFoundationStorage(context);
   const status = describeFoundation(paths);
   output.appendLine(status.join("\n"));
-  const setupView = new SecuritySetupView(context, paths, output);
+  const serverKey = await getOrCreateInstallationServerKey(
+    paths.stateRoot.fsPath,
+  );
+  const setupView = new SecuritySetupView(
+    context,
+    paths,
+    output,
+    serverKey,
+  );
+  await setupView.initialize();
   const setupRegistration = vscode.window.registerWebviewViewProvider(
     SecuritySetupView.viewId,
     setupView,
@@ -37,44 +46,11 @@ export async function activate(
     },
   );
 
-  const preparePowerCommand = vscode.commands.registerCommand(
-    "kiroSecurity.preparePowerIntegration",
-    async () => {
-      try {
-        const prepared = await preparePowerIntegration(context, paths);
-        output.show(true);
-        output.appendLine(`Prepared custom Power: ${prepared.powerRoot}`);
-        output.appendLine(`Python runtime: ${prepared.pythonExecutable}`);
-        output.appendLine(
-          "Import that folder with Kiro Powers → Add Custom Power → Import power from a folder.",
-        );
-        const selection = await vscode.window.showInformationMessage(
-          "Kiro Security Power integration is ready to import.",
-          "Reveal Folder",
-        );
-        if (selection === "Reveal Folder") {
-          await vscode.commands.executeCommand(
-            "revealFileInOS",
-            vscode.Uri.file(prepared.powerRoot),
-          );
-        }
-      } catch (error) {
-        const message =
-          error instanceof Error ? error.message : "Unknown preparation error.";
-        output.appendLine(`Power integration preparation failed: ${message}`);
-        await vscode.window.showErrorMessage(
-          `Kiro Security Power integration failed: ${message}`,
-        );
-      }
-    },
-  );
-
   context.subscriptions.push(
     output,
     setupRegistration,
     openSetupCommand,
     statusCommand,
-    preparePowerCommand,
   );
 
   if (!context.globalState.get<boolean>("kiroSecurity.onboardingShown.v1")) {
@@ -98,5 +74,5 @@ export async function activate(
 }
 
 export function deactivate(): void {
-  // Kiro owns the Power MCP process; the Extension owns no server process.
+  // Kiro owns the direct MCP process; the Extension owns no server process.
 }

@@ -3,8 +3,10 @@ import { spawn } from "node:child_process";
 import * as vscode from "vscode";
 
 import type { FoundationPaths } from "./foundation";
+import type { DirectMcpContract } from "./integrationConfig";
 import {
   buildHookRegistrationDocument,
+  buildHookBridgeProbe,
   getHookBridgePath,
   getHookRegistrationPath,
   getPackagedHookBridgePath,
@@ -16,7 +18,7 @@ import {
   type HookRegistrationMutation,
   type HookRegistrationState,
 } from "./chatBindingFiles";
-import { resolvePythonExecutable } from "./powerIntegration";
+import { resolvePythonExecutable } from "./pythonRuntime";
 
 const PROBE_TIMEOUT_MS = 10_000;
 
@@ -44,6 +46,7 @@ export class ChatBindingManager {
   constructor(
     context: vscode.ExtensionContext,
     private readonly paths: FoundationPaths,
+    private readonly contract: DirectMcpContract,
   ) {
     this.hookPath = getHookRegistrationPath();
     this.bridgePath = getHookBridgePath(paths.stateRoot.fsPath);
@@ -75,6 +78,7 @@ export class ChatBindingManager {
     const document = buildHookRegistrationDocument({
       pythonExecutable,
       bridgePath: this.bridgePath,
+      serverKey: this.contract.serverKey,
     });
     const [registration, bridge] = await Promise.all([
       inspectHookRegistration({
@@ -114,6 +118,7 @@ export class ChatBindingManager {
       pythonExecutable: inspection.pythonExecutable,
       bridgePath: this.bridgePath,
       cwd: this.paths.stateRoot.fsPath,
+      serverKey: this.contract.serverKey,
     });
     return inspection;
   }
@@ -136,10 +141,12 @@ export class ChatBindingManager {
       pythonExecutable,
       bridgePath: this.bridgePath,
       cwd: this.paths.stateRoot.fsPath,
+      serverKey: this.contract.serverKey,
     });
     const document = buildHookRegistrationDocument({
       pythonExecutable,
       bridgePath: this.bridgePath,
+      serverKey: this.contract.serverKey,
     });
     return installHookRegistration({
       hookPath: this.hookPath,
@@ -197,25 +204,14 @@ function runBridgeProbe(input: {
   readonly pythonExecutable: string;
   readonly bridgePath: string;
   readonly cwd: string;
+  readonly serverKey: string;
 }): Promise<void> {
-  const probe = JSON.stringify({
-    session_id: "kiro-security-installation-probe",
-    hook_event_name: "PreToolUse",
-    cwd: input.cwd,
-    tool_name: "kiro_powers",
-    tool_input: {
-      action: "use",
-      powerName: "kiro-security-power",
-      serverName: "kiro-security-workbench",
-      toolName: "kiro_security_get_capabilities",
-      arguments: {},
-    },
-  });
+  const probe = JSON.stringify(buildHookBridgeProbe(input.cwd));
 
   return new Promise((resolve, reject) => {
     const child = spawn(
       input.pythonExecutable,
-      ["-B", input.bridgePath],
+      ["-B", input.bridgePath, "--server-key", input.serverKey],
       {
         cwd: input.cwd,
         env: { ...process.env, PYTHONIOENCODING: "utf-8" },

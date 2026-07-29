@@ -1,9 +1,14 @@
+import hashlib
 import json
 import os
+import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+import uuid
 from pathlib import Path
 
 from kiro_security.errors import WorkbenchError
@@ -11,8 +16,55 @@ from kiro_security.models import WorkspaceSetup
 from kiro_security.workbench import Workbench
 
 
+TEST_SERVER_KEY = "ksp_aaaaaaaaaaaaaaaaaaaa"
+
+
 class McpClient:
-    def __init__(self, state_root, scan_root):
+    def __init__(self, state_root, scan_root, session_id="kiro-chat-a"):
+        self.state_root = Path(state_root)
+        self.session_id = session_id
+        self.session_hash = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+        self.bridge_path = (
+            self.state_root
+            / "runtime"
+            / "hook-bridge"
+            / "kiro_security_hook_bridge.py"
+        )
+        self.bridge_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(
+            Path(__file__).resolve().parents[2]
+            / "hook"
+            / "kiro_security_hook_bridge.py",
+            self.bridge_path,
+        )
+        guard_path = (
+            self.state_root
+            / "runtime"
+            / "mcp-shadow-guards"
+            / "11111111-1111-4111-8111-111111111111.json"
+        )
+        guard_path.parent.mkdir(parents=True, exist_ok=True)
+        guard_path.parent.chmod(0o700)
+        guard_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "serverKey": TEST_SERVER_KEY,
+                    "safe": True,
+                    "expiresAt": int(time.time() * 1000) + 60_000,
+                    "workspaceRoots": [str(self.state_root)],
+                    "sources": [
+                        {
+                            "path": str(self.state_root / "test-user-mcp.json"),
+                            "sha256": None,
+                        }
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        guard_path.chmod(0o600)
         environment = os.environ.copy()
         environment["PYTHONPATH"] = str(
             Path(__file__).resolve().parents[1]
@@ -65,12 +117,50 @@ class McpClient:
             message["params"] = params
         self._send(message)
 
-    def call_tool(self, name, arguments=None):
+    def issue_attestation(self, name, arguments=None):
+        attested = dict(arguments or {})
+        attested["requestNonce"] = str(uuid.uuid4())
+        payload = {
+            "session_id": self.session_id,
+            "hook_event_name": "PreToolUse",
+            "cwd": str(self.state_root),
+            "tool_name": self.direct_tool_id(name),
+            "tool_input": attested,
+        }
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                str(self.bridge_path),
+                "--server-key",
+                TEST_SERVER_KEY,
+            ],
+            check=False,
+            capture_output=True,
+            input=json.dumps(payload),
+            text=True,
+            encoding="utf-8",
+        )
+        if completed.returncode != 0:
+            raise AssertionError(completed.stderr)
+        return attested
+
+    @staticmethod
+    def direct_tool_id(name):
+        return "mcp_%s_%s" % (TEST_SERVER_KEY, name)
+
+    def call_tool_raw(self, name, arguments):
         response = self.request(
             "tools/call",
-            {"name": name, "arguments": arguments or {}},
+            {"name": name, "arguments": arguments},
         )
         return response["result"]
+
+    def call_tool(self, name, arguments=None):
+        return self.call_tool_raw(
+            name,
+            self.issue_attestation(name, arguments),
+        )
 
     def close(self):
         if self.process.stdin is not None:
@@ -149,6 +239,39 @@ class PhaseTwoMcpTests(unittest.TestCase):
                     "kiro_security_cancel_scan",
                 },
             )
+            for tool in listed["result"]["tools"]:
+                self.assertIn("requestNonce", tool["inputSchema"]["required"])
+            tools_by_name = {
+                tool["name"]: tool for tool in listed["result"]["tools"]
+            }
+            self.assertEqual(
+                set(
+                    tools_by_name["kiro_security_start_scan"]["inputSchema"][
+                        "required"
+                    ]
+                ),
+                {
+                    "requestNonce",
+                    "sessionId",
+                    "setupRevision",
+                    "setupDigest",
+                    "setup",
+                },
+            )
+            self.assertTrue(
+                tools_by_name["kiro_security_fail_scan"]["annotations"][
+                    "destructiveHint"
+                ]
+            )
+            self.assertTrue(
+                tools_by_name["kiro_security_cancel_scan"]["annotations"][
+                    "destructiveHint"
+                ]
+            )
+            self.assertNotIn(
+                "destructiveHint",
+                tools_by_name["kiro_security_update_scan_progress"]["annotations"],
+            )
 
             capabilities = client.call_tool(
                 "kiro_security_get_capabilities"
@@ -160,6 +283,10 @@ class PhaseTwoMcpTests(unittest.TestCase):
             )
             self.assertFalse(
                 capabilities["structuredContent"]["semanticWorkflowsAvailable"]
+            )
+            self.assertEqual(
+                capabilities["structuredContent"]["semanticAnalysisOwner"],
+                "kiro_agent_steering",
             )
 
             created = client.call_tool(
@@ -185,7 +312,12 @@ class PhaseTwoMcpTests(unittest.TestCase):
 
             started = client.call_tool(
                 "kiro_security_start_scan",
-                {"sessionId": session_id},
+                {
+                    "sessionId": session_id,
+                    "setupRevision": saved["setupRevision"],
+                    "setupDigest": saved["setupDigest"],
+                    "setup": saved["setup"]["value"],
+                },
             )["structuredContent"]
             scan_id = started["scanId"]
             self.assertFalse(started["reused"])
@@ -242,7 +374,10 @@ class PhaseTwoMcpTests(unittest.TestCase):
             self.assertEqual(failed["status"], "failed")
 
             direct = Workbench(str(self.state_root), str(self.scan_root))
-            shared = direct.get_scan_context(scan_id)
+            shared = direct.get_scan_context(
+                scan_id,
+                owner_session_hash=client.session_hash,
+            )
             self.assertEqual(shared["scan"]["status"], "failed")
             self.assertEqual(shared["workspace"]["activeScanId"], scan_id)
         finally:
@@ -281,9 +416,131 @@ class PhaseTwoMcpTests(unittest.TestCase):
         finally:
             client.close()
 
+    def test_attestation_is_one_time_argument_bound_and_chat_owned(self):
+        first = McpClient(self.state_root, self.scan_root, "kiro-chat-first")
+        second = None
+        try:
+            first.request(
+                "initialize",
+                {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": {"name": "first-chat", "version": "1"},
+                },
+            )
+            first.notify("notifications/initialized")
+            created = first.call_tool(
+                "kiro_security_create_workspace",
+                {},
+            )["structuredContent"]
+
+            connection = sqlite3.connect(str(self.state_root / "workbench.sqlite3"))
+            try:
+                stored_owner = connection.execute(
+                    "SELECT owner_session_hash FROM workspaces WHERE id = ?",
+                    (created["id"],),
+                ).fetchone()[0]
+            finally:
+                connection.close()
+            self.assertEqual(stored_owner, first.session_hash)
+            self.assertNotEqual(stored_owner, first.session_id)
+
+            replay_arguments = first.issue_attestation(
+                "kiro_security_get_workspace",
+                {"sessionId": created["id"]},
+            )
+            accepted = first.call_tool_raw(
+                "kiro_security_get_workspace",
+                replay_arguments,
+            )
+            self.assertFalse(accepted.get("isError", False))
+            replayed = first.call_tool_raw(
+                "kiro_security_get_workspace",
+                replay_arguments,
+            )
+            self.assertEqual(
+                replayed["structuredContent"]["error"]["code"],
+                "chat_attestation_invalid",
+            )
+
+            mismatched_arguments = first.issue_attestation(
+                "kiro_security_get_workspace",
+                {"sessionId": created["id"]},
+            )
+            mismatched_arguments["sessionId"] = str(uuid.uuid4())
+            mismatched = first.call_tool_raw(
+                "kiro_security_get_workspace",
+                mismatched_arguments,
+            )
+            self.assertEqual(
+                mismatched["structuredContent"]["error"]["code"],
+                "chat_attestation_invalid",
+            )
+
+            expired_arguments = first.issue_attestation(
+                "kiro_security_get_capabilities",
+                {},
+            )
+            connection = sqlite3.connect(str(self.state_root / "workbench.sqlite3"))
+            try:
+                connection.execute(
+                    "UPDATE chat_attestations SET expires_at = 0 WHERE nonce = ?",
+                    (expired_arguments["requestNonce"],),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            expired = first.call_tool_raw(
+                "kiro_security_get_capabilities",
+                expired_arguments,
+            )
+            self.assertEqual(
+                expired["structuredContent"]["error"]["code"],
+                "chat_attestation_invalid",
+            )
+
+            unattested = first.call_tool_raw(
+                "kiro_security_get_capabilities",
+                {"requestNonce": str(uuid.uuid4())},
+            )
+            self.assertEqual(
+                unattested["structuredContent"]["error"]["code"],
+                "chat_attestation_invalid",
+            )
+
+            second = McpClient(
+                self.state_root,
+                self.scan_root,
+                "kiro-chat-second",
+            )
+            second.request(
+                "initialize",
+                {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": {"name": "second-chat", "version": "1"},
+                },
+            )
+            second.notify("notifications/initialized")
+            denied = second.call_tool(
+                "kiro_security_get_workspace",
+                {"sessionId": created["id"]},
+            )
+            self.assertEqual(
+                denied["structuredContent"]["error"]["code"],
+                "workspace_not_owned",
+            )
+        finally:
+            if second is not None:
+                second.close()
+            first.close()
+
     def test_deep_progress_can_reset_only_when_pass_advances(self):
         workbench = Workbench(str(self.state_root), str(self.scan_root))
-        created = workbench.create_workspace()
+        owner_session_hash = hashlib.sha256(b"deep-chat").hexdigest()
+        created = workbench.create_workspace(
+            owner_session_hash=owner_session_hash,
+        )
         saved = workbench.update_workspace_setup(
             created["id"],
             WorkspaceSetup(
@@ -291,8 +548,20 @@ class PhaseTwoMcpTests(unittest.TestCase):
                 mode="deep",
                 scope=".",
             ),
+            owner_session_hash=owner_session_hash,
         )
-        started = workbench.start_scan(saved["id"])
+        started = workbench.start_scan(
+            saved["id"],
+            expected_setup_revision=saved["setupRevision"],
+            expected_setup_digest=saved["setupDigest"],
+            approved_setup=WorkspaceSetup(
+                target_path=saved["setup"]["value"]["targetPath"],
+                mode=saved["setup"]["value"]["mode"],
+                scope=saved["setup"]["value"]["scope"],
+                user_context=saved["setup"]["value"]["userContext"],
+            ),
+            owner_session_hash=owner_session_hash,
+        )
         scan_id = started["scanId"]
 
         first = workbench.update_scan_progress(
@@ -301,6 +570,7 @@ class PhaseTwoMcpTests(unittest.TestCase):
             review_items_total=3,
             review_items_completed=3,
             deep_review_pass=1,
+            owner_session_hash=owner_session_hash,
         )
         self.assertEqual(first["progress"]["deepReviewPass"], 1)
         second = workbench.update_scan_progress(
@@ -308,6 +578,7 @@ class PhaseTwoMcpTests(unittest.TestCase):
             review_items_total=2,
             review_items_completed=0,
             deep_review_pass=2,
+            owner_session_hash=owner_session_hash,
         )
         self.assertEqual(second["progress"]["reviewItemsCompleted"], 0)
 
@@ -316,11 +587,16 @@ class PhaseTwoMcpTests(unittest.TestCase):
                 scan_id,
                 review_items_total=1,
                 deep_review_pass=2,
+                owner_session_hash=owner_session_hash,
             )
         self.assertEqual(raised.exception.code, "progress_regression")
 
         with self.assertRaises(WorkbenchError) as raised:
-            workbench.update_scan_progress(scan_id, deep_review_pass=1)
+            workbench.update_scan_progress(
+                scan_id,
+                deep_review_pass=1,
+                owner_session_hash=owner_session_hash,
+            )
         self.assertEqual(raised.exception.code, "progress_regression")
 
     def _git(self, *arguments):

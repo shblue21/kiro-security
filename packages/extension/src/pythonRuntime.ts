@@ -4,38 +4,7 @@ import { promisify } from "node:util";
 
 import * as vscode from "vscode";
 
-import type { FoundationPaths } from "./foundation";
-import { materializePowerIntegration } from "./powerIntegrationFiles";
-
 const executeFile = promisify(execFile);
-
-export interface PreparedPowerIntegration {
-  readonly powerRoot: string;
-  readonly pythonExecutable: string;
-}
-
-/**
- * Materialize a self-contained custom Power in extension global storage.
- *
- * Kiro remains the owner of Power registration: the user imports this folder
- * through the Powers panel, which registers its generated MCP configuration.
- */
-export async function preparePowerIntegration(
-  context: vscode.ExtensionContext,
-  paths: FoundationPaths,
-): Promise<PreparedPowerIntegration> {
-  const pythonExecutable = await resolvePythonExecutable();
-  const integrationRoot = path.join(paths.stateRoot.fsPath, "agent-integration");
-  const powerRoot = await materializePowerIntegration({
-    extensionRoot: context.extensionUri.fsPath,
-    integrationRoot,
-    pythonExecutable,
-    stateRoot: paths.stateRoot.fsPath,
-    scanRoot: paths.scanRoot.fsPath,
-  });
-
-  return { powerRoot, pythonExecutable };
-}
 
 export async function resolvePythonExecutable(): Promise<string> {
   const configured = vscode.workspace

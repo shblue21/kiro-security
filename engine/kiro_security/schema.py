@@ -5,7 +5,7 @@ SCHEMA_VERSION = 1
 MIGRATIONS = (
     (
         1,
-        "phase 1 trusted chat workspace and scan foundation",
+        "fresh trusted Kiro chat workspace and scan foundation",
         (
             """
             CREATE TABLE workspaces (
@@ -25,6 +25,9 @@ MIGRATIONS = (
                 diff_resolution_id TEXT,
                 capability_preflight_json TEXT,
                 submitted INTEGER NOT NULL DEFAULT 0 CHECK (submitted IN (0, 1)),
+                setup_revision INTEGER NOT NULL DEFAULT 0
+                    CHECK (setup_revision >= 0),
+                owner_session_hash TEXT NOT NULL,
                 active_scan_id TEXT REFERENCES scans(id) ON DELETE SET NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -97,6 +100,15 @@ MIGRATIONS = (
             """
             CREATE INDEX scans_by_workspace_and_created_at
             ON scans(workspace_id, created_at DESC)
+            """,
+            """
+            CREATE TABLE chat_attestations (
+                nonce TEXT PRIMARY KEY,
+                session_hash TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                arguments_hash TEXT NOT NULL,
+                expires_at INTEGER NOT NULL
+            )
             """,
         ),
     ),

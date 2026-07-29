@@ -19,8 +19,7 @@
     "onStartupFinished",
     "onView:kiroSecurity.setup",
     "onCommand:kiroSecurity.openSetup",
-    "onCommand:kiroSecurity.showFoundationStatus",
-    "onCommand:kiroSecurity.preparePowerIntegration"
+    "onCommand:kiroSecurity.showFoundationStatus"
   ],
   "main": "./out/packages/extension/src/extension.js",
   "contributes": {
@@ -50,10 +49,6 @@
       {
         "command": "kiroSecurity.showFoundationStatus",
         "title": "Kiro Security: Show Foundation Status"
-      },
-      {
-        "command": "kiroSecurity.preparePowerIntegration",
-        "title": "Kiro Security: Prepare Power Integration"
       }
     ],
     "configuration": {
@@ -77,6 +72,10 @@
     "test:node": "node --test tests/foundation.test.mjs",
     "test:python": "python3 -m unittest discover -s engine/tests -v",
     "test": "npm run clean && npm run compile && npm run lint && npm run test:node && npm run test:python && npm run package:list"
+  },
+  "dependencies": {
+    "jsonc-parser": "^3.3.1",
+    "yaml": "^2.8.1"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

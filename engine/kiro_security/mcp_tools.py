@@ -37,6 +37,29 @@ def _integer(minimum):
     return {"type": "integer", "minimum": minimum}
 
 
+def _sha256(description):
+    return {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$",
+        "description": description,
+    }
+
+
+def _attested_schema(properties, required=()):
+    attested_properties = {
+        "requestNonce": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{16,128}$",
+            "description": "Fresh one-time nonce for Kiro Hook attestation.",
+        }
+    }
+    attested_properties.update(properties)
+    return _schema(
+        attested_properties,
+        required=("requestNonce",) + tuple(required),
+    )
+
+
 def _setup_schema(target_required):
     properties = {
         "targetPath": _string("Absolute local target directory."),
@@ -73,7 +96,7 @@ TOOL_DEFINITIONS = (
             "Read the deterministic workbench version, storage boundary, and "
             "currently implemented execution capabilities."
         ),
-        "inputSchema": _schema({}),
+        "inputSchema": _attested_schema({}),
         "annotations": {"readOnlyHint": True, "idempotentHint": True},
     },
     {
@@ -83,7 +106,7 @@ TOOL_DEFINITIONS = (
             "Create a new opaque logical workspace for this Kiro chat. Setup "
             "may be provisional and must be saved before scan start."
         ),
-        "inputSchema": _schema(
+        "inputSchema": _attested_schema(
             {"setup": _setup_schema(False)},
         ),
         "annotations": {"readOnlyHint": False, "idempotentHint": False},
@@ -92,7 +115,7 @@ TOOL_DEFINITIONS = (
         "name": "kiro_security_get_workspace",
         "title": "Get a logical security workspace",
         "description": "Read one logical workspace by its opaque identifier.",
-        "inputSchema": _schema(
+        "inputSchema": _attested_schema(
             {"sessionId": _uuid("Logical workspace UUID.")},
             required=("sessionId",),
         ),
@@ -105,7 +128,7 @@ TOOL_DEFINITIONS = (
             "Strictly validate and submit target, mode, scope, context, and exact "
             "Diff identity before the workspace has ever started a scan."
         ),
-        "inputSchema": _schema(
+        "inputSchema": _attested_schema(
             {
                 "sessionId": _uuid("Logical workspace UUID."),
                 "setup": _setup_schema(True),
@@ -118,12 +141,21 @@ TOOL_DEFINITIONS = (
         "name": "kiro_security_start_scan",
         "title": "Start a durable security scan",
         "description": (
-            "Capture the submitted target snapshot and create a durable running "
-            "scan. Returns scanId; call kiro_security_get_scan_context next."
+            "After the user approves the displayed saved setup, verify its exact "
+            "revision, digest, and normalized value; then capture the target and "
+            "create a durable running scan. Returns scanId; call "
+            "kiro_security_get_scan_context next."
         ),
-        "inputSchema": _schema(
-            {"sessionId": _uuid("Logical workspace UUID.")},
-            required=("sessionId",),
+        "inputSchema": _attested_schema(
+            {
+                "sessionId": _uuid("Logical workspace UUID."),
+                "setupRevision": _integer(1),
+                "setupDigest": _sha256(
+                    "Digest returned by the authoritative saved workspace."
+                ),
+                "setup": _setup_schema(True),
+            },
+            required=("sessionId", "setupRevision", "setupDigest", "setup"),
         ),
         "annotations": {"readOnlyHint": False, "idempotentHint": True},
     },
@@ -134,7 +166,7 @@ TOOL_DEFINITIONS = (
             "Read the immutable snapshot and current lifecycle state for an exact "
             "scanId."
         ),
-        "inputSchema": _schema(
+        "inputSchema": _attested_schema(
             {"scanId": _uuid("Durable scan UUID.")},
             required=("scanId",),
         ),
@@ -147,7 +179,7 @@ TOOL_DEFINITIONS = (
             "Publish monotonic lifecycle telemetry for a running scan. Progress "
             "does not prove that semantic artifacts are complete."
         ),
-        "inputSchema": _schema(
+        "inputSchema": _attested_schema(
             {
                 "scanId": _uuid("Durable scan UUID."),
                 "phase": {
@@ -177,14 +209,18 @@ TOOL_DEFINITIONS = (
             "Record an explicit terminal failure for a running scan. This does "
             "not require a coordinator bearer token."
         ),
-        "inputSchema": _schema(
+        "inputSchema": _attested_schema(
             {
                 "scanId": _uuid("Durable scan UUID."),
                 "failureMessage": _string("Concise failure explanation."),
             },
             required=("scanId",),
         ),
-        "annotations": {"readOnlyHint": False, "idempotentHint": True},
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": True,
+        },
     },
     {
         "name": "kiro_security_cancel_scan",
@@ -193,11 +229,15 @@ TOOL_DEFINITIONS = (
             "Cancel a running scan by its opaque identifier. The database stores "
             "failed plus canceledAt and projects status canceled."
         ),
-        "inputSchema": _schema(
+        "inputSchema": _attested_schema(
             {"scanId": _uuid("Durable scan UUID.")},
             required=("scanId",),
         ),
-        "annotations": {"readOnlyHint": False, "idempotentHint": True},
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": True,
+        },
     },
 )
 
@@ -220,7 +260,13 @@ class WorkbenchTools:
 
     def call(self, name, arguments):
         # type: (str, object) -> dict
-        args = _require_arguments(arguments)
+        attested_args = _require_arguments(arguments)
+        owner_session_hash = self.workbench.consume_chat_attestation(
+            name,
+            attested_args,
+        )
+        args = dict(attested_args)
+        args.pop("requestNonce", None)
         if name == "kiro_security_get_capabilities":
             _reject_unknown(args, ())
             state = self.workbench.schema_state()
@@ -230,8 +276,8 @@ class WorkbenchTools:
                 "stateRoot": state["stateRoot"],
                 "scanRoot": state["scanRoot"],
                 "scanStartOwner": "kiro_agent_chat",
-                "chatIdentity": "workspace_id_possession_adaptation",
-                "semanticAnalysisOwner": "power_skills",
+                "chatIdentity": "kiro_hook_one_time_attestation",
+                "semanticAnalysisOwner": "kiro_agent_steering",
                 "semanticWorkflowsAvailable": False,
                 "directContinuation": "start_scan_then_get_scan_context",
             }
@@ -243,22 +289,41 @@ class WorkbenchTools:
                 if setup_value is not None
                 else None
             )
-            return self.workbench.create_workspace(setup)
+            return self.workbench.create_workspace(
+                setup,
+                owner_session_hash=owner_session_hash,
+            )
         if name == "kiro_security_get_workspace":
             _reject_unknown(args, ("sessionId",))
-            return self.workbench.get_workspace(_required_string(args, "sessionId"))
+            return self.workbench.get_workspace(
+                _required_string(args, "sessionId"),
+                owner_session_hash=owner_session_hash,
+            )
         if name == "kiro_security_save_workspace":
             _reject_unknown(args, ("sessionId", "setup"))
             return self.workbench.update_workspace_setup(
                 _required_string(args, "sessionId"),
                 _workspace_setup(args.get("setup"), target_required=True),
+                owner_session_hash=owner_session_hash,
             )
         if name == "kiro_security_start_scan":
-            _reject_unknown(args, ("sessionId",))
-            return self.workbench.start_scan(_required_string(args, "sessionId"))
+            _reject_unknown(
+                args,
+                ("sessionId", "setupRevision", "setupDigest", "setup"),
+            )
+            return self.workbench.start_scan(
+                _required_string(args, "sessionId"),
+                expected_setup_revision=_required_integer(args, "setupRevision", 1),
+                expected_setup_digest=_required_sha256(args, "setupDigest"),
+                approved_setup=_workspace_setup(args.get("setup"), target_required=True),
+                owner_session_hash=owner_session_hash,
+            )
         if name == "kiro_security_get_scan_context":
             _reject_unknown(args, ("scanId",))
-            return self.workbench.get_scan_context(_required_string(args, "scanId"))
+            return self.workbench.get_scan_context(
+                _required_string(args, "scanId"),
+                owner_session_hash=owner_session_hash,
+            )
         if name == "kiro_security_update_scan_progress":
             _reject_unknown(
                 args,
@@ -278,16 +343,21 @@ class WorkbenchTools:
                 args.get("reviewItemsCompleted"),
                 args.get("reportableFindingsCount"),
                 args.get("deepReviewPass"),
+                owner_session_hash=owner_session_hash,
             )
         if name == "kiro_security_fail_scan":
             _reject_unknown(args, ("scanId", "failureMessage"))
             return self.workbench.fail_scan(
                 _required_string(args, "scanId"),
                 _optional_string(args, "failureMessage"),
+                owner_session_hash=owner_session_hash,
             )
         if name == "kiro_security_cancel_scan":
             _reject_unknown(args, ("scanId",))
-            return self.workbench.cancel_scan(_required_string(args, "scanId"))
+            return self.workbench.cancel_scan(
+                _required_string(args, "scanId"),
+                owner_session_hash=owner_session_hash,
+            )
         raise WorkbenchError("unknown_tool", "Unknown Kiro Security MCP tool.")
 
 
@@ -324,6 +394,26 @@ def _optional_string(arguments, key):
         return None
     if not isinstance(value, str):
         raise WorkbenchError("invalid_arguments", "%s must be a string." % key)
+    return value
+
+
+def _required_integer(arguments, key, minimum):
+    value = arguments.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise WorkbenchError(
+            "invalid_arguments",
+            "%s must be an integer greater than or equal to %s." % (key, minimum),
+        )
+    return value
+
+
+def _required_sha256(arguments, key):
+    value = _required_string(arguments, key)
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        raise WorkbenchError(
+            "invalid_arguments",
+            "%s must be a lowercase SHA-256 digest." % key,
+        )
     return value
 
 

@@ -10,7 +10,7 @@ Kiro Security Power를 로컬에 설치된 Codex Security Plugin 0.1.11의 실�
 
 - 아키텍처 사실의 기준: 설치된 `codex-security@0.1.11`의 실행 계약과 스키마 → 스킬 문서 → OpenAI 공개 문서
 - `docs/codex-security-plugin-0.1.11-architecture.md`는 위 원본을 찾고 해석하기 위한 버전 고정형 참고 자료다.
-- Kiro 제품 적응의 기준: Kiro Power, Agent chat, VSIX, scan target 밖의 extension-global shared workbench
+- Kiro 제품 적응의 기준: 일반 Agent chat, auto-inclusion global steering, direct MCP, exact direct-tool Hook, VSIX와 scan target 밖의 extension-global shared workbench
 - 구현 판단의 기준: 20개 아키텍처 주제
 - 과거 Kiro migration, parity 보고서와 기존 내부 계약은 새 구현의 요구사항이 아니다. Fresh schema에는 이후 릴리스를 위한 forward migration 기반만 둔다.
 - 별도의 전수 계약 매트릭스는 만들지 않는다.
@@ -30,7 +30,7 @@ Kiro Security Power를 로컬에 설치된 Codex Security Plugin 0.1.11의 실�
 ### 0. 전환 기준 확정
 
 - Kiro는 VSIX `globalStorageUri`에 둔 하나의 전역 SQLite와 외부 scan artifact root를 shared workbench topology로 지원한다. 논리 workspace들은 이 DB의 행이며, 저장소 안에는 `.kiro/security-power`를 만들지 않는다. Codex의 prompt-only terminal/chat 경로는 의도적인 Kiro adaptation으로 제외한다.
-- Scan 시작은 Kiro Agent chat과 Power만 소유한다. 시작 호출은 Hook으로 증명된 같은 Kiro chat에 `scanId`를 반환하고, Agent는 별도 context 조회로 authoritative snapshot을 즉시 읽는다. VSIX에는 Start 동작을 두지 않는다.
+- Scan 시작은 일반 Kiro Agent chat만 소유한다. auto-inclusion steering이 direct MCP workflow를 제공하고, 시작 호출은 exact direct-tool Hook으로 증명된 같은 Kiro chat에 `scanId`를 반환한다. Agent는 별도 context 조회로 authoritative snapshot을 즉시 읽으며 VSIX에는 Start 동작을 두지 않는다.
 - Codex App의 start waiter, initial handoff delivery와 host `sendMessage` continuation은 Kiro에서 사용하지 않는다. Process/task loss 뒤에는 durable scan을 사용자가 Agent chat에서 명시적으로 재개한다.
 - Kiro 직접-resume에서는 VSIX가 exact scan/request identity를 가진 durable recovery/remediation request와 재개 정보를 저장한다. 새 Agent chat은 먼저 MCP claim을 호출해 identity와 적용되는 CAS를 검증하고 token을 받은 뒤, 두 번째 context 조회에 그 token을 제시해 delivered 전환과 authoritative context 반환을 수행한다. Delivery 전 scan recovery/remediation claim은 120초 뒤에만 takeover할 수 있고, delivered remediation worker는 900초 뒤에만 takeover할 수 있다. 실패·취소는 단계에 따라 claim을 release하거나 action을 cancel한다.
 - Deep은 라운드마다 동일 canonical brief를 받은 정확히 여섯 개의 독립 discovery worker를 사용하고 최대 10라운드를 실행한다. 신규 canonical merged candidate가 없는 첫 완전한 라운드에서 종료하며, 정해진 복구 후에도 여섯 개의 usable output을 확보하지 못하면 크기를 줄이지 않고 미완료 상태를 보존한다.
@@ -39,7 +39,7 @@ Kiro Security Power를 로컬에 설치된 Codex Security Plugin 0.1.11의 실�
 
 ### 1. 기반
 
-- VSIX `globalStorageUri` 기반 plugin/Power entry point와 build/test/package 뼈대
+- VSIX `globalStorageUri` 기반 runtime entry point와 build/test/package 뼈대
 - logical workspace와 Kiro `PreToolUse` Hook의 one-time attestation으로 얻는 trusted chat identity
 - fresh SQLite schema와 current-result pointer
 - target/snapshot identity
@@ -48,10 +48,12 @@ Kiro Security Power를 로컬에 설치된 Codex Security Plugin 0.1.11의 실�
 ### 2. 실행 경계
 
 - Agent chat 전용 scan start
-- VSIX 명령이 `globalStorageUri`에 self-contained Power와 절대 Python/Engine/state 경로의 `mcp.json`을 원자적으로 준비하고, 사용자가 Kiro Powers 패널에서 그 폴더를 import해 등록하는 Power 설치 경계
-- 이전 설치 화면 패턴을 따르는 명시적 사용자 승인 UI가 Hook bridge를 `globalStorageUri`에 준비하고, Kiro의 사용자 전역 Hook 등록 파일 `~/.kiro/hooks/kiro-security-power.json`만 원자적으로 설치·검증·복구·제거하는 별도 Hook 설치 경계. Kiro Hook matcher는 outer `kiro_powers` tool name에 정확히 고정하고 bridge가 Power/server/inner tool을 다시 exact-match한다. 등록 action에는 확인된 Python executable과 `globalStorageUri` Hook bridge의 절대 경로만 두고 DB·scan artifact·runtime state는 두지 않으며, 다른 Hook 및 Agent 설정은 수정하지 않는다.
+- 명시적 사용자 승인 UI가 self-contained Python/Engine runtime과 Hook bridge를 `globalStorageUri`에 준비하고, 설치별로 원자적으로 생성·보존한 임의의 `ksp_…` key 하나만 Kiro 사용자 전역 `~/.kiro/settings/mcp.json`에 JSONC local edit로 등록한다. MCP tool ID·Hook matcher·Trust 규칙은 모두 이 key에서 파생하며 다른 MCP 항목과 주석은 보존한다. user powers와 열린 모든 workspace의 exact/정규화-alias key 충돌을 감시하고, Hook은 정확한 managed registration과 각 Kiro 창의 짧은 수명 config-digest lease를 매 호출 직전에 보수적으로 합쳐 변경·stale·conflict·미검사 workspace를 fail-closed한다.
+- 이미 Trust v2 migration이 끝난 Kiro에서도 반복 승인이 생기지 않도록 active 사용자 `permissions.yaml`/`permissions.json`에 non-Start/non-Cancel 도구의 exact allow rule과 Start/Cancel의 exact ask rule을 추가한다. Kiro에서 ask/deny는 겹치는 allow보다 우선하므로 기존의 넓은 allow가 있어도 Start 확인을 유지하되, 기존 deny는 우회하지 않는다. 설치·제거는 이 두 exact rule만 대상으로 하고 다른 permission rule과 파일 형식·주석·기존 mode를 보존한다.
+- 같은 UI가 auto-inclusion steering 전용 파일 `~/.kiro/steering/kiro-security-power.md`와 Hook 전용 파일 `~/.kiro/hooks/kiro-security-power.json`을 설치·검증·수리·제거한다. custom Agent와 Power import는 사용하지 않는다.
+- Hook matcher는 설치한 Kiro Security direct MCP tool ID들의 exact allowlist로 고정한다. bridge는 실제 Kiro `session_id`, raw MCP tool name, exact argument digest와 fresh nonce를 결합하며 다른 도구 호출은 처리하지 않는다.
 - newline-delimited JSON-RPC stdio shared MCP transport와 schema-validated workbench tool
-- 읽기 도구만 auto-approve하고 workspace 생성·setup 저장·scan start/progress/fail/cancel은 명시적 tool approval 대상으로 유지
+- Codex setup의 단일 Start 의도 확인에 맞춰 workspace 생성·setup 저장·읽기·progress·fail은 auto-approve하고, scan start와 명시적 cancel만 tool approval 대상으로 유지한다. Start 입력은 직전에 저장·표시한 exact normalized setup, `setupRevision`, `setupDigest`를 포함하고 Engine이 transaction 안에서 다시 검증한다.
 - 매 chat-bound 호출의 새 `requestNonce`를 실제 Kiro `session_id`, tool name과 exact argument digest에 짧게 결합하고 MCP에서 원자적으로 한 번만 소비
 - `scanId` 반환과 authoritative context 조회를 잇는 attested Agent chat 직접 continuation
 - durable scan의 명시적 Agent chat recovery
@@ -107,7 +109,7 @@ Kiro Security Power를 로컬에 설치된 Codex Security Plugin 0.1.11의 실�
 - Process/task가 종료돼도 running scan이 보존되고 새 Agent chat에서 명시적으로 재개할 수 있다.
 - Direct-resume의 claim/token 발급과 token 기반 context-delivery가 분리되고, release/cancel 및 120초·900초 stale takeover 경계가 검증된다.
 - Dashboard는 SQLite의 선택된 logical workspace와 pointer를 매번 다시 읽는다.
-- Standard, Diff와 Deep의 의미론은 Power/Agent가 소유하고 Engine은 분석하지 않는다.
+- Standard, Diff와 Deep의 의미론은 auto-inclusion steering을 따르는 Agent chat이 소유하고 Engine은 분석하지 않는다.
 - 네 phase skill과 writeup/hardening workflow의 독립 호출 및 scan-orchestrated 호출이 모두 검증된다.
 - Deterministic projection과 Agent-authored derived writeup/hardening의 생성·검증 책임이 분리되어 있다.
 - `report.md`는 completion 필수이고 SARIF는 completion best-effort·명시적 export strict 계약을 따른다.

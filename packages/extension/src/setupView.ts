@@ -1,32 +1,30 @@
 import { randomBytes } from "node:crypto";
 import { lstat } from "node:fs/promises";
-import * as path from "node:path";
 
 import * as vscode from "vscode";
 
-import {
-  ChatBindingManager,
-  type ChatBindingInspection,
-} from "./chatBinding";
 import type { FoundationPaths } from "./foundation";
-import { preparePowerIntegration } from "./powerIntegration";
+import {
+  KiroIntegrationManager,
+  type KiroIntegrationInspection,
+} from "./integration";
 
 const VIEW_ID = "kiroSecurity.setup";
 
 type SetupCommand =
   | "refresh"
-  | "enableChatBinding"
-  | "verifyChatBinding"
+  | "connectIntegration"
+  | "verifyIntegration"
   | "showHookFile"
-  | "repairChatBinding"
-  | "removeChatBinding"
-  | "preparePower"
-  | "revealPower";
+  | "showMcpFile"
+  | "showPermissionsFile"
+  | "showSteeringFile"
+  | "repairIntegration"
+  | "disconnectIntegration";
 
 export class SecuritySetupView implements vscode.WebviewViewProvider {
   static readonly viewId = VIEW_ID;
-  private readonly chatBinding: ChatBindingManager;
-  private readonly powerRoot: string;
+  private readonly integration: KiroIntegrationManager;
   private busy = false;
   private feedback: string | undefined;
 
@@ -34,12 +32,15 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
     private readonly context: vscode.ExtensionContext,
     private readonly paths: FoundationPaths,
     private readonly output: vscode.OutputChannel,
+    serverKey: string,
   ) {
-    this.chatBinding = new ChatBindingManager(context, paths);
-    this.powerRoot = path.join(
-      paths.stateRoot.fsPath,
-      "agent-integration",
-      "kiro-security-power",
+    this.integration = new KiroIntegrationManager(context, paths, serverKey);
+  }
+
+  async initialize(): Promise<void> {
+    await this.integration.refreshMcpShadowGuard();
+    this.context.subscriptions.push(
+      this.integration.startShadowMonitoring(this.output),
     );
   }
 
@@ -65,30 +66,47 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
       switch (message.command) {
         case "refresh":
           break;
-        case "enableChatBinding":
-          await this.enableChatBinding();
+        case "connectIntegration":
+          await this.connectIntegration();
           break;
-        case "verifyChatBinding":
-          await this.chatBinding.verify();
-          this.feedback = "Hook registration and bridge probe passed.";
+        case "verifyIntegration":
+          await this.integration.verify();
+          this.feedback = "Local runtime and Kiro integration files passed verification.";
           await vscode.window.showInformationMessage(
-            "Kiro Security Hook transport verification passed.",
+            "Kiro Security integration verification passed.",
           );
           break;
         case "showHookFile":
-          await this.showHookFile();
+          await this.showFile(
+            this.integration.chatBinding.hookPath,
+            "The Kiro Security Hook registration does not exist yet.",
+          );
           break;
-        case "repairChatBinding":
-          await this.repairChatBinding();
+        case "showMcpFile":
+          await this.showFile(
+            this.integration.mcpPath,
+            "The Kiro user MCP configuration does not exist yet.",
+          );
           break;
-        case "removeChatBinding":
-          await this.removeChatBinding();
+        case "showPermissionsFile": {
+          const inspection = await this.integration.inspect();
+          await this.showFile(
+            inspection.permissionsPath,
+            "The active Kiro user permissions file does not exist yet.",
+          );
           break;
-        case "preparePower":
-          await this.preparePower();
+        }
+        case "showSteeringFile":
+          await this.showFile(
+            this.integration.steeringPath,
+            "The Kiro Security steering file does not exist yet.",
+          );
           break;
-        case "revealPower":
-          await this.revealPower();
+        case "repairIntegration":
+          await this.repairIntegration();
+          break;
+        case "disconnectIntegration":
+          await this.disconnectIntegration();
           break;
       }
     } catch (error) {
@@ -105,128 +123,115 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
     }
   }
 
-  private async enableChatBinding(): Promise<void> {
+  private async connectIntegration(): Promise<void> {
     const approved = await vscode.window.showWarningMessage(
-      "Enable the Kiro Security Hook transport for this user?",
+      "Connect Kiro Security to normal Kiro chats for this user?",
       {
         modal: true,
         detail: [
-          `This creates only ${this.chatBinding.hookPath} outside Extension global storage.`,
-          "The user-level Hook is visible to all Kiro chats, but it matches only the Kiro Powers wrapper and the bridge accepts only this Power's exact server and tools.",
-          "No Agent configuration or other Hook file is changed.",
+          `Adds only the installation-specific '${this.integration.serverKey}' entry in ${this.integration.mcpPath}.`,
+          "Adds exact Trust v2 rules: allow for non-Start/non-Cancel tools and ask for Start/Cancel. Broader user rules are not changed.",
+          `Creates dedicated files at ${this.integration.chatBinding.hookPath} and ${this.integration.steeringPath}.`,
+          "The Hook matches only exact Kiro Security direct MCP tool IDs. No custom Agent configuration is installed.",
+          "Runtime, database, and scan artifacts remain in Extension global storage.",
         ].join("\n\n"),
       },
-      "Enable",
+      "Connect",
     );
-    if (approved !== "Enable") {
+    if (approved !== "Connect") {
       return;
     }
-    const result = await this.chatBinding.install();
+    const result = await this.integration.install(false);
     this.feedback = result.changed
-      ? "Hook transport installed and verified."
-      : "Hook transport was already current and verified.";
+      ? "Kiro Security is connected to normal Kiro chats."
+      : "Kiro Security integration was already current.";
     this.output.appendLine(this.feedback);
   }
 
-  private async repairChatBinding(): Promise<void> {
+  private async repairIntegration(): Promise<void> {
     const approved = await vscode.window.showWarningMessage(
-      "Repair the dedicated Kiro Security Hook registration?",
+      "Repair the managed Kiro Security integration?",
       {
         modal: true,
-        detail:
-          "The dedicated file will be replaced atomically. Other Hook and Agent files are not touched.",
+        detail: [
+          "Refreshes the global-storage runtime and the two dedicated Hook/steering files.",
+          `Repairs only the managed ${this.integration.serverKey} MCP entry and exact Trust v2 rules. Other MCP servers and permission rules are not changed.`,
+        ].join("\n\n"),
       },
       "Repair",
     );
     if (approved !== "Repair") {
       return;
     }
-    const result = await this.chatBinding.repair();
+    const result = await this.integration.install(true);
     this.feedback = result.changed
-      ? "Hook transport repaired."
-      : "Hook transport is current and verified.";
+      ? "Kiro Security integration repaired."
+      : "Kiro Security integration is current.";
     this.output.appendLine(this.feedback);
   }
 
-  private async removeChatBinding(): Promise<void> {
+  private async disconnectIntegration(): Promise<void> {
     const approved = await vscode.window.showWarningMessage(
-      "Remove the dedicated Kiro Security Hook registration?",
+      "Disconnect Kiro Security from normal Kiro chats?",
       {
         modal: true,
         detail:
-          "Only the dedicated ~/.kiro/hooks/kiro-security-power.json file is removed. Database and scan data are preserved.",
+          "Removes the managed MCP entry, exact Trust v2 rules, and dedicated Hook and steering files. Other permission rules, database, scan results, and the global-storage runtime are preserved.",
       },
-      "Remove",
+      "Disconnect",
     );
-    if (approved !== "Remove") {
+    if (approved !== "Disconnect") {
       return;
     }
-    const result = await this.chatBinding.remove();
+    const result = await this.integration.disconnect();
     this.feedback = result.changed
-      ? "Hook registration removed."
-      : "Hook registration was already absent.";
+      ? "Kiro Security was disconnected; data was preserved."
+      : "Kiro Security integration was already absent.";
     this.output.appendLine(this.feedback);
   }
 
-  private async showHookFile(): Promise<void> {
-    if (!(await regularFileExists(this.chatBinding.hookPath))) {
-      await vscode.window.showInformationMessage(
-        "The Kiro Security Hook registration does not exist yet.",
-      );
+  private async showFile(candidate: string, absentMessage: string): Promise<void> {
+    if (!(await regularFileExists(candidate))) {
+      await vscode.window.showInformationMessage(absentMessage);
       return;
     }
     await vscode.commands.executeCommand(
       "vscode.open",
-      vscode.Uri.file(this.chatBinding.hookPath),
-    );
-  }
-
-  private async preparePower(): Promise<void> {
-    const prepared = await preparePowerIntegration(this.context, this.paths);
-    this.feedback = `Power prepared at ${prepared.powerRoot}`;
-    this.output.appendLine(this.feedback);
-    this.output.appendLine(`Python runtime: ${prepared.pythonExecutable}`);
-    const selection = await vscode.window.showInformationMessage(
-      "Kiro Security Power is ready to import from its global-storage folder.",
-      "Reveal Folder",
-    );
-    if (selection === "Reveal Folder") {
-      await this.revealPower();
-    }
-  }
-
-  private async revealPower(): Promise<void> {
-    if (!(await regularDirectoryExists(this.powerRoot))) {
-      await vscode.window.showInformationMessage(
-        "Prepare the Power integration before revealing its folder.",
-      );
-      return;
-    }
-    await vscode.commands.executeCommand(
-      "revealFileInOS",
-      vscode.Uri.file(this.powerRoot),
+      vscode.Uri.file(candidate),
     );
   }
 
   private async refresh(view: vscode.WebviewView): Promise<void> {
-    let chatBinding: ChatBindingInspection;
+    let integration: KiroIntegrationInspection;
     try {
-      chatBinding = await this.chatBinding.inspect();
+      integration = await this.integration.inspect();
     } catch (error) {
-      chatBinding = {
+      integration = {
         state: "unavailable",
-        registrationState: "absent",
-        hookPath: this.chatBinding.hookPath,
-        bridgePath: this.chatBinding.bridgePath,
         detail: errorMessage(error),
+        serverKey: this.integration.serverKey,
+        hook: {
+          state: "unavailable",
+          registrationState: "absent",
+          hookPath: this.integration.chatBinding.hookPath,
+          bridgePath: this.integration.chatBinding.bridgePath,
+          detail: errorMessage(error),
+        },
+        mcp: { state: "absent", detail: errorMessage(error) },
+        permissions: { state: "absent", detail: errorMessage(error) },
+        steering: { state: "absent", detail: errorMessage(error) },
+        runtime: { ready: false, detail: errorMessage(error) },
+        hookPath: this.integration.chatBinding.hookPath,
+        mcpPath: this.integration.mcpPath,
+        permissionsPath: "",
+        steeringPath: this.integration.steeringPath,
+        runtimeRoot: this.integration.runtimeRoot,
       };
     }
     view.webview.html = renderSetupHtml({
       webview: view.webview,
       stateRoot: this.paths.stateRoot.fsPath,
-      powerRoot: this.powerRoot,
-      powerReady: await regularDirectoryExists(this.powerRoot),
-      chatBinding,
+      integration,
       feedback: this.feedback,
     });
   }
@@ -235,9 +240,7 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
 export function renderSetupHtml(input: {
   readonly webview: vscode.Webview;
   readonly stateRoot: string;
-  readonly powerRoot: string;
-  readonly powerReady: boolean;
-  readonly chatBinding: ChatBindingInspection;
+  readonly integration: KiroIntegrationInspection;
   readonly feedback?: string;
 }): string {
   const nonce = randomBytes(16).toString("base64");
@@ -246,10 +249,12 @@ export function renderSetupHtml(input: {
     `style-src ${input.webview.cspSource} 'unsafe-inline'`,
     `script-src 'nonce-${nonce}'`,
   ].join("; ");
-  const presentation = bindingPresentation(input.chatBinding);
-  const canRemove =
-    input.chatBinding.registrationState === "installed" ||
-    input.chatBinding.registrationState === "repairable";
+  const presentation = integrationPresentation(input.integration);
+  const canDisconnect =
+    input.integration.hook.registrationState !== "absent" ||
+    input.integration.mcp.state !== "absent" ||
+    input.integration.permissions.state !== "absent" ||
+    input.integration.steering.state !== "absent";
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -285,7 +290,7 @@ export function renderSetupHtml(input: {
       <div class="card-title">
         <div>
           <h2>Connect Kiro Chat</h2>
-          <p>Install the user-level Hook transport used by normal Kiro chats.</p>
+          <p>Enable normal chats without selecting a custom Agent or importing a Power.</p>
         </div>
         <span class="badge ${presentation.badgeClass}">${escapeHtml(
           presentation.badge,
@@ -294,12 +299,12 @@ export function renderSetupHtml(input: {
       <p class="setup-status"><strong>${escapeHtml(
         presentation.heading,
       )}</strong></p>
-      <p class="muted">${escapeHtml(input.chatBinding.detail)}</p>
-      <p class="scope-note">This phase validates Kiro's Hook-delivered <code>session_id</code> at the transport boundary. End-to-end one-time MCP attestation is not implemented yet, so this is not full trusted chat ownership parity.</p>
+      <p class="muted">${escapeHtml(input.integration.detail)}</p>
+      <p class="scope-note">Auto-inclusion steering supplies the workflow. The exact direct-tool Hook binds each fresh request nonce to Kiro's <code>session_id</code>, and the MCP consumes it once to enforce chat-owned workspaces.</p>
       <div class="button-row">
-        <button class="primary" data-command="enableChatBinding" ${
-          input.chatBinding.state === "absent" ? "" : "disabled"
-        }>Enable Hook transport</button>
+        <button class="primary" data-command="connectIntegration" ${
+          input.integration.state === "absent" ? "" : "disabled"
+        }>Connect Kiro Chat</button>
       </div>
 
       <details class="setup-options">
@@ -308,12 +313,18 @@ export function renderSetupHtml(input: {
           <dl>
             <dt>Installation scope</dt>
             <dd>Current user · all Kiro chats</dd>
-            <dt>Changed Kiro file</dt>
-            <dd class="mono">${escapeHtml(input.chatBinding.hookPath)}</dd>
-            <dt>Matcher</dt>
-            <dd><code>^kiro_powers$</code>; bridge filters exact Power, server, and tool names</dd>
-            <dt>Bridge</dt>
-            <dd class="mono">${escapeHtml(input.chatBinding.bridgePath)}</dd>
+            <dt>MCP entry</dt>
+            <dd class="mono">${escapeHtml(input.integration.serverKey)} in ${escapeHtml(
+              input.integration.mcpPath,
+            )}</dd>
+            <dt>Permissions</dt>
+            <dd class="mono">${escapeHtml(input.integration.permissionsPath)}</dd>
+            <dt>Steering</dt>
+            <dd class="mono">${escapeHtml(input.integration.steeringPath)}</dd>
+            <dt>Hook</dt>
+            <dd class="mono">${escapeHtml(input.integration.hookPath)}</dd>
+            <dt>Runtime</dt>
+            <dd class="mono">${escapeHtml(input.integration.runtimeRoot)}</dd>
           </dl>
         </div>
       </details>
@@ -322,47 +333,32 @@ export function renderSetupHtml(input: {
         <summary>Advanced and troubleshooting</summary>
         <div class="setup-options-body">
           <div class="button-row">
-            <button data-command="verifyChatBinding" ${
-              input.chatBinding.state === "ready" ? "" : "disabled"
+            <button data-command="verifyIntegration" ${
+              input.integration.state === "ready" ? "" : "disabled"
             }>Verify again</button>
             <button data-command="showHookFile" ${
-              input.chatBinding.registrationState === "absent"
+              input.integration.hook.registrationState === "absent"
                 ? "disabled"
                 : ""
-            }>Show changed file</button>
-            <button data-command="repairChatBinding" ${
-              input.chatBinding.state === "repairable" ? "" : "disabled"
+            }>Show Hook</button>
+            <button data-command="showMcpFile" ${
+              input.integration.mcp.state === "absent" ? "disabled" : ""
+            }>Show MCP config</button>
+            <button data-command="showPermissionsFile" ${
+              input.integration.permissionsPath ? "" : "disabled"
+            }>Show permissions</button>
+            <button data-command="showSteeringFile" ${
+              input.integration.steering.state === "absent" ? "disabled" : ""
+            }>Show steering</button>
+            <button data-command="repairIntegration" ${
+              input.integration.state === "repairable" ? "" : "disabled"
             }>Repair</button>
-            <button class="danger" data-command="removeChatBinding" ${
-              canRemove ? "" : "disabled"
-            }>Remove Hook transport</button>
+            <button class="danger" data-command="disconnectIntegration" ${
+              canDisconnect ? "" : "disabled"
+            }>Disconnect</button>
           </div>
         </div>
       </details>
-    </section>
-
-    <section class="card">
-      <div class="card-title">
-        <div>
-          <h2>Power integration</h2>
-          <p>Prepare the self-contained Power, then import it in Kiro.</p>
-        </div>
-        <span class="badge ${
-          input.powerReady ? "badge-ready" : "badge-neutral"
-        }">${input.powerReady ? "prepared" : "not prepared"}</span>
-      </div>
-      <ol class="steps">
-        <li>Prepare the Power folder from this Extension.</li>
-        <li>Open Kiro Powers → Add Custom Power → Import power from a folder.</li>
-        <li>Start a new normal chat after setup is complete.</li>
-      </ol>
-      <div class="button-row">
-        <button class="primary" data-command="preparePower">Prepare Power</button>
-        <button data-command="revealPower" ${
-          input.powerReady ? "" : "disabled"
-        }>Reveal folder</button>
-      </div>
-      <p class="mono muted">${escapeHtml(input.powerRoot)}</p>
     </section>
 
     <details class="card setup-disclosure" open>
@@ -375,14 +371,29 @@ export function renderSetupHtml(input: {
       <div class="checks">
         ${checkRow("Global storage", input.stateRoot, true)}
         ${checkRow(
-          "Kiro Hook transport",
-          presentation.heading,
-          input.chatBinding.state === "ready",
+          "Direct MCP runtime",
+          input.integration.runtime.detail,
+          input.integration.runtime.ready,
         )}
         ${checkRow(
-          "Power runtime",
-          input.powerReady ? "Prepared" : "Not prepared",
-          input.powerReady,
+          "Global steering",
+          input.integration.steering.detail,
+          input.integration.steering.state === "installed",
+        )}
+        ${checkRow(
+          "Trust v2 permissions",
+          input.integration.permissions.detail,
+          input.integration.permissions.state === "installed",
+        )}
+        ${checkRow(
+          "Direct MCP registration",
+          input.integration.mcp.detail,
+          input.integration.mcp.state === "installed",
+        )}
+        ${checkRow(
+          "Chat identity Hook",
+          input.integration.hook.detail,
+          input.integration.hook.state === "ready",
         )}
       </div>
     </details>
@@ -401,41 +412,41 @@ export function renderSetupHtml(input: {
 </html>`;
 }
 
-function bindingPresentation(binding: ChatBindingInspection): {
+function integrationPresentation(integration: KiroIntegrationInspection): {
   readonly badge: string;
   readonly badgeClass: string;
   readonly heading: string;
 } {
-  switch (binding.state) {
+  switch (integration.state) {
     case "ready":
       return {
         badge: "installed",
         badgeClass: "badge-ready",
-        heading: "Hook transport is installed",
+        heading: "Kiro Security is connected",
       };
     case "repairable":
       return {
         badge: "repair needed",
         badgeClass: "badge-warning",
-        heading: "Dedicated Hook transport needs repair",
+        heading: "Kiro Security integration needs repair",
       };
     case "conflict":
       return {
         badge: "conflict",
         badgeClass: "badge-error",
-        heading: "The dedicated Hook path is occupied",
+        heading: "A Kiro integration path or MCP key conflicts",
       };
     case "unavailable":
       return {
         badge: "unavailable",
         badgeClass: "badge-error",
-        heading: "Hook transport cannot be configured",
+        heading: "Kiro Security cannot be configured",
       };
     case "absent":
       return {
         badge: "not installed",
         badgeClass: "badge-neutral",
-        heading: "Hook transport is not installed",
+        heading: "Kiro Security is not connected",
       };
   }
 }
@@ -629,28 +640,20 @@ function isSetupMessage(value: unknown): value is { command: SetupCommand } {
   }
   return new Set<SetupCommand>([
     "refresh",
-    "enableChatBinding",
-    "verifyChatBinding",
+    "connectIntegration",
+    "verifyIntegration",
     "showHookFile",
-    "repairChatBinding",
-    "removeChatBinding",
-    "preparePower",
-    "revealPower",
+    "showMcpFile",
+    "showPermissionsFile",
+    "showSteeringFile",
+    "repairIntegration",
+    "disconnectIntegration",
   ]).has((value as { command: SetupCommand }).command);
 }
 
 async function regularFileExists(candidate: string): Promise<boolean> {
   try {
     return (await lstat(candidate)).isFile();
-  } catch {
-    return false;
-  }
-}
-
-async function regularDirectoryExists(candidate: string): Promise<boolean> {
-  try {
-    const metadata = await lstat(candidate);
-    return metadata.isDirectory() && !metadata.isSymbolicLink();
   } catch {
     return false;
   }

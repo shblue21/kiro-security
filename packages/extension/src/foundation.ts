@@ -53,7 +53,7 @@ export function describeFoundation(paths: FoundationPaths): readonly string[] {
     `Global workbench: ${displayPath(paths.database)}`,
     `External scan artifacts: ${displayPath(paths.scanRoot)}`,
     "Security scans remain Agent-chat-only; no Dashboard Start action is installed.",
-    "Open the Kiro Security setup view to prepare the Power and manage its user-level Hook transport.",
+    "Open the Kiro Security setup view to connect global steering, direct MCP, and chat identity Hook transport.",
   ];
 }
 

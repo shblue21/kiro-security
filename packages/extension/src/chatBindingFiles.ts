@@ -13,11 +13,12 @@ import * as path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { randomUUID } from "node:crypto";
 
+import { buildDirectMcpContract } from "./integrationConfig";
+
 export const HOOK_FILE_NAME = "kiro-security-power.json";
 export const HOOK_NAME = "Kiro Security Power chat identity bridge";
 export const HOOK_DESCRIPTION =
-  "Managed by the Kiro Security Power VSIX; runtime state remains in extension global storage.";
-export const POWER_TOOL_MATCHER = "^kiro_powers$";
+  "Managed by the Kiro Security Power VSIX; matches only its direct MCP tools.";
 export const HOOK_BRIDGE_FILE_NAME = "kiro_security_hook_bridge.py";
 export const MAX_HOOK_FILE_BYTES = 1024 * 1024;
 
@@ -78,9 +79,20 @@ export function getPackagedHookBridgePath(extensionRoot: string): string {
   return path.join(extensionRoot, "hook", HOOK_BRIDGE_FILE_NAME);
 }
 
+export function buildHookBridgeProbe(cwd: string): object {
+  return {
+    session_id: "kiro-security-installation-probe",
+    hook_event_name: "PreToolUse",
+    cwd,
+    tool_name: "fs_read",
+    tool_input: { path: cwd },
+  };
+}
+
 export function buildHookRegistrationDocument(input: {
   readonly pythonExecutable: string;
   readonly bridgePath: string;
+  readonly serverKey: string;
   readonly platform?: NodeJS.Platform;
 }): HookRegistrationDocument {
   requireAbsolutePath(input.pythonExecutable, "Python executable");
@@ -93,13 +105,15 @@ export function buildHookRegistrationDocument(input: {
         name: HOOK_NAME,
         description: HOOK_DESCRIPTION,
         trigger: "PreToolUse",
-        matcher: POWER_TOOL_MATCHER,
+        matcher: buildDirectMcpContract(input.serverKey).toolMatcher,
         action: {
           type: "command",
           command: [
             quoteCommandArgument(input.pythonExecutable, platform),
             "-B",
             quoteCommandArgument(input.bridgePath, platform),
+            "--server-key",
+            quoteCommandArgument(input.serverKey, platform),
           ].join(" "),
         },
         timeout: 10,
