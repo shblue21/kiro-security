@@ -5,7 +5,6 @@ import {
   readFile,
   rename,
   rm,
-  unlink,
   writeFile,
 } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -43,7 +42,7 @@ export interface HookRegistrationDocument {
 export type HookRegistrationState =
   | "absent"
   | "installed"
-  | "repairable"
+  | "mismatch"
   | "conflict";
 
 export interface HookRegistrationInspection {
@@ -158,7 +157,7 @@ export async function inspectHookRegistration(input: {
     };
   }
   return {
-    state: "repairable",
+    state: "mismatch",
     detail: permissionsReady
       ? "The dedicated Kiro Hook registration differs from the current Extension configuration."
       : "The dedicated Kiro Hook registration has permissions that are too broad.",
@@ -168,7 +167,6 @@ export async function inspectHookRegistration(input: {
 export async function installHookRegistration(input: {
   readonly hookPath: string;
   readonly document: HookRegistrationDocument;
-  readonly repair: boolean;
 }): Promise<HookRegistrationMutation> {
   const inspection = await inspectHookRegistration({
     hookPath: input.hookPath,
@@ -180,9 +178,9 @@ export async function installHookRegistration(input: {
   if (inspection.state === "conflict") {
     throw new Error(inspection.detail);
   }
-  if (inspection.state === "repairable" && !input.repair) {
+  if (inspection.state === "mismatch") {
     throw new Error(
-      "The dedicated Hook registration requires repair. Use the explicit Repair action to replace it.",
+      "The existing Hook registration differs from this Extension and will not be overwritten.",
     );
   }
 
@@ -205,23 +203,6 @@ export async function installHookRegistration(input: {
     throw error;
   }
 
-  return { changed: true };
-}
-
-export async function removeHookRegistration(input: {
-  readonly hookPath: string;
-}): Promise<HookRegistrationMutation> {
-  const inspection = await inspectHookRegistration({
-    hookPath: input.hookPath,
-  });
-  if (inspection.state === "absent") {
-    return { changed: false };
-  }
-  if (inspection.state === "conflict") {
-    throw new Error(inspection.detail);
-  }
-
-  await unlink(input.hookPath);
   return { changed: true };
 }
 

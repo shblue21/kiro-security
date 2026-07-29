@@ -11,13 +11,10 @@ import stat
 import sys
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 
 MAX_SESSION_ID_LENGTH = 512
-MAX_GUARD_BYTES = 1024 * 1024
-MAX_GUARD_FILES = 128
-MAX_CONFIG_BYTES = 1024 * 1024
 ATTESTATION_TTL_SECONDS = 15 * 60
 MCP_SERVER_KEY_PATTERN = re.compile(r"^ksp_[a-z2-7]{20}$")
 MCP_TOOL_NAMES = (
@@ -32,9 +29,6 @@ MCP_TOOL_NAMES = (
     "kiro_security_cancel_scan",
 )
 REQUEST_NONCE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
-GUARD_FILE_PATTERN = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.json$"
-)
 
 
 class HookInputError(ValueError):
@@ -165,135 +159,6 @@ def _database_path() -> Path:
     return database_path
 
 
-def _validate_shadow_guard(server_key: str, payload: dict[str, Any]) -> None:
-    guard_directory = _state_root() / "runtime" / "mcp-shadow-guards"
-    if guard_directory.is_symlink() or not guard_directory.exists():
-        raise HookInputError("The MCP shadow guard is unavailable.")
-    metadata = guard_directory.lstat()
-    if (
-        not stat.S_ISDIR(metadata.st_mode)
-        or (os.name != "nt" and metadata.st_mode & 0o077)
-    ):
-        raise HookInputError("The MCP shadow guard is unsafe.")
-    cwd = payload.get("cwd")
-    if not isinstance(cwd, str) or not os.path.isabs(cwd):
-        raise HookInputError("Kiro did not provide an absolute workspace cwd.")
-    resolved_cwd = Path(cwd).resolve(strict=False)
-    try:
-        guard_paths = [
-            candidate
-            for candidate in guard_directory.iterdir()
-            if GUARD_FILE_PATTERN.fullmatch(candidate.name) is not None
-        ]
-    except OSError as error:
-        raise HookInputError("Unable to read MCP shadow guard leases.") from error
-    if len(guard_paths) > MAX_GUARD_FILES:
-        raise HookInputError("Too many MCP shadow guard leases are active.")
-    active_guards = 0
-    cwd_guarded = False
-    for guard_path in guard_paths:
-        guard = _read_shadow_guard(guard_path, server_key)
-        if guard is None:
-            continue
-        active_guards += 1
-        workspace_roots = guard.get("workspaceRoots")
-        if not isinstance(workspace_roots, list) or not all(
-            isinstance(value, str) and os.path.isabs(value)
-            for value in workspace_roots
-        ):
-            raise HookInputError("The MCP shadow guard workspace roots are invalid.")
-        cwd_guarded = cwd_guarded or any(
-            _is_path_within(resolved_cwd, Path(root).resolve(strict=False))
-            for root in workspace_roots
-        )
-        _validate_shadow_guard_sources(guard)
-    if active_guards == 0:
-        raise HookInputError("The MCP shadow guard is stale.")
-    if not cwd_guarded:
-        raise HookInputError("The current Kiro workspace is not guarded.")
-
-
-def _read_shadow_guard(
-    path: Path, server_key: str
-) -> Optional[dict[str, Any]]:
-    if path.is_symlink():
-        raise HookInputError("The MCP shadow guard is unsafe.")
-    metadata = path.lstat()
-    if (
-        not stat.S_ISREG(metadata.st_mode)
-        or metadata.st_size > MAX_GUARD_BYTES
-        or (os.name != "nt" and metadata.st_mode & 0o077)
-    ):
-        raise HookInputError("The MCP shadow guard is unsafe.")
-    try:
-        guard = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise HookInputError("The MCP shadow guard is invalid.") from error
-    if not isinstance(guard, dict) or guard.get("version") != 1:
-        raise HookInputError("The MCP shadow guard has an unsupported format.")
-    expires_at = guard.get("expiresAt")
-    if not isinstance(expires_at, int) or isinstance(expires_at, bool):
-        raise HookInputError("The MCP shadow guard expiry is invalid.")
-    if expires_at <= int(time.time() * 1000):
-        return None
-    if guard.get("serverKey") != server_key or guard.get("safe") is not True:
-        raise HookInputError("An MCP configuration shadows this installation.")
-    return guard
-
-
-def _validate_shadow_guard_sources(guard: dict[str, Any]) -> None:
-    sources = guard.get("sources")
-    if not isinstance(sources, list):
-        raise HookInputError("The MCP shadow guard sources are invalid.")
-    seen_paths = set()
-    for source in sources:
-        if not isinstance(source, dict):
-            raise HookInputError("The MCP shadow guard source is invalid.")
-        source_path = source.get("path")
-        expected_digest = source.get("sha256")
-        if (
-            not isinstance(source_path, str)
-            or not os.path.isabs(source_path)
-            or source_path in seen_paths
-            or (
-                expected_digest is not None
-                and (
-                    not isinstance(expected_digest, str)
-                    or re.fullmatch(r"[0-9a-f]{64}", expected_digest) is None
-                )
-            )
-        ):
-            raise HookInputError("The MCP shadow guard source is invalid.")
-        seen_paths.add(source_path)
-        _validate_guarded_source(Path(source_path), expected_digest)
-
-
-def _validate_guarded_source(path: Path, expected_digest: Any) -> None:
-    if expected_digest is None:
-        if path.is_symlink() or path.exists():
-            raise HookInputError("An MCP configuration changed after inspection.")
-        return
-    try:
-        metadata = path.lstat()
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-            raise HookInputError("A guarded MCP configuration is unsafe.")
-        if metadata.st_size > MAX_CONFIG_BYTES:
-            raise HookInputError("A guarded MCP configuration is too large.")
-        digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError as error:
-        raise HookInputError("Unable to read a guarded MCP configuration.") from error
-    if digest != expected_digest:
-        raise HookInputError("An MCP configuration changed after inspection.")
-
-
-def _is_path_within(candidate: Path, root: Path) -> bool:
-    try:
-        candidate.relative_to(root)
-        return True
-    except ValueError:
-        return False
-
-
 def _store_attestation(
     session_id: str,
     tool_name: str,
@@ -350,7 +215,6 @@ def main() -> int:
         # tool allowlist check before trusting host session identity.
         if not _is_our_direct_call(payload, direct_tool_map):
             return 0
-        _validate_shadow_guard(server_key, payload)
         session_id, tool_name, arguments, nonce = _validate_our_direct_call(
             payload, direct_tool_map
         )

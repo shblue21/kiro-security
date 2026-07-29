@@ -1,6 +1,3 @@
-import { randomUUID } from "node:crypto";
-import * as path from "node:path";
-
 import * as vscode from "vscode";
 
 import {
@@ -26,10 +23,6 @@ import {
   installMcpRegistration,
   installSteering,
   materializeDirectRuntime,
-  removeMcpRegistration,
-  removeMcpShadowGuard,
-  removeSteering,
-  updateMcpShadowGuard,
   type IntegrationFileInspection,
   type RuntimeInspection,
 } from "./integrationFiles";
@@ -38,13 +31,12 @@ import {
   getActiveUserPermissionsPath,
   inspectPermissions,
   installPermissions,
-  removePermissions,
 } from "./permissionFiles";
 
 export type KiroIntegrationState =
   | "absent"
   | "ready"
-  | "repairable"
+  | "mismatch"
   | "conflict"
   | "unavailable";
 
@@ -79,9 +71,6 @@ export class KiroIntegrationManager {
   readonly launcherPath: string;
   private readonly extensionRoot: string;
   private readonly steeringSourcePath: string;
-  private readonly shadowGuardId = randomUUID();
-  private shadowGuardArmed = true;
-  private shadowRefreshTail: Promise<void> = Promise.resolve();
 
   constructor(
     context: vscode.ExtensionContext,
@@ -127,14 +116,13 @@ export class KiroIntegrationManager {
       };
     }
     const expected = this.expectedMcpConfiguration(pythonExecutable);
-    const [hook, registration, shadowing, permissions, permissionsPath, steering, runtime] = await Promise.all([
+    const [hook, mcp, permissions, permissionsPath, steering, runtime] = await Promise.all([
       this.chatBinding.inspect(),
       inspectMcpRegistration({
         mcpPath: this.mcpPath,
         serverKey: this.serverKey,
         expected,
       }),
-      this.refreshMcpShadowGuard(expected),
       inspectPermissions({ serverKey: this.serverKey }),
       getActiveUserPermissionsPath(),
       inspectSteering({
@@ -146,7 +134,6 @@ export class KiroIntegrationManager {
         stateRoot: this.paths.stateRoot.fsPath,
       }),
     ]);
-    const mcp = shadowing.state === "conflict" ? shadowing : registration;
     const state = combinedState({ hook, mcp, permissions, steering, runtime });
     return {
       state,
@@ -168,16 +155,10 @@ export class KiroIntegrationManager {
     };
   }
 
-  async install(repair = false): Promise<KiroIntegrationMutation> {
-    this.shadowGuardArmed = true;
+  async install(): Promise<KiroIntegrationMutation> {
     const before = await this.inspect();
     if (before.state === "conflict" || before.state === "unavailable") {
       throw new Error(before.detail);
-    }
-    if (before.state === "repairable" && !repair) {
-      throw new Error(
-        "The Kiro Security integration requires the explicit Repair action.",
-      );
     }
     if (before.state === "ready") {
       return { changed: false };
@@ -200,20 +181,15 @@ export class KiroIntegrationManager {
         await installSteering({
           sourcePath: this.steeringSourcePath,
           steeringPath: this.steeringPath,
-          repair,
         })
       ).changed || changed;
-    changed =
-      (repair
-        ? (await this.chatBinding.repair()).changed
-        : (await this.chatBinding.install()).changed) || changed;
+    changed = (await this.chatBinding.install()).changed || changed;
     changed =
       (
         await installMcpRegistration({
           mcpPath: this.mcpPath,
           serverKey: this.serverKey,
           expected: this.expectedMcpConfiguration(pythonExecutable),
-          repair,
         })
       ).changed || changed;
     const after = await this.inspect();
@@ -231,131 +207,6 @@ export class KiroIntegrationManager {
     await this.initializeRuntime(inspection.pythonExecutable);
     await this.chatBinding.verify();
     return inspection;
-  }
-
-  async refreshMcpShadowGuard(
-    expectedConfiguration?: ReturnType<typeof buildDirectMcpServerConfiguration>,
-  ): Promise<IntegrationFileInspection> {
-    const operation = this.shadowRefreshTail.then(async () => {
-      let expected = expectedConfiguration;
-      if (this.shadowGuardArmed && expected === undefined) {
-        try {
-          expected = this.expectedMcpConfiguration(
-            await resolvePythonExecutable(),
-          );
-        } catch {
-          expected = undefined;
-        }
-      }
-      return updateMcpShadowGuard({
-        stateRoot: this.paths.stateRoot.fsPath,
-        guardId: this.shadowGuardId,
-        serverKey: this.serverKey,
-        userMcpPath: this.mcpPath,
-        workspaceRoots: this.workspaceRoots(),
-        expected: this.shadowGuardArmed ? expected : undefined,
-      });
-    });
-    this.shadowRefreshTail = operation.then(
-      () => undefined,
-      () => undefined,
-    );
-    return (await operation).inspection;
-  }
-
-  startShadowMonitoring(output: vscode.OutputChannel): vscode.Disposable {
-    const refresh = (): void => {
-      void this.refreshMcpShadowGuard().catch((error: unknown) => {
-        output.appendLine(
-          `Unable to refresh the MCP shadow guard: ${errorMessage(error)}`,
-        );
-      });
-    };
-    const workspaceWatcher = vscode.workspace.createFileSystemWatcher(
-      "**/.kiro/settings/mcp.json",
-    );
-    const userWatcher = vscode.workspace.createFileSystemWatcher(
-      new vscode.RelativePattern(
-        path.dirname(this.mcpPath),
-        path.basename(this.mcpPath),
-      ),
-    );
-    const subscriptions = [
-      workspaceWatcher.onDidCreate(refresh),
-      workspaceWatcher.onDidChange(refresh),
-      workspaceWatcher.onDidDelete(refresh),
-      userWatcher.onDidCreate(refresh),
-      userWatcher.onDidChange(refresh),
-      userWatcher.onDidDelete(refresh),
-      vscode.workspace.onDidChangeWorkspaceFolders(refresh),
-    ];
-    const timer = setInterval(refresh, 15_000);
-    return vscode.Disposable.from(
-      workspaceWatcher,
-      userWatcher,
-      ...subscriptions,
-      new vscode.Disposable(() => {
-        clearInterval(timer);
-        void removeMcpShadowGuard({
-          stateRoot: this.paths.stateRoot.fsPath,
-          guardId: this.shadowGuardId,
-        }).catch((error: unknown) => {
-          output.appendLine(
-            `Unable to remove the MCP shadow guard: ${errorMessage(error)}`,
-          );
-        });
-      }),
-    );
-  }
-
-  async disconnect(): Promise<KiroIntegrationMutation> {
-    this.shadowGuardArmed = false;
-    let changed = false;
-    const failures: string[] = [];
-    const attempt = async (
-      action: () => Promise<KiroIntegrationMutation>,
-    ): Promise<boolean> => {
-      try {
-        changed = (await action()).changed || changed;
-        return true;
-      } catch (error) {
-        failures.push(errorMessage(error));
-        return false;
-      }
-    };
-    let guardRevoked = true;
-    try {
-      await this.refreshMcpShadowGuard();
-    } catch (error) {
-      guardRevoked = false;
-      failures.push(errorMessage(error));
-    }
-    const permissionsRemoved = await attempt(() =>
-      removePermissions({ serverKey: this.serverKey }),
-    );
-    const mcpRemoved = await attempt(() =>
-      removeMcpRegistration({
-        mcpPath: this.mcpPath,
-        serverKey: this.serverKey,
-      }),
-    );
-    await attempt(() =>
-      removeSteering({ steeringPath: this.steeringPath }),
-    );
-    if (guardRevoked && permissionsRemoved && mcpRemoved) {
-      await attempt(() => this.chatBinding.remove());
-    } else {
-      failures.push(
-        "The Hook was retained to keep incomplete revocation fail-closed.",
-      );
-    }
-    if (failures.length > 0) {
-      throw new Error(
-        `Kiro Security was revoked where possible, but cleanup was incomplete: ${failures.join(" ")}`,
-      );
-    }
-    this.shadowGuardArmed = true;
-    return { changed };
   }
 
   private expectedMcpConfiguration(pythonExecutable: string) {
@@ -376,11 +227,6 @@ export class KiroIntegrationManager {
     });
   }
 
-  private workspaceRoots(): readonly string[] {
-    return (
-      vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath) ?? []
-    );
-  }
 }
 
 function combinedState(input: {
@@ -418,7 +264,7 @@ function combinedState(input: {
   ) {
     return "absent";
   }
-  return "repairable";
+  return "mismatch";
 }
 
 function errorMessage(error: unknown): string {

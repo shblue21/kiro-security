@@ -23,7 +23,6 @@ export async function activate(
     output,
     serverKey,
   );
-  await setupView.initialize();
   const setupRegistration = vscode.window.registerWebviewViewProvider(
     SecuritySetupView.viewId,
     setupView,

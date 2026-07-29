@@ -14,7 +14,6 @@ import {
   inspectHookRegistration,
   installHookRegistration,
   materializeHookBridge,
-  removeHookRegistration,
   type HookRegistrationMutation,
   type HookRegistrationState,
 } from "./chatBindingFiles";
@@ -25,7 +24,7 @@ const PROBE_TIMEOUT_MS = 10_000;
 export type ChatBindingState =
   | "absent"
   | "ready"
-  | "repairable"
+  | "mismatch"
   | "conflict"
   | "unavailable";
 
@@ -102,11 +101,7 @@ export class ChatBindingManager {
   }
 
   async install(): Promise<HookRegistrationMutation> {
-    return this.prepareAndPublish(false);
-  }
-
-  async repair(): Promise<HookRegistrationMutation> {
-    return this.prepareAndPublish(true);
+    return this.prepareAndPublish();
   }
 
   async verify(): Promise<ChatBindingInspection> {
@@ -123,15 +118,7 @@ export class ChatBindingManager {
     return inspection;
   }
 
-  async remove(): Promise<HookRegistrationMutation> {
-    return removeHookRegistration({
-      hookPath: this.hookPath,
-    });
-  }
-
-  private async prepareAndPublish(
-    repair: boolean,
-  ): Promise<HookRegistrationMutation> {
+  private async prepareAndPublish(): Promise<HookRegistrationMutation> {
     const pythonExecutable = await resolvePythonExecutable();
     await materializeHookBridge({
       sourcePath: this.sourceBridgePath,
@@ -151,7 +138,6 @@ export class ChatBindingManager {
     return installHookRegistration({
       hookPath: this.hookPath,
       document,
-      repair,
     });
   }
 }
@@ -185,10 +171,10 @@ function combineInspection(input: {
       detail: input.registrationDetail,
     };
   }
-  if (input.registrationState === "repairable" || !input.bridgeReady) {
+  if (input.registrationState === "mismatch" || !input.bridgeReady) {
     return {
       ...common,
-      state: "repairable",
+      state: "mismatch",
       detail: [input.registrationDetail, input.bridgeDetail].join(" "),
     };
   }

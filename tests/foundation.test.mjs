@@ -19,7 +19,6 @@ import test from "node:test";
 const require = createRequire(import.meta.url);
 const manifest = JSON.parse(readFileSync("package.json", "utf8"));
 const TEST_SERVER_KEY = "ksp_aaaaaaaaaaaaaaaaaaaa";
-const TEST_GUARD_ID = "11111111-1111-4111-8111-111111111111";
 
 function pythonExecutable() {
   return execFileSync(
@@ -57,6 +56,7 @@ test("extension manifest exposes setup without a Power-import command", () => {
 test("setup view connects steering, direct MCP, and Hook without Agent or Power import", () => {
   const setup = readFileSync("packages/extension/src/setupView.ts", "utf8");
   const extension = readFileSync("packages/extension/src/extension.ts", "utf8");
+  const integration = readFileSync("packages/extension/src/integration.ts", "utf8");
   assert.match(setup, /enableScripts: true/);
   assert.match(setup, /connectIntegration/);
   assert.match(setup, /showMcpFile/);
@@ -66,6 +66,8 @@ test("setup view connects steering, direct MCP, and Hook without Agent or Power 
   assert.doesNotMatch(setup, /preparePowerIntegration/);
   assert.match(extension, /getOrCreateInstallationServerKey/);
   assert.match(extension, /new SecuritySetupView\(/);
+  assert.doesNotMatch(integration, /before\.state === "mismatch"/);
+  assert.match(setup, /input\.integration\.state === "unavailable"[\s\S]*\? "disabled"/);
 });
 
 test("Hook registration matches only the exact direct MCP tool IDs", () => {
@@ -103,14 +105,13 @@ test("Hook registration matches only the exact direct MCP tool IDs", () => {
   assert.doesNotMatch(JSON.stringify(document), /workbench\.sqlite3|scanRoot/);
 });
 
-test("Hook install, repair, and removal stay in its dedicated-file boundary", async () => {
+test("Hook install is idempotent and refuses to overwrite a changed dedicated file", async () => {
   const {
     buildHookRegistrationDocument,
     getHookBridgePath,
     getHookRegistrationPath,
     inspectHookRegistration,
     installHookRegistration,
-    removeHookRegistration,
   } = require("../out/packages/extension/src/chatBindingFiles.js");
   const temporary = await mkdtemp(join(tmpdir(), "kiro-hook-files-test-"));
   try {
@@ -122,23 +123,21 @@ test("Hook install, repair, and removal stay in its dedicated-file boundary", as
       platform: "darwin",
     });
     assert.equal((await inspectHookRegistration({ hookPath, expected: document })).state, "absent");
-    assert.equal((await installHookRegistration({ hookPath, document, repair: false })).changed, true);
+    assert.equal((await installHookRegistration({ hookPath, document })).changed, true);
     assert.equal((await inspectHookRegistration({ hookPath, expected: document })).state, "installed");
     if (process.platform !== "win32") {
       assert.equal((await stat(hookPath)).mode & 0o777, 0o600);
     }
-    assert.equal((await installHookRegistration({ hookPath, document, repair: false })).changed, false);
+    assert.equal((await installHookRegistration({ hookPath, document })).changed, false);
 
     const drifted = { ...document, hooks: [{ ...document.hooks[0], timeout: 11 }] };
     await writeFile(hookPath, `${JSON.stringify(drifted, null, 2)}\n`, "utf8");
-    assert.equal((await inspectHookRegistration({ hookPath, expected: document })).state, "repairable");
+    assert.equal((await inspectHookRegistration({ hookPath, expected: document })).state, "mismatch");
     await assert.rejects(
-      installHookRegistration({ hookPath, document, repair: false }),
-      /requires repair/,
+      installHookRegistration({ hookPath, document }),
+      /will not be overwritten/,
     );
-    assert.equal((await installHookRegistration({ hookPath, document, repair: true })).changed, true);
-    assert.equal((await removeHookRegistration({ hookPath })).changed, true);
-    assert.equal(existsSync(hookPath), false);
+    assert.deepEqual(JSON.parse(readFileSync(hookPath, "utf8")), drifted);
   } finally {
     await rm(temporary, { force: true, recursive: true });
   }
@@ -169,7 +168,7 @@ test("dedicated Hook path refuses symlink targets", async () => {
     });
     assert.equal((await inspectHookRegistration({ hookPath, expected: document })).state, "conflict");
     await assert.rejects(
-      installHookRegistration({ hookPath, document, repair: true }),
+      installHookRegistration({ hookPath, document }),
       /symlink/,
     );
   } finally {
@@ -185,12 +184,8 @@ test("Hook bridge binds host session identity to exact direct MCP calls", async 
     inspectHookBridge,
     materializeHookBridge,
   } = require("../out/packages/extension/src/chatBindingFiles.js");
-  const { removeMcpShadowGuard, updateMcpShadowGuard } = require(
-    "../out/packages/extension/src/integrationFiles.js",
-  );
   const {
     buildDirectMcpContract,
-    buildDirectMcpServerConfiguration,
     MCP_TOOL_NAMES,
   } = require(
     "../out/packages/extension/src/integrationConfig.js",
@@ -201,30 +196,9 @@ test("Hook bridge binds host session identity to exact direct MCP calls", async 
     const sourcePath = getPackagedHookBridgePath(resolve("."));
     const stateRoot = join(temporary, "global-storage");
     const bridgePath = getHookBridgePath(stateRoot);
-    const userMcpPath = join(temporary, "home", ".kiro", "settings", "mcp.json");
-    const expected = buildDirectMcpServerConfiguration({
-      pythonExecutable: "/runtime/python3",
-      launcherPath: "/global/runtime/launcher.py",
-      stateRoot,
-      scanRoot: join(stateRoot, "scans"),
-    });
-    await mkdir(join(temporary, "home", ".kiro", "settings"), { recursive: true });
-    await writeFile(
-      userMcpPath,
-      `${JSON.stringify({ mcpServers: { [TEST_SERVER_KEY]: expected } })}\n`,
-      { encoding: "utf8", mode: 0o600 },
-    );
     assert.equal(await materializeHookBridge({ sourcePath, bridgePath }), true);
     assert.equal(await materializeHookBridge({ sourcePath, bridgePath }), false);
     assert.equal((await inspectHookBridge({ sourcePath, bridgePath })).ready, true);
-    await updateMcpShadowGuard({
-      stateRoot,
-      guardId: TEST_GUARD_ID,
-      serverKey: TEST_SERVER_KEY,
-      userMcpPath,
-      workspaceRoots: [temporary],
-      expected,
-    });
 
     const python = pythonExecutable();
     const contract = JSON.parse(
@@ -296,101 +270,6 @@ test("Hook bridge binds host session identity to exact direct MCP calls", async 
     const malformedEvent = runBridge({ ...base, session_id: "chat-a", hook_event_name: [] });
     assert.equal(malformedEvent.status, 2);
     assert.doesNotMatch(malformedEvent.stderr, /Traceback|TypeError/);
-
-    const workspaceMcpPath = join(temporary, ".kiro", "settings", "mcp.json");
-    await mkdir(join(temporary, ".kiro", "settings"), { recursive: true });
-    await writeFile(workspaceMcpPath, '{"mcpServers":{"other":{}}}\n', "utf8");
-    const changedAfterInspection = runBridge({
-      ...base,
-      session_id: "chat-a",
-      tool_input: { requestNonce: randomUUID() },
-    });
-    assert.equal(changedAfterInspection.status, 2);
-    assert.match(changedAfterInspection.stderr, /changed after inspection/);
-
-    await updateMcpShadowGuard({
-      stateRoot,
-      guardId: TEST_GUARD_ID,
-      serverKey: TEST_SERVER_KEY,
-      userMcpPath,
-      workspaceRoots: [temporary],
-      expected,
-    });
-    const refreshed = runBridge({
-      ...base,
-      session_id: "chat-a",
-      tool_input: { requestNonce: randomUUID() },
-    });
-    assert.equal(refreshed.status, 0);
-
-    const foreign = {
-      ...expected,
-      command: "/foreign/python",
-    };
-    await writeFile(
-      userMcpPath,
-      `${JSON.stringify({ mcpServers: { [TEST_SERVER_KEY]: foreign } })}\n`,
-      { encoding: "utf8", mode: 0o600 },
-    );
-    await updateMcpShadowGuard({
-      stateRoot,
-      guardId: TEST_GUARD_ID,
-      serverKey: TEST_SERVER_KEY,
-      userMcpPath,
-      workspaceRoots: [temporary],
-      expected,
-    });
-    const foreignReplacement = runBridge({
-      ...base,
-      session_id: "chat-a",
-      tool_input: { requestNonce: randomUUID() },
-    });
-    assert.equal(foreignReplacement.status, 2);
-    assert.match(foreignReplacement.stderr, /shadows this installation/);
-
-    await writeFile(
-      userMcpPath,
-      `${JSON.stringify({ mcpServers: { [TEST_SERVER_KEY]: expected } })}\n`,
-      { encoding: "utf8", mode: 0o600 },
-    );
-    await updateMcpShadowGuard({
-      stateRoot,
-      guardId: TEST_GUARD_ID,
-      serverKey: TEST_SERVER_KEY,
-      userMcpPath,
-      workspaceRoots: [temporary],
-      expected,
-    });
-    const secondWorkspace = join(temporary, "second-window");
-    await mkdir(join(secondWorkspace, ".kiro", "settings"), { recursive: true });
-    await writeFile(
-      join(secondWorkspace, ".kiro", "settings", "mcp.json"),
-      `${JSON.stringify({ mcpServers: { [TEST_SERVER_KEY]: { command: "shadow" } } })}\n`,
-      "utf8",
-    );
-    const secondGuardId = "22222222-2222-4222-8222-222222222222";
-    await updateMcpShadowGuard({
-      stateRoot,
-      guardId: secondGuardId,
-      serverKey: TEST_SERVER_KEY,
-      userMcpPath,
-      workspaceRoots: [secondWorkspace],
-      expected,
-    });
-    const otherWindowConflict = runBridge({
-      ...base,
-      session_id: "chat-a",
-      tool_input: { requestNonce: randomUUID() },
-    });
-    assert.equal(otherWindowConflict.status, 2);
-    assert.match(otherWindowConflict.stderr, /shadows this installation/);
-    await removeMcpShadowGuard({ stateRoot, guardId: secondGuardId });
-    const conflictLeaseRemoved = runBridge({
-      ...base,
-      session_id: "chat-a",
-      tool_input: { requestNonce: randomUUID() },
-    });
-    assert.equal(conflictLeaseRemoved.status, 0);
   } finally {
     await rm(temporary, { force: true, recursive: true });
   }
@@ -494,7 +373,6 @@ test("Trust v2 permission install preserves unrelated YAML rules and file mode",
     getActiveUserPermissionsPath,
     inspectPermissions,
     installPermissions,
-    removePermissions,
   } = require("../out/packages/extension/src/permissionFiles.js");
   const temporary = await mkdtemp(join(tmpdir(), "kiro-permissions-yaml-test-"));
   try {
@@ -529,18 +407,13 @@ test("Trust v2 permission install preserves unrelated YAML rules and file mode",
     if (process.platform !== "win32") {
       assert.equal((await stat(filePath)).mode & 0o777, 0o644);
     }
-    assert.equal((await removePermissions({ homeDirectory: temporary, serverKey: TEST_SERVER_KEY })).changed, true);
-    const removedText = readFileSync(filePath, "utf8");
-    assert.match(removedText, /preserve this comment/);
-    assert.ok(YAML.parse(removedText).rules.some((rule) => rule.capability === "fs_read"));
-    assert.doesNotMatch(removedText, new RegExp(TEST_SERVER_KEY));
   } finally {
     await rm(temporary, { force: true, recursive: true });
   }
 });
 
 test("Trust v2 permission install follows Kiro's active JSON selection", async () => {
-  const { installPermissions, removePermissions } = require(
+  const { installPermissions } = require(
     "../out/packages/extension/src/permissionFiles.js",
   );
   const temporary = await mkdtemp(join(tmpdir(), "kiro-permissions-json-test-"));
@@ -555,9 +428,44 @@ test("Trust v2 permission install follows Kiro's active JSON selection", async (
     assert.equal(readFileSync(yamlPath, "utf8"), "");
     const installed = JSON.parse(readFileSync(jsonPath, "utf8"));
     assert.equal(installed.rules.length, 3);
-    await removePermissions({ homeDirectory: temporary, serverKey: TEST_SERVER_KEY });
-    const removed = JSON.parse(readFileSync(jsonPath, "utf8"));
-    assert.deepEqual(removed.rules, [{ capability: "web_search", effect: "ask" }]);
+  } finally {
+    await rm(temporary, { force: true, recursive: true });
+  }
+});
+
+test("Trust v2 permissions refuse ambiguous duplicate JSON keys without mutation", async () => {
+  const { buildDirectMcpContract } = require(
+    "../out/packages/extension/src/integrationConfig.js",
+  );
+  const {
+    inspectPermissions,
+    installPermissions,
+  } = require("../out/packages/extension/src/permissionFiles.js");
+  const temporary = await mkdtemp(join(tmpdir(), "kiro-permissions-duplicate-test-"));
+  try {
+    const directory = join(temporary, ".kiro", "settings");
+    const yamlPath = join(directory, "permissions.yaml");
+    const jsonPath = join(directory, "permissions.json");
+    const managedRules = buildDirectMcpContract(TEST_SERVER_KEY).permissionRules;
+    const contents = `{
+  "rules": [{ "capability": "web_search", "effect": "ask" }],
+  "rules": ${JSON.stringify(managedRules)}
+}\n`;
+    await mkdir(directory, { recursive: true });
+    await writeFile(yamlPath, "", "utf8");
+    await writeFile(jsonPath, contents, "utf8");
+
+    const inspection = await inspectPermissions({
+      homeDirectory: temporary,
+      serverKey: TEST_SERVER_KEY,
+    });
+    assert.equal(inspection.state, "conflict");
+    assert.match(inspection.detail, /duplicate JSON object key "rules"/);
+    await assert.rejects(
+      installPermissions({ homeDirectory: temporary, serverKey: TEST_SERVER_KEY }),
+      /duplicate JSON object key "rules"/,
+    );
+    assert.equal(readFileSync(jsonPath, "utf8"), contents);
   } finally {
     await rm(temporary, { force: true, recursive: true });
   }
@@ -638,14 +546,13 @@ test("direct runtime is materialized in global storage and launches the MCP serv
   }
 });
 
-test("MCP registration patches only its managed JSONC entry", async () => {
+test("MCP registration install preserves unrelated JSONC entries", async () => {
   const { buildDirectMcpServerConfiguration } = require(
     "../out/packages/extension/src/integrationConfig.js",
   );
   const {
     inspectMcpRegistration,
     installMcpRegistration,
-    removeMcpRegistration,
   } = require("../out/packages/extension/src/integrationFiles.js");
   const temporary = await mkdtemp(join(tmpdir(), "kiro-mcp-config-test-"));
   try {
@@ -660,7 +567,7 @@ test("MCP registration patches only its managed JSONC entry", async () => {
       scanRoot: "/global/state/scans",
     });
     assert.equal((await inspectMcpRegistration({ mcpPath, serverKey: TEST_SERVER_KEY, expected })).state, "absent");
-    assert.equal((await installMcpRegistration({ mcpPath, serverKey: TEST_SERVER_KEY, expected, repair: false })).changed, true);
+    assert.equal((await installMcpRegistration({ mcpPath, serverKey: TEST_SERVER_KEY, expected })).changed, true);
     const installed = readFileSync(mcpPath, "utf8");
     assert.match(installed, /keep this server/);
     assert.match(installed, /"other"/);
@@ -670,11 +577,60 @@ test("MCP registration patches only its managed JSONC entry", async () => {
       assert.equal((await stat(join(temporary, ".kiro", "settings"))).mode & 0o777, 0o755);
       assert.equal((await stat(mcpPath)).mode & 0o777, 0o600);
     }
-    assert.equal((await removeMcpRegistration({ mcpPath, serverKey: TEST_SERVER_KEY })).changed, true);
-    const removed = readFileSync(mcpPath, "utf8");
-    assert.match(removed, /keep this server/);
-    assert.match(removed, /"other"/);
-    assert.doesNotMatch(removed, new RegExp(TEST_SERVER_KEY));
+  } finally {
+    await rm(temporary, { force: true, recursive: true });
+  }
+});
+
+test("MCP registration refuses ambiguous duplicate JSONC keys without mutation", async () => {
+  const { buildDirectMcpServerConfiguration } = require(
+    "../out/packages/extension/src/integrationConfig.js",
+  );
+  const {
+    inspectMcpRegistration,
+    installMcpRegistration,
+  } = require("../out/packages/extension/src/integrationFiles.js");
+  const temporary = await mkdtemp(join(tmpdir(), "kiro-mcp-duplicate-test-"));
+  try {
+    const mcpPath = join(temporary, "mcp.json");
+    const expected = buildDirectMcpServerConfiguration({
+      pythonExecutable: "/runtime/python3",
+      launcherPath: "/global/runtime/launcher.py",
+      stateRoot: "/global/state",
+      scanRoot: "/global/state/scans",
+    });
+    const cases = [
+      `{
+  "mcpServers": { "other": { "command": "other" } },
+  "mcpServers": { "${TEST_SERVER_KEY}": ${JSON.stringify(expected)} }
+}\n`,
+      `{
+  "mcpServers": {
+    "${TEST_SERVER_KEY}": { "command": "unmanaged" },
+    "${TEST_SERVER_KEY}": ${JSON.stringify(expected)}
+  }
+}\n`,
+    ];
+
+    for (const contents of cases) {
+      await writeFile(mcpPath, contents, { encoding: "utf8", mode: 0o600 });
+      const inspection = await inspectMcpRegistration({
+        mcpPath,
+        serverKey: TEST_SERVER_KEY,
+        expected,
+      });
+      assert.equal(inspection.state, "conflict");
+      assert.match(inspection.detail, /duplicate JSON object key/);
+      await assert.rejects(
+        installMcpRegistration({
+          mcpPath,
+          serverKey: TEST_SERVER_KEY,
+          expected,
+        }),
+        /duplicate JSON object key/,
+      );
+      assert.equal(readFileSync(mcpPath, "utf8"), contents);
+    }
   } finally {
     await rm(temporary, { force: true, recursive: true });
   }
@@ -702,7 +658,7 @@ test("MCP registration refuses unmanaged key collisions and symlink paths", asyn
     await writeFile(collisionPath, `${JSON.stringify({ mcpServers: { [TEST_SERVER_KEY]: { command: "user" } } })}\n`, "utf8");
     assert.equal((await inspectMcpRegistration({ mcpPath: collisionPath, serverKey: TEST_SERVER_KEY, expected })).state, "conflict");
     await assert.rejects(
-      installMcpRegistration({ mcpPath: collisionPath, serverKey: TEST_SERVER_KEY, expected, repair: true }),
+      installMcpRegistration({ mcpPath: collisionPath, serverKey: TEST_SERVER_KEY, expected }),
       /unmanaged/,
     );
     const target = join(temporary, "target.json");
@@ -710,50 +666,6 @@ test("MCP registration refuses unmanaged key collisions and symlink paths", asyn
     await writeFile(target, '{"mcpServers":{}}\n', "utf8");
     await symlink(target, link);
     assert.equal((await inspectMcpRegistration({ mcpPath: link, serverKey: TEST_SERVER_KEY, expected })).state, "conflict");
-  } finally {
-    await rm(temporary, { force: true, recursive: true });
-  }
-});
-
-test("MCP shadow inspection covers user powers and every workspace root", async () => {
-  const { inspectMcpShadowing } = require(
-    "../out/packages/extension/src/integrationFiles.js",
-  );
-  const temporary = await mkdtemp(join(tmpdir(), "kiro-mcp-shadow-test-"));
-  try {
-    const userMcpPath = join(temporary, "home", ".kiro", "settings", "mcp.json");
-    const firstRoot = join(temporary, "first-workspace");
-    const secondRoot = join(temporary, "second-workspace");
-    await mkdir(join(firstRoot, ".kiro", "settings"), { recursive: true });
-    await mkdir(join(secondRoot, ".kiro", "settings"), { recursive: true });
-    await writeFile(
-      join(firstRoot, ".kiro", "settings", "mcp.json"),
-      '{"mcpServers":{"kiro-security-workbench":{"command":"old-static-shadow"}}}\n',
-      "utf8",
-    );
-    const input = {
-      serverKey: TEST_SERVER_KEY,
-      userMcpPath,
-      workspaceRoots: [firstRoot, secondRoot],
-    };
-    assert.equal((await inspectMcpShadowing(input)).state, "absent");
-
-    const aliasKey = TEST_SERVER_KEY.toUpperCase().replace("KSP_", "KSP-");
-    await writeFile(
-      join(secondRoot, ".kiro", "settings", "mcp.json"),
-      `${JSON.stringify({ mcpServers: { [aliasKey]: { command: "shadow" } } })}\n`,
-      "utf8",
-    );
-    assert.equal((await inspectMcpShadowing(input)).state, "conflict");
-
-    await rm(join(secondRoot, ".kiro", "settings", "mcp.json"));
-    await mkdir(join(temporary, "home", ".kiro", "settings"), { recursive: true });
-    await writeFile(
-      userMcpPath,
-      `${JSON.stringify({ powers: { mcpServers: { [TEST_SERVER_KEY]: { command: "shadow" } } } })}\n`,
-      "utf8",
-    );
-    assert.equal((await inspectMcpShadowing(input)).state, "conflict");
   } finally {
     await rm(temporary, { force: true, recursive: true });
   }

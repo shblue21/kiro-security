@@ -22,6 +22,7 @@ import type {
   IntegrationFileInspection,
   IntegrationMutation,
 } from "./integrationFiles";
+import { findDuplicateJsonObjectKey } from "./jsonSafety";
 
 const MAX_PERMISSION_BYTES = 1024 * 1024;
 const RULE_FIELDS = new Set(["capability", "effect", "match", "exclude"]);
@@ -105,48 +106,6 @@ export async function installPermissions(input: {
     return { changed: false };
   }
   const updated = addManagedRules(document, permissionRules);
-  await writeDocument(document, updated);
-  return { changed: true };
-}
-
-export async function removePermissions(input: {
-  readonly homeDirectory?: string;
-  readonly serverKey: string;
-}): Promise<IntegrationMutation> {
-  const permissionRules = buildDirectMcpContract(input.serverKey).permissionRules;
-  const document = await readActiveDocument(input.homeDirectory);
-  if (document.kind === "unsafe") {
-    throw new Error(document.detail);
-  }
-  if (document.kind === "absent") {
-    return { changed: false };
-  }
-  const indexes = document.rules
-    .map((rule, index) =>
-      isManagedPermissionRule(rule, permissionRules) ? index : -1,
-    )
-    .filter((index) => index >= 0)
-    .reverse();
-  if (indexes.length === 0) {
-    return { changed: false };
-  }
-  let updated = document.contents;
-  if (document.format === "json") {
-    for (const index of indexes) {
-      updated = applyEdits(
-        updated,
-        modify(updated, ["rules", index], undefined, {
-          formattingOptions: { insertSpaces: true, tabSize: 2, eol: "\n" },
-        }),
-      );
-    }
-  } else {
-    const parsed = parseYaml(document.contents);
-    for (const index of indexes) {
-      parsed.deleteIn(["rules", index]);
-    }
-    updated = parsed.toString({ lineWidth: 0 });
-  }
   await writeDocument(document, updated);
   return { changed: true };
 }
@@ -261,7 +220,7 @@ function parseCandidate(
   try {
     const parsed =
       candidate.format === "json"
-        ? JSON.parse(candidate.contents)
+        ? parseJsonPermissions(candidate.contents)
         : parseYaml(candidate.contents).toJS();
     const rules = validatedRules(parsed);
     return { ...candidate, rules };
@@ -273,6 +232,18 @@ function parseCandidate(
       detail: `The active Kiro user permissions file is invalid: ${errorMessage(error)}`,
     };
   }
+}
+
+function parseJsonPermissions(contents: string): unknown {
+  const parsed: unknown = JSON.parse(contents);
+  const duplicateKey = findDuplicateJsonObjectKey(contents, {
+    allowTrailingComma: false,
+    disallowComments: true,
+  });
+  if (duplicateKey !== undefined) {
+    throw new Error(`duplicate JSON object key ${JSON.stringify(duplicateKey)}`);
+  }
+  return parsed;
 }
 
 function emptyCandidate(
@@ -315,15 +286,6 @@ function validatedRules(value: unknown): readonly unknown[] {
     }
   }
   return rules;
-}
-
-function isManagedPermissionRule(
-  value: unknown,
-  permissionRules: readonly DirectMcpPermissionRule[],
-): boolean {
-  return permissionRules.some((expected) =>
-    isExactPermissionRule(value, expected),
-  );
 }
 
 function hasAllManagedPermissionRules(

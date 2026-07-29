@@ -92,23 +92,6 @@ export function directMcpToolId(
   return identifier;
 }
 
-export function directMcpServerKeysCollide(
-  ownedServerKey: string,
-  candidateServerKey: string,
-): boolean {
-  requireMcpServerKey(ownedServerKey);
-  return MCP_TOOL_NAMES.some((toolName) => {
-    try {
-      return (
-        directMcpToolId(ownedServerKey, toolName) ===
-        directMcpToolId(candidateServerKey, toolName)
-      );
-    } catch {
-      return false;
-    }
-  });
-}
-
 export interface DirectMcpConfigurationInput {
   readonly pythonExecutable: string;
   readonly launcherPath: string;

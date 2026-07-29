@@ -12,7 +12,6 @@ import {
   readFile,
   rename,
   rm,
-  unlink,
   writeFile,
 } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -28,11 +27,11 @@ import {
 } from "jsonc-parser";
 
 import {
-  directMcpServerKeysCollide,
   MCP_MANAGED_MARKER,
   requireMcpServerKey,
   type DirectMcpServerConfiguration,
 } from "./integrationConfig";
+import { findDuplicateJsonObjectKey } from "./jsonSafety";
 
 const executeFile = promisify(execFile);
 const MAX_CONFIG_BYTES = 1024 * 1024;
@@ -40,13 +39,11 @@ const MAX_CONFIG_BYTES = 1024 * 1024;
 export const STEERING_FILE_NAME = "kiro-security-power.md";
 export const LAUNCHER_FILE_NAME = "kiro_security_launcher.py";
 export const INTEGRATION_IDENTITY_FILE_NAME = "integration-identity.json";
-export const MCP_SHADOW_GUARD_TTL_MS = 60_000;
-const GUARD_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 export type IntegrationFileState =
   | "absent"
   | "installed"
-  | "repairable"
+  | "mismatch"
   | "conflict";
 
 export interface IntegrationFileInspection {
@@ -61,18 +58,6 @@ export interface IntegrationMutation {
 export interface RuntimeInspection {
   readonly ready: boolean;
   readonly detail: string;
-}
-
-export interface McpShadowGuardSource {
-  readonly path: string;
-  readonly sha256: string | null;
-}
-
-export interface McpShadowSnapshot {
-  readonly inspection: IntegrationFileInspection;
-  readonly registrationReady: boolean;
-  readonly workspaceRoots: readonly string[];
-  readonly sources: readonly McpShadowGuardSource[];
 }
 
 export function getUserMcpConfigPath(
@@ -105,19 +90,6 @@ export function getPackagedSteeringPath(extensionRoot: string): string {
 
 export function getIntegrationIdentityPath(stateRoot: string): string {
   return path.join(stateRoot, "runtime", INTEGRATION_IDENTITY_FILE_NAME);
-}
-
-export function getMcpShadowGuardPath(
-  stateRoot: string,
-  guardId: string,
-): string {
-  requireGuardId(guardId);
-  return path.join(
-    stateRoot,
-    "runtime",
-    "mcp-shadow-guards",
-    `${guardId}.json`,
-  );
 }
 
 export async function getOrCreateInstallationServerKey(
@@ -296,7 +268,6 @@ export async function inspectSteering(input: {
 export async function installSteering(input: {
   readonly sourcePath: string;
   readonly steeringPath: string;
-  readonly repair: boolean;
 }): Promise<IntegrationMutation> {
   const source = await readRequiredRegularFile(
     input.sourcePath,
@@ -306,25 +277,11 @@ export async function installSteering(input: {
     input.steeringPath,
     source.contents,
   );
-  requireInstallable(inspection, input.repair, "steering file");
+  requireInstallable(inspection, "steering file");
   if (inspection.state === "installed") {
     return { changed: false };
   }
   await writeDedicatedFile(input.steeringPath, source.contents, 0o600);
-  return { changed: true };
-}
-
-export async function removeSteering(input: {
-  readonly steeringPath: string;
-}): Promise<IntegrationMutation> {
-  const current = await readOptionalRegularFile(
-    input.steeringPath,
-    "Kiro Security steering",
-  );
-  if (current === undefined) {
-    return { changed: false };
-  }
-  await unlink(input.steeringPath);
   return { changed: true };
 }
 
@@ -360,7 +317,7 @@ export async function inspectMcpRegistration(input: {
   }
   if (isManagedServerEntry(server)) {
     return {
-      state: "repairable",
+      state: "mismatch",
       detail: permissionsReady
         ? "The managed Kiro Security MCP entry differs from this Extension version."
         : "The Kiro user MCP configuration permissions are too broad.",
@@ -372,164 +329,13 @@ export async function inspectMcpRegistration(input: {
   };
 }
 
-export async function inspectMcpShadowing(input: {
-  readonly serverKey: string;
-  readonly userMcpPath: string;
-  readonly workspaceRoots: readonly string[];
-}): Promise<IntegrationFileInspection> {
-  return (await snapshotMcpShadowing(input)).inspection;
-}
-
-export async function snapshotMcpShadowing(input: {
-  readonly serverKey: string;
-  readonly userMcpPath: string;
-  readonly workspaceRoots: readonly string[];
-  readonly expected?: DirectMcpServerConfiguration;
-}): Promise<McpShadowSnapshot> {
-  requireMcpServerKey(input.serverKey);
-  const userMcpPath = path.resolve(input.userMcpPath);
-  const workspaceRoots = [
-    ...new Set(input.workspaceRoots.map((workspaceRoot) => path.resolve(workspaceRoot))),
-  ];
-  const workspacePaths = workspaceRoots.map((workspaceRoot) =>
-    path.join(workspaceRoot, ".kiro", "settings", "mcp.json"),
-  );
-  const [user, ...workspaces] = await Promise.all([
-    readMcpDocument(userMcpPath),
-    ...workspacePaths.map((workspacePath) => readMcpDocument(workspacePath)),
-  ]);
-  const sources = [
-    mcpShadowGuardSource(userMcpPath, user),
-    ...workspacePaths.map((workspacePath, index) =>
-      mcpShadowGuardSource(workspacePath, workspaces[index]),
-    ),
-  ];
-  const registrationReady =
-    input.expected !== undefined &&
-    user.kind === "file" &&
-    isDeepStrictEqual(
-      getServerEntry(user.parsed, input.serverKey),
-      input.expected,
-    ) &&
-    (process.platform === "win32" || (user.mode & 0o077) === 0);
-  const result = (
-    inspection: IntegrationFileInspection,
-  ): McpShadowSnapshot => ({
-    inspection,
-    registrationReady,
-    workspaceRoots,
-    sources,
-  });
-
-  if (user.kind === "unsafe") {
-    return result({ state: "conflict", detail: user.detail });
-  }
-  if (user.kind === "file") {
-    const ownedEntry = getServerEntry(user.parsed, input.serverKey);
-    if (ownedEntry !== undefined && !isManagedServerEntry(ownedEntry)) {
-      return result({
-        state: "conflict",
-        detail: `The installation key '${input.serverKey}' is used by an unmanaged Kiro user MCP configuration.`,
-      });
-    }
-    const userAlias = findCollidingServerKey(
-      user.parsed,
-      input.serverKey,
-      undefined,
-      true,
-    );
-    if (userAlias !== undefined) {
-      return result({
-        state: "conflict",
-        detail: `Kiro user MCP server key '${userAlias}' aliases the installation key '${input.serverKey}'.`,
-      });
-    }
-  }
-  const powerAlias =
-    user.kind === "file"
-      ? findCollidingServerKey(user.parsed, input.serverKey, "powers", false)
-      : undefined;
-  if (powerAlias !== undefined) {
-    return result({
-      state: "conflict",
-      detail: `Kiro powers MCP server key '${powerAlias}' shadows the installation key '${input.serverKey}'.`,
-    });
-  }
-  for (let index = 0; index < workspaces.length; index += 1) {
-    const workspace = workspaces[index];
-    const workspacePath = workspacePaths[index];
-    if (workspace.kind === "unsafe") {
-      return result({
-        state: "conflict",
-        detail: `Cannot safely inspect workspace MCP configuration ${workspacePath}: ${workspace.detail}`,
-      });
-    }
-    if (workspace.kind === "file") {
-      for (const container of [undefined, "powers"] as const) {
-        const alias = findCollidingServerKey(
-          workspace.parsed,
-          input.serverKey,
-          container,
-          false,
-        );
-        if (alias !== undefined) {
-          return result({
-            state: "conflict",
-            detail: `Workspace MCP server key '${alias}' in ${workspacePath} shadows the installation key '${input.serverKey}'.`,
-          });
-        }
-      }
-    }
-  }
-  return result({
-    state: "absent",
-    detail: "No visible higher-priority MCP configuration shadows this installation key.",
-  });
-}
-
-export async function updateMcpShadowGuard(input: {
-  readonly stateRoot: string;
-  readonly guardId: string;
-  readonly serverKey: string;
-  readonly userMcpPath: string;
-  readonly workspaceRoots: readonly string[];
-  readonly expected?: DirectMcpServerConfiguration;
-}): Promise<McpShadowSnapshot> {
-  const snapshot = await snapshotMcpShadowing(input);
-  const document = {
-    version: 1,
-    serverKey: input.serverKey,
-    safe:
-      snapshot.registrationReady && snapshot.inspection.state !== "conflict",
-    expiresAt: Date.now() + MCP_SHADOW_GUARD_TTL_MS,
-    workspaceRoots: snapshot.workspaceRoots,
-    sources: snapshot.sources,
-  };
-  await writeDedicatedFile(
-    getMcpShadowGuardPath(input.stateRoot, input.guardId),
-    Buffer.from(`${JSON.stringify(document, null, 2)}\n`, "utf8"),
-    0o600,
-  );
-  return snapshot;
-}
-
-export async function removeMcpShadowGuard(input: {
-  readonly stateRoot: string;
-  readonly guardId: string;
-}): Promise<void> {
-  await rm(getMcpShadowGuardPath(input.stateRoot, input.guardId), {
-    force: true,
-  });
-}
-
 export async function installMcpRegistration(input: {
   readonly mcpPath: string;
   readonly serverKey: string;
   readonly expected: DirectMcpServerConfiguration;
-  readonly repair: boolean;
 }): Promise<IntegrationMutation> {
   const inspection = await inspectMcpRegistration(input);
-  requireInstallable(inspection, input.repair, "MCP registration");
+  requireInstallable(inspection, "MCP registration");
   if (inspection.state === "installed") {
     return { changed: false };
   }
@@ -547,39 +353,6 @@ export async function installMcpRegistration(input: {
       source,
       ["mcpServers", input.serverKey],
       input.expected,
-      { formattingOptions: { insertSpaces: true, tabSize: 2, eol: "\n" } },
-    ),
-  );
-  await writeSharedConfig(input.mcpPath, snapshot, updated);
-  return { changed: true };
-}
-
-export async function removeMcpRegistration(input: {
-  readonly mcpPath: string;
-  readonly serverKey: string;
-}): Promise<IntegrationMutation> {
-  const snapshot = await readMcpDocument(input.mcpPath);
-  if (snapshot.kind === "absent") {
-    return { changed: false };
-  }
-  if (snapshot.kind === "unsafe") {
-    throw new Error(snapshot.detail);
-  }
-  const server = getServerEntry(snapshot.parsed, input.serverKey);
-  if (server === undefined) {
-    return { changed: false };
-  }
-  if (!isManagedServerEntry(server)) {
-    throw new Error(
-      `The MCP server key '${input.serverKey}' is not managed by this Extension.`,
-    );
-  }
-  const updated = applyEdits(
-    snapshot.contents,
-    modify(
-      snapshot.contents,
-      ["mcpServers", input.serverKey],
-      undefined,
       { formattingOptions: { insertSpaces: true, tabSize: 2, eol: "\n" } },
     ),
   );
@@ -606,7 +379,7 @@ async function inspectDedicatedFile(
     return { state: "installed", detail: "The dedicated file is current." };
   }
   return {
-    state: "repairable",
+    state: "mismatch",
     detail: permissionsReady
       ? "The dedicated file differs from this Extension version."
       : "The dedicated file permissions are too broad.",
@@ -662,6 +435,16 @@ async function readMcpDocument(filePath: string): Promise<McpDocument> {
       detail: "The Kiro user MCP configuration is not a valid JSONC object.",
     };
   }
+  const duplicateKey = findDuplicateJsonObjectKey(contents, {
+    allowTrailingComma: true,
+    disallowComments: false,
+  });
+  if (duplicateKey !== undefined) {
+    return {
+      kind: "unsafe",
+      detail: `The Kiro user MCP configuration contains duplicate JSON object key ${JSON.stringify(duplicateKey)} and will not be modified.`,
+    };
+  }
   const servers = (parsed as { mcpServers?: unknown }).mcpServers;
   if (
     servers !== undefined &&
@@ -676,58 +459,14 @@ async function readMcpDocument(filePath: string): Promise<McpDocument> {
 }
 
 function getServerEntry(parsed: unknown, serverKey: string): unknown {
-  return getServerRecord(parsed)?.[serverKey];
-}
-
-function getServerRecord(
-  parsed: unknown,
-  container?: string,
-): Readonly<Record<string, unknown>> | undefined {
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     return undefined;
   }
-  const source =
-    container === undefined
-      ? parsed
-      : (parsed as Record<string, unknown>)[container];
-  if (typeof source !== "object" || source === null || Array.isArray(source)) {
-    return undefined;
-  }
-  const servers = (source as { mcpServers?: unknown }).mcpServers;
+  const servers = (parsed as { mcpServers?: unknown }).mcpServers;
   if (typeof servers !== "object" || servers === null || Array.isArray(servers)) {
     return undefined;
   }
-  return servers as Readonly<Record<string, unknown>>;
-}
-
-function findCollidingServerKey(
-  parsed: unknown,
-  ownedServerKey: string,
-  container: string | undefined,
-  ignoreExactOwnedKey: boolean,
-): string | undefined {
-  const servers = getServerRecord(parsed, container);
-  if (servers === undefined) {
-    return undefined;
-  }
-  return Object.keys(servers).find(
-    (candidate) =>
-      !(ignoreExactOwnedKey && candidate === ownedServerKey) &&
-      directMcpServerKeysCollide(ownedServerKey, candidate),
-  );
-}
-
-function mcpShadowGuardSource(
-  sourcePath: string,
-  document: McpDocument,
-): McpShadowGuardSource {
-  return {
-    path: sourcePath,
-    sha256:
-      document.kind === "file"
-        ? createHash("sha256").update(document.contents).digest("hex")
-        : null,
-  };
+  return (servers as Readonly<Record<string, unknown>>)[serverKey];
 }
 
 function isManagedServerEntry(value: unknown): boolean {
@@ -746,14 +485,15 @@ function isManagedServerEntry(value: unknown): boolean {
 
 function requireInstallable(
   inspection: IntegrationFileInspection,
-  repair: boolean,
   label: string,
 ): void {
   if (inspection.state === "conflict") {
     throw new Error(inspection.detail);
   }
-  if (inspection.state === "repairable" && !repair) {
-    throw new Error(`The ${label} requires the explicit Repair action.`);
+  if (inspection.state === "mismatch") {
+    throw new Error(
+      `The existing ${label} differs from this Extension and will not be overwritten.`,
+    );
   }
 }
 
@@ -1003,12 +743,6 @@ function parseInstallationServerKey(contents: Buffer): string {
     throw new Error("Kiro Security integration identity has an unsupported format.");
   }
   return requireMcpServerKey((parsed as { serverKey?: unknown }).serverKey);
-}
-
-function requireGuardId(value: string): void {
-  if (!GUARD_ID_PATTERN.test(value)) {
-    throw new Error("Kiro Security MCP shadow guard ID is invalid.");
-  }
 }
 
 function base32(value: Buffer): string {

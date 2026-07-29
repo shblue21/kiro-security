@@ -18,9 +18,7 @@ type SetupCommand =
   | "showHookFile"
   | "showMcpFile"
   | "showPermissionsFile"
-  | "showSteeringFile"
-  | "repairIntegration"
-  | "disconnectIntegration";
+  | "showSteeringFile";
 
 export class SecuritySetupView implements vscode.WebviewViewProvider {
   static readonly viewId = VIEW_ID;
@@ -29,19 +27,12 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
   private feedback: string | undefined;
 
   constructor(
-    private readonly context: vscode.ExtensionContext,
+    context: vscode.ExtensionContext,
     private readonly paths: FoundationPaths,
     private readonly output: vscode.OutputChannel,
     serverKey: string,
   ) {
     this.integration = new KiroIntegrationManager(context, paths, serverKey);
-  }
-
-  async initialize(): Promise<void> {
-    await this.integration.refreshMcpShadowGuard();
-    this.context.subscriptions.push(
-      this.integration.startShadowMonitoring(this.output),
-    );
   }
 
   resolveWebviewView(view: vscode.WebviewView): void {
@@ -102,12 +93,6 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
             "The Kiro Security steering file does not exist yet.",
           );
           break;
-        case "repairIntegration":
-          await this.repairIntegration();
-          break;
-        case "disconnectIntegration":
-          await this.disconnectIntegration();
-          break;
       }
     } catch (error) {
       const detail = errorMessage(error);
@@ -141,52 +126,10 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
     if (approved !== "Connect") {
       return;
     }
-    const result = await this.integration.install(false);
+    const result = await this.integration.install();
     this.feedback = result.changed
       ? "Kiro Security is connected to normal Kiro chats."
       : "Kiro Security integration was already current.";
-    this.output.appendLine(this.feedback);
-  }
-
-  private async repairIntegration(): Promise<void> {
-    const approved = await vscode.window.showWarningMessage(
-      "Repair the managed Kiro Security integration?",
-      {
-        modal: true,
-        detail: [
-          "Refreshes the global-storage runtime and the two dedicated Hook/steering files.",
-          `Repairs only the managed ${this.integration.serverKey} MCP entry and exact Trust v2 rules. Other MCP servers and permission rules are not changed.`,
-        ].join("\n\n"),
-      },
-      "Repair",
-    );
-    if (approved !== "Repair") {
-      return;
-    }
-    const result = await this.integration.install(true);
-    this.feedback = result.changed
-      ? "Kiro Security integration repaired."
-      : "Kiro Security integration is current.";
-    this.output.appendLine(this.feedback);
-  }
-
-  private async disconnectIntegration(): Promise<void> {
-    const approved = await vscode.window.showWarningMessage(
-      "Disconnect Kiro Security from normal Kiro chats?",
-      {
-        modal: true,
-        detail:
-          "Removes the managed MCP entry, exact Trust v2 rules, and dedicated Hook and steering files. Other permission rules, database, scan results, and the global-storage runtime are preserved.",
-      },
-      "Disconnect",
-    );
-    if (approved !== "Disconnect") {
-      return;
-    }
-    const result = await this.integration.disconnect();
-    this.feedback = result.changed
-      ? "Kiro Security was disconnected; data was preserved."
-      : "Kiro Security integration was already absent.";
     this.output.appendLine(this.feedback);
   }
 
@@ -250,11 +193,6 @@ export function renderSetupHtml(input: {
     `script-src 'nonce-${nonce}'`,
   ].join("; ");
   const presentation = integrationPresentation(input.integration);
-  const canDisconnect =
-    input.integration.hook.registrationState !== "absent" ||
-    input.integration.mcp.state !== "absent" ||
-    input.integration.permissions.state !== "absent" ||
-    input.integration.steering.state !== "absent";
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -303,7 +241,11 @@ export function renderSetupHtml(input: {
       <p class="scope-note">Auto-inclusion steering supplies the workflow. The exact direct-tool Hook binds each fresh request nonce to Kiro's <code>session_id</code>, and the MCP consumes it once to enforce chat-owned workspaces.</p>
       <div class="button-row">
         <button class="primary" data-command="connectIntegration" ${
-          input.integration.state === "absent" ? "" : "disabled"
+          input.integration.state === "ready" ||
+          input.integration.state === "conflict" ||
+          input.integration.state === "unavailable"
+            ? "disabled"
+            : ""
         }>Connect Kiro Chat</button>
       </div>
 
@@ -350,12 +292,6 @@ export function renderSetupHtml(input: {
             <button data-command="showSteeringFile" ${
               input.integration.steering.state === "absent" ? "disabled" : ""
             }>Show steering</button>
-            <button data-command="repairIntegration" ${
-              input.integration.state === "repairable" ? "" : "disabled"
-            }>Repair</button>
-            <button class="danger" data-command="disconnectIntegration" ${
-              canDisconnect ? "" : "disabled"
-            }>Disconnect</button>
           </div>
         </div>
       </details>
@@ -424,11 +360,11 @@ function integrationPresentation(integration: KiroIntegrationInspection): {
         badgeClass: "badge-ready",
         heading: "Kiro Security is connected",
       };
-    case "repairable":
+    case "mismatch":
       return {
-        badge: "repair needed",
+        badge: "setup incomplete",
         badgeClass: "badge-warning",
-        heading: "Kiro Security integration needs repair",
+        heading: "Kiro Security setup is incomplete or differs from this Extension",
       };
     case "conflict":
       return {
@@ -475,7 +411,6 @@ function setupStyles(): string {
       color: var(--vscode-button-foreground);
       background: var(--vscode-button-background);
     }
-    button.danger { color: var(--vscode-errorForeground); }
     code, .mono { font-family: var(--vscode-editor-font-family); }
     .topbar {
       display: flex;
@@ -646,8 +581,6 @@ function isSetupMessage(value: unknown): value is { command: SetupCommand } {
     "showMcpFile",
     "showPermissionsFile",
     "showSteeringFile",
-    "repairIntegration",
-    "disconnectIntegration",
   ]).has((value as { command: SetupCommand }).command);
 }
 
