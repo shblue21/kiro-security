@@ -104,20 +104,6 @@ export class ChatBindingManager {
     return this.prepareAndPublish();
   }
 
-  async verify(): Promise<ChatBindingInspection> {
-    const inspection = await this.inspect();
-    if (inspection.state !== "ready" || !inspection.pythonExecutable) {
-      throw new Error(inspection.detail);
-    }
-    await runBridgeProbe({
-      pythonExecutable: inspection.pythonExecutable,
-      bridgePath: this.bridgePath,
-      cwd: this.paths.stateRoot.fsPath,
-      serverKey: this.contract.serverKey,
-    });
-    return inspection;
-  }
-
   private async prepareAndPublish(): Promise<HookRegistrationMutation> {
     const pythonExecutable = await resolvePythonExecutable();
     await materializeHookBridge({

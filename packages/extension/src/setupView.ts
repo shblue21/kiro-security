@@ -14,10 +14,8 @@ const VIEW_ID = "kiroSecurity.setup";
 type SetupCommand =
   | "refresh"
   | "connectIntegration"
-  | "verifyIntegration"
   | "showHookFile"
   | "showMcpFile"
-  | "showPermissionsFile"
   | "showSteeringFile";
 
 export class SecuritySetupView implements vscode.WebviewViewProvider {
@@ -60,13 +58,6 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
         case "connectIntegration":
           await this.connectIntegration();
           break;
-        case "verifyIntegration":
-          await this.integration.verify();
-          this.feedback = "Local runtime and Kiro integration files passed verification.";
-          await vscode.window.showInformationMessage(
-            "Kiro Security integration verification passed.",
-          );
-          break;
         case "showHookFile":
           await this.showFile(
             this.integration.chatBinding.hookPath,
@@ -79,14 +70,6 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
             "The Kiro user MCP configuration does not exist yet.",
           );
           break;
-        case "showPermissionsFile": {
-          const inspection = await this.integration.inspect();
-          await this.showFile(
-            inspection.permissionsPath,
-            "The active Kiro user permissions file does not exist yet.",
-          );
-          break;
-        }
         case "showSteeringFile":
           await this.showFile(
             this.integration.steeringPath,
@@ -115,7 +98,7 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
         modal: true,
         detail: [
           `Adds only the installation-specific '${this.integration.serverKey}' entry in ${this.integration.mcpPath}.`,
-          "Adds exact Trust v2 rules: allow for non-Start/non-Cancel tools and ask for Start/Cancel. Broader user rules are not changed.",
+          "Auto-approves only this installation's non-Start/non-Cancel MCP tools. Start and Cancel remain subject to Kiro's approval policy.",
           `Creates dedicated files at ${this.integration.chatBinding.hookPath} and ${this.integration.steeringPath}.`,
           "The Hook matches only exact Kiro Security direct MCP tool IDs. No custom Agent configuration is installed.",
           "Runtime, database, and scan artifacts remain in Extension global storage.",
@@ -161,12 +144,10 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
           detail: errorMessage(error),
         },
         mcp: { state: "absent", detail: errorMessage(error) },
-        permissions: { state: "absent", detail: errorMessage(error) },
         steering: { state: "absent", detail: errorMessage(error) },
         runtime: { ready: false, detail: errorMessage(error) },
         hookPath: this.integration.chatBinding.hookPath,
         mcpPath: this.integration.mcpPath,
-        permissionsPath: "",
         steeringPath: this.integration.steeringPath,
         runtimeRoot: this.integration.runtimeRoot,
       };
@@ -259,8 +240,6 @@ export function renderSetupHtml(input: {
             <dd class="mono">${escapeHtml(input.integration.serverKey)} in ${escapeHtml(
               input.integration.mcpPath,
             )}</dd>
-            <dt>Permissions</dt>
-            <dd class="mono">${escapeHtml(input.integration.permissionsPath)}</dd>
             <dt>Steering</dt>
             <dd class="mono">${escapeHtml(input.integration.steeringPath)}</dd>
             <dt>Hook</dt>
@@ -275,9 +254,6 @@ export function renderSetupHtml(input: {
         <summary>Advanced and troubleshooting</summary>
         <div class="setup-options-body">
           <div class="button-row">
-            <button data-command="verifyIntegration" ${
-              input.integration.state === "ready" ? "" : "disabled"
-            }>Verify again</button>
             <button data-command="showHookFile" ${
               input.integration.hook.registrationState === "absent"
                 ? "disabled"
@@ -286,9 +262,6 @@ export function renderSetupHtml(input: {
             <button data-command="showMcpFile" ${
               input.integration.mcp.state === "absent" ? "disabled" : ""
             }>Show MCP config</button>
-            <button data-command="showPermissionsFile" ${
-              input.integration.permissionsPath ? "" : "disabled"
-            }>Show permissions</button>
             <button data-command="showSteeringFile" ${
               input.integration.steering.state === "absent" ? "disabled" : ""
             }>Show steering</button>
@@ -315,11 +288,6 @@ export function renderSetupHtml(input: {
           "Global steering",
           input.integration.steering.detail,
           input.integration.steering.state === "installed",
-        )}
-        ${checkRow(
-          "Trust v2 permissions",
-          input.integration.permissions.detail,
-          input.integration.permissions.state === "installed",
         )}
         ${checkRow(
           "Direct MCP registration",
@@ -576,10 +544,8 @@ function isSetupMessage(value: unknown): value is { command: SetupCommand } {
   return new Set<SetupCommand>([
     "refresh",
     "connectIntegration",
-    "verifyIntegration",
     "showHookFile",
     "showMcpFile",
-    "showPermissionsFile",
     "showSteeringFile",
   ]).has((value as { command: SetupCommand }).command);
 }

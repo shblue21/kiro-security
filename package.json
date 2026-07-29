@@ -18,8 +18,7 @@
   "activationEvents": [
     "onStartupFinished",
     "onView:kiroSecurity.setup",
-    "onCommand:kiroSecurity.openSetup",
-    "onCommand:kiroSecurity.showFoundationStatus"
+    "onCommand:kiroSecurity.openSetup"
   ],
   "main": "./out/packages/extension/src/extension.js",
   "contributes": {
@@ -45,10 +44,6 @@
       {
         "command": "kiroSecurity.openSetup",
         "title": "Kiro Security: Open Setup"
-      },
-      {
-        "command": "kiroSecurity.showFoundationStatus",
-        "title": "Kiro Security: Show Foundation Status"
       }
     ],
     "configuration": {
@@ -74,8 +69,7 @@
     "test": "npm run clean && npm run compile && npm run lint && npm run test:node && npm run test:python && npm run package:list"
   },
   "dependencies": {
-    "jsonc-parser": "^3.3.1",
-    "yaml": "^2.8.1"
+    "jsonc-parser": "^3.3.1"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

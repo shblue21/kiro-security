@@ -35,13 +35,11 @@ test("extension manifest exposes setup without a Power-import command", () => {
     "onStartupFinished",
     "onView:kiroSecurity.setup",
     "onCommand:kiroSecurity.openSetup",
-    "onCommand:kiroSecurity.showFoundationStatus",
   ]);
   assert.deepEqual(
     manifest.contributes.commands.map((entry) => entry.command),
     [
       "kiroSecurity.openSetup",
-      "kiroSecurity.showFoundationStatus",
     ],
   );
   assert.equal(manifest.contributes.views.kiroSecurity[0].id, "kiroSecurity.setup");
@@ -60,10 +58,11 @@ test("setup view connects steering, direct MCP, and Hook without Agent or Power 
   assert.match(setup, /enableScripts: true/);
   assert.match(setup, /connectIntegration/);
   assert.match(setup, /showMcpFile/);
-  assert.match(setup, /showPermissionsFile/);
   assert.match(setup, /showSteeringFile/);
+  assert.doesNotMatch(setup, /showPermissionsFile|Trust v2 permissions/);
   assert.match(setup, /No custom Agent configuration is installed/);
   assert.doesNotMatch(setup, /preparePowerIntegration/);
+  assert.doesNotMatch(setup, /verifyIntegration|Verify again/);
   assert.match(extension, /getOrCreateInstallationServerKey/);
   assert.match(extension, /new SecuritySetupView\(/);
   assert.doesNotMatch(integration, /before\.state === "mismatch"/);
@@ -303,10 +302,11 @@ test("direct MCP config keeps Start and Cancel on the explicit approval boundary
     MCP_MANAGED_MARKER,
     buildDirectMcpContract,
     buildDirectMcpServerConfiguration,
+    directMcpToolId,
   } = require("../out/packages/extension/src/integrationConfig.js");
   const contract = buildDirectMcpContract(TEST_SERVER_KEY);
-  const [allowRule, askRule] = contract.permissionRules;
   const configuration = buildDirectMcpServerConfiguration({
+    serverKey: TEST_SERVER_KEY,
     pythonExecutable: "/runtime/python3",
     launcherPath: "/global/runtime/kiro_security_launcher.py",
     stateRoot: "/global/state",
@@ -316,17 +316,13 @@ test("direct MCP config keeps Start and Cancel on the explicit approval boundary
   assert.equal(configuration.env.KIRO_SECURITY_MANAGED_BY, MCP_MANAGED_MARKER);
   assert.equal(configuration.timeout, 900_000);
   assert.deepEqual(MANUAL_APPROVAL_MCP_TOOLS, ["kiro_security_start_scan", "kiro_security_cancel_scan"]);
-  for (const name of AUTO_APPROVED_MCP_TOOLS) {
-    assert.ok(configuration.autoApprove.includes(name));
-    assert.ok(allowRule.match.includes(`${TEST_SERVER_KEY}/${name}`));
-  }
-  assert.equal(configuration.autoApprove.length, AUTO_APPROVED_MCP_TOOLS.length);
-  assert.ok(!configuration.autoApprove.includes("kiro_security_start_scan"));
-  assert.ok(!configuration.autoApprove.includes("kiro_security_cancel_scan"));
-  assert.deepEqual(askRule.match, [
-    `${TEST_SERVER_KEY}/kiro_security_start_scan`,
-    `${TEST_SERVER_KEY}/kiro_security_cancel_scan`,
-  ]);
+  assert.deepEqual(
+    configuration.autoApprove,
+    AUTO_APPROVED_MCP_TOOLS.map((name) => directMcpToolId(TEST_SERVER_KEY, name)),
+  );
+  assert.ok(!configuration.autoApprove.includes(directMcpToolId(TEST_SERVER_KEY, "kiro_security_start_scan")));
+  assert.ok(!configuration.autoApprove.includes(directMcpToolId(TEST_SERVER_KEY, "kiro_security_cancel_scan")));
+  assert.ok(configuration.autoApprove.every((toolId) => toolId.startsWith(`mcp_${TEST_SERVER_KEY}_`)));
   assert.ok(contract.toolIds.every((toolId) => toolId.length <= 64));
 });
 
@@ -361,135 +357,6 @@ test("installation MCP identity is random, persistent, and private", async () =>
     );
     if (process.platform !== "win32") {
       assert.equal((await stat(getIntegrationIdentityPath(firstRoot))).mode & 0o777, 0o600);
-    }
-  } finally {
-    await rm(temporary, { force: true, recursive: true });
-  }
-});
-
-test("Trust v2 permission install preserves unrelated YAML rules and file mode", async () => {
-  const YAML = require("yaml");
-  const {
-    getActiveUserPermissionsPath,
-    inspectPermissions,
-    installPermissions,
-  } = require("../out/packages/extension/src/permissionFiles.js");
-  const temporary = await mkdtemp(join(tmpdir(), "kiro-permissions-yaml-test-"));
-  try {
-    const directory = join(temporary, ".kiro", "settings");
-    const filePath = join(directory, "permissions.yaml");
-    await mkdir(directory, { recursive: true });
-    await writeFile(
-      filePath,
-      "# preserve this comment\nrules:\n  - capability: fs_read\n    effect: allow\n    match:\n      - ./src/**\n",
-      { encoding: "utf8", mode: 0o644 },
-    );
-    assert.equal(await getActiveUserPermissionsPath(temporary), filePath);
-    assert.equal((await inspectPermissions({ homeDirectory: temporary, serverKey: TEST_SERVER_KEY })).state, "absent");
-    assert.equal((await installPermissions({ homeDirectory: temporary, serverKey: TEST_SERVER_KEY })).changed, true);
-    assert.equal((await inspectPermissions({ homeDirectory: temporary, serverKey: TEST_SERVER_KEY })).state, "installed");
-    const installedText = readFileSync(filePath, "utf8");
-    const installed = YAML.parse(installedText);
-    assert.match(installedText, /preserve this comment/);
-    assert.ok(installed.rules.some((rule) => rule.capability === "fs_read"));
-    const managedAllow = installed.rules.find(
-      (rule) => rule.capability === "mcp" && rule.effect === "allow",
-    );
-    const managedAsk = installed.rules.find(
-      (rule) => rule.capability === "mcp" && rule.effect === "ask",
-    );
-    assert.ok(managedAllow.match.includes(`${TEST_SERVER_KEY}/kiro_security_get_capabilities`));
-    assert.ok(!managedAllow.match.includes(`${TEST_SERVER_KEY}/kiro_security_start_scan`));
-    assert.deepEqual(managedAsk.match, [
-      `${TEST_SERVER_KEY}/kiro_security_start_scan`,
-      `${TEST_SERVER_KEY}/kiro_security_cancel_scan`,
-    ]);
-    if (process.platform !== "win32") {
-      assert.equal((await stat(filePath)).mode & 0o777, 0o644);
-    }
-  } finally {
-    await rm(temporary, { force: true, recursive: true });
-  }
-});
-
-test("Trust v2 permission install follows Kiro's active JSON selection", async () => {
-  const { installPermissions } = require(
-    "../out/packages/extension/src/permissionFiles.js",
-  );
-  const temporary = await mkdtemp(join(tmpdir(), "kiro-permissions-json-test-"));
-  try {
-    const directory = join(temporary, ".kiro", "settings");
-    const yamlPath = join(directory, "permissions.yaml");
-    const jsonPath = join(directory, "permissions.json");
-    await mkdir(directory, { recursive: true });
-    await writeFile(yamlPath, "", "utf8");
-    await writeFile(jsonPath, `${JSON.stringify({ rules: [{ capability: "web_search", effect: "ask" }] }, null, 2)}\n`, "utf8");
-    await installPermissions({ homeDirectory: temporary, serverKey: TEST_SERVER_KEY });
-    assert.equal(readFileSync(yamlPath, "utf8"), "");
-    const installed = JSON.parse(readFileSync(jsonPath, "utf8"));
-    assert.equal(installed.rules.length, 3);
-  } finally {
-    await rm(temporary, { force: true, recursive: true });
-  }
-});
-
-test("Trust v2 permissions refuse ambiguous duplicate JSON keys without mutation", async () => {
-  const { buildDirectMcpContract } = require(
-    "../out/packages/extension/src/integrationConfig.js",
-  );
-  const {
-    inspectPermissions,
-    installPermissions,
-  } = require("../out/packages/extension/src/permissionFiles.js");
-  const temporary = await mkdtemp(join(tmpdir(), "kiro-permissions-duplicate-test-"));
-  try {
-    const directory = join(temporary, ".kiro", "settings");
-    const yamlPath = join(directory, "permissions.yaml");
-    const jsonPath = join(directory, "permissions.json");
-    const managedRules = buildDirectMcpContract(TEST_SERVER_KEY).permissionRules;
-    const contents = `{
-  "rules": [{ "capability": "web_search", "effect": "ask" }],
-  "rules": ${JSON.stringify(managedRules)}
-}\n`;
-    await mkdir(directory, { recursive: true });
-    await writeFile(yamlPath, "", "utf8");
-    await writeFile(jsonPath, contents, "utf8");
-
-    const inspection = await inspectPermissions({
-      homeDirectory: temporary,
-      serverKey: TEST_SERVER_KEY,
-    });
-    assert.equal(inspection.state, "conflict");
-    assert.match(inspection.detail, /duplicate JSON object key "rules"/);
-    await assert.rejects(
-      installPermissions({ homeDirectory: temporary, serverKey: TEST_SERVER_KEY }),
-      /duplicate JSON object key "rules"/,
-    );
-    assert.equal(readFileSync(jsonPath, "utf8"), contents);
-  } finally {
-    await rm(temporary, { force: true, recursive: true });
-  }
-});
-
-test("Trust v2 permission install creates a valid fresh YAML file", async () => {
-  const YAML = require("yaml");
-  const {
-    getActiveUserPermissionsPath,
-    inspectPermissions,
-    installPermissions,
-  } = require("../out/packages/extension/src/permissionFiles.js");
-  const temporary = await mkdtemp(join(tmpdir(), "kiro-permissions-fresh-test-"));
-  try {
-    await installPermissions({ homeDirectory: temporary, serverKey: TEST_SERVER_KEY });
-    const filePath = await getActiveUserPermissionsPath(temporary);
-    const parsed = YAML.parse(readFileSync(filePath, "utf8"));
-    assert.equal(parsed.rules.length, 2);
-    assert.equal(parsed.rules[0].capability, "mcp");
-    assert.equal(parsed.rules[0].effect, "allow");
-    assert.equal(parsed.rules[1].effect, "ask");
-    assert.equal((await inspectPermissions({ homeDirectory: temporary, serverKey: TEST_SERVER_KEY })).state, "installed");
-    if (process.platform !== "win32") {
-      assert.equal((await stat(filePath)).mode & 0o777, 0o600);
     }
   } finally {
     await rm(temporary, { force: true, recursive: true });
@@ -561,6 +428,7 @@ test("MCP registration install preserves unrelated JSONC entries", async () => {
     const existing = '{\n  // keep this server\n  "mcpServers": {\n    "other": { "command": "other" },\n  },\n}\n';
     await writeFile(mcpPath, existing, { encoding: "utf8", mode: 0o600 });
     const expected = buildDirectMcpServerConfiguration({
+      serverKey: TEST_SERVER_KEY,
       pythonExecutable: "/runtime/python3",
       launcherPath: "/global/runtime/launcher.py",
       stateRoot: "/global/state",
@@ -594,6 +462,7 @@ test("MCP registration refuses ambiguous duplicate JSONC keys without mutation",
   try {
     const mcpPath = join(temporary, "mcp.json");
     const expected = buildDirectMcpServerConfiguration({
+      serverKey: TEST_SERVER_KEY,
       pythonExecutable: "/runtime/python3",
       launcherPath: "/global/runtime/launcher.py",
       stateRoot: "/global/state",
@@ -649,6 +518,7 @@ test("MCP registration refuses unmanaged key collisions and symlink paths", asyn
   const temporary = await mkdtemp(join(tmpdir(), "kiro-mcp-conflict-test-"));
   try {
     const expected = buildDirectMcpServerConfiguration({
+      serverKey: TEST_SERVER_KEY,
       pythonExecutable: "/runtime/python3",
       launcherPath: "/global/runtime/launcher.py",
       stateRoot: "/global/state",
@@ -691,11 +561,9 @@ test("actual VSIX selection contains direct integration assets and no Power entr
   assert.ok(files.includes("engine/kiro_security/mcp_server.py"));
   assert.ok(files.includes("engine/kiro_security/mcp_tools.py"));
   assert.ok(files.includes("node_modules/jsonc-parser/lib/umd/main.js"));
-  assert.ok(files.includes("node_modules/yaml/dist/index.js"));
   assert.ok(files.includes("out/packages/extension/src/integrationConfig.js"));
   assert.ok(files.includes("out/packages/extension/src/integrationFiles.js"));
   assert.ok(files.includes("out/packages/extension/src/integration.js"));
-  assert.ok(files.includes("out/packages/extension/src/permissionFiles.js"));
   assert.ok(files.includes("out/packages/extension/src/setupView.js"));
   assert.ok(!files.some((entry) => entry.startsWith("powers/")));
   assert.ok(!files.some((entry) => entry.includes("powerIntegration")));

@@ -23,19 +23,8 @@ export const AUTO_APPROVED_MCP_TOOLS = MCP_TOOL_NAMES.filter(
   (name) => !manualApproval.has(name),
 );
 
-export interface DirectMcpPermissionRule {
-  readonly capability: "mcp";
-  readonly effect: "allow" | "ask";
-  readonly match: readonly string[];
-  readonly exclude: readonly string[];
-}
-
 export interface DirectMcpContract {
   readonly serverKey: string;
-  readonly permissionRules: readonly [
-    DirectMcpPermissionRule,
-    DirectMcpPermissionRule,
-  ];
   readonly toolIds: readonly string[];
   readonly toolMatcher: string;
 }
@@ -48,21 +37,8 @@ export function buildDirectMcpContract(serverKey: string): DirectMcpContract {
   if (new Set(toolIds).size !== toolIds.length) {
     throw new Error("Kiro Security direct MCP tool IDs must be unique.");
   }
-  const allowRule: DirectMcpPermissionRule = {
-    capability: "mcp",
-    effect: "allow",
-    match: AUTO_APPROVED_MCP_TOOLS.map((name) => `${serverKey}/${name}`),
-    exclude: [],
-  };
-  const askRule: DirectMcpPermissionRule = {
-    capability: "mcp",
-    effect: "ask",
-    match: MANUAL_APPROVAL_MCP_TOOLS.map((name) => `${serverKey}/${name}`),
-    exclude: [],
-  };
   return {
     serverKey,
-    permissionRules: [allowRule, askRule],
     toolIds,
     toolMatcher: `^(?:${toolIds.map(escapeRegularExpression).join("|")})$`,
   };
@@ -93,6 +69,7 @@ export function directMcpToolId(
 }
 
 export interface DirectMcpConfigurationInput {
+  readonly serverKey: string;
   readonly pythonExecutable: string;
   readonly launcherPath: string;
   readonly stateRoot: string;
@@ -111,6 +88,7 @@ export interface DirectMcpServerConfiguration {
 export function buildDirectMcpServerConfiguration(
   input: DirectMcpConfigurationInput,
 ): DirectMcpServerConfiguration {
+  requireMcpServerKey(input.serverKey);
   return {
     command: input.pythonExecutable,
     args: ["-B", "-S", input.launcherPath],
@@ -123,9 +101,9 @@ export function buildDirectMcpServerConfiguration(
     },
     timeout: 900_000,
     disabled: false,
-    // Pre-Trust-v2 Kiro builds consume these raw MCP tool names. Current Kiro
-    // also receives the equivalent installation-keyed user permission rules.
-    autoApprove: [...AUTO_APPROVED_MCP_TOOLS],
+    autoApprove: AUTO_APPROVED_MCP_TOOLS.map((name) =>
+      directMcpToolId(input.serverKey, name),
+    ),
   };
 }
 

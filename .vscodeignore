@@ -6,7 +6,6 @@ engine/tests/**
 tests/**
 node_modules/**
 !node_modules/jsonc-parser/**
-!node_modules/yaml/**
 packages/**
 scripts/**
 **/*.pyc

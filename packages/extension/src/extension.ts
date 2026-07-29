@@ -1,9 +1,6 @@
 import * as vscode from "vscode";
 
-import {
-  describeFoundation,
-  prepareFoundationStorage,
-} from "./foundation";
+import { prepareFoundationStorage } from "./foundation";
 import { getOrCreateInstallationServerKey } from "./integrationFiles";
 import { SecuritySetupView } from "./setupView";
 
@@ -12,8 +9,6 @@ export async function activate(
 ): Promise<void> {
   const output = vscode.window.createOutputChannel("Kiro Security Power");
   const paths = await prepareFoundationStorage(context);
-  const status = describeFoundation(paths);
-  output.appendLine(status.join("\n"));
   const serverKey = await getOrCreateInstallationServerKey(
     paths.stateRoot.fsPath,
   );
@@ -36,20 +31,10 @@ export async function activate(
       );
     },
   );
-  const statusCommand = vscode.commands.registerCommand(
-    "kiroSecurity.showFoundationStatus",
-    async () => {
-      output.show(true);
-      output.appendLine(status.join("\n"));
-      await vscode.window.showInformationMessage(status[0]);
-    },
-  );
-
   context.subscriptions.push(
     output,
     setupRegistration,
     openSetupCommand,
-    statusCommand,
   );
 
   if (!context.globalState.get<boolean>("kiroSecurity.onboardingShown.v1")) {

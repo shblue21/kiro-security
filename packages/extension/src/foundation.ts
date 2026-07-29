@@ -43,20 +43,6 @@ export async function prepareFoundationStorage(
   };
 }
 
-function displayPath(uri: vscode.Uri): string {
-  return uri.fsPath;
-}
-
-export function describeFoundation(paths: FoundationPaths): readonly string[] {
-  return [
-    "Kiro Security workbench foundation is ready.",
-    `Global workbench: ${displayPath(paths.database)}`,
-    `External scan artifacts: ${displayPath(paths.scanRoot)}`,
-    "Security scans remain Agent-chat-only; no Dashboard Start action is installed.",
-    "Open the Kiro Security setup view to connect global steering, direct MCP, and chat identity Hook transport.",
-  ];
-}
-
 async function restrictDirectory(uri: vscode.Uri): Promise<void> {
   if (process.platform === "win32") {
     return;
