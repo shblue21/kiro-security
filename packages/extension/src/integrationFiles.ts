@@ -335,7 +335,9 @@ export async function installMcpRegistration(input: {
   readonly expected: DirectMcpServerConfiguration;
 }): Promise<IntegrationMutation> {
   const inspection = await inspectMcpRegistration(input);
-  requireInstallable(inspection, "MCP registration");
+  if (inspection.state === "conflict") {
+    throw new Error(inspection.detail);
+  }
   if (inspection.state === "installed") {
     return { changed: false };
   }

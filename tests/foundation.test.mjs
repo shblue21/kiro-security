@@ -59,7 +59,9 @@ test("setup view connects steering, direct MCP, and Hook without Agent or Power 
   assert.match(setup, /connectIntegration/);
   assert.match(setup, /showMcpFile/);
   assert.match(setup, /showSteeringFile/);
-  assert.doesNotMatch(setup, /showPermissionsFile|Trust v2 permissions/);
+  assert.doesNotMatch(setup, /showPermissionsFile/);
+  assert.match(setup, /Chat approvals/);
+  assert.match(setup, /exact Kiro Trust rules/);
   assert.match(setup, /No custom Agent configuration is installed/);
   assert.doesNotMatch(setup, /preparePowerIntegration/);
   assert.doesNotMatch(setup, /verifyIntegration|Verify again/);
@@ -278,6 +280,7 @@ test("extension foundation uses one external global workbench boundary", () => {
   const foundation = readFileSync("packages/extension/src/foundation.ts", "utf8");
   assert.match(foundation, /context\.globalStorageUri/);
   assert.match(foundation, /stateRoot\.scheme !== "file"/);
+  assert.match(foundation, /stateRoot\.scheme !== "vscode-userdata"/);
   assert.match(foundation, /workbench\.sqlite3/);
   assert.match(foundation, /Uri\.joinPath\(stateRoot, "scans"\)/);
   assert.doesNotMatch(foundation, /workspaceFolders|storageUri/);
@@ -297,12 +300,10 @@ test("auto-inclusion steering owns normal-chat orchestration without a Power ent
 
 test("direct MCP config keeps Start and Cancel on the explicit approval boundary", () => {
   const {
-    AUTO_APPROVED_MCP_TOOLS,
     MANUAL_APPROVAL_MCP_TOOLS,
     MCP_MANAGED_MARKER,
     buildDirectMcpContract,
     buildDirectMcpServerConfiguration,
-    directMcpToolId,
   } = require("../out/packages/extension/src/integrationConfig.js");
   const contract = buildDirectMcpContract(TEST_SERVER_KEY);
   const configuration = buildDirectMcpServerConfiguration({
@@ -316,14 +317,164 @@ test("direct MCP config keeps Start and Cancel on the explicit approval boundary
   assert.equal(configuration.env.KIRO_SECURITY_MANAGED_BY, MCP_MANAGED_MARKER);
   assert.equal(configuration.timeout, 900_000);
   assert.deepEqual(MANUAL_APPROVAL_MCP_TOOLS, ["kiro_security_start_scan", "kiro_security_cancel_scan"]);
-  assert.deepEqual(
-    configuration.autoApprove,
-    AUTO_APPROVED_MCP_TOOLS.map((name) => directMcpToolId(TEST_SERVER_KEY, name)),
-  );
-  assert.ok(!configuration.autoApprove.includes(directMcpToolId(TEST_SERVER_KEY, "kiro_security_start_scan")));
-  assert.ok(!configuration.autoApprove.includes(directMcpToolId(TEST_SERVER_KEY, "kiro_security_cancel_scan")));
-  assert.ok(configuration.autoApprove.every((toolId) => toolId.startsWith(`mcp_${TEST_SERVER_KEY}_`)));
+  assert.equal("autoApprove" in configuration, false);
   assert.ok(contract.toolIds.every((toolId) => toolId.length <= 64));
+});
+
+test("Trust v2 policy allows setup tools and asks only for Start and Cancel", async () => {
+  const {
+    buildApprovalPolicyRules,
+    inspectApprovalPolicy,
+    installApprovalPolicy,
+  } = require("../out/packages/extension/src/approvalPolicy.js");
+  const {
+    AUTO_APPROVED_MCP_TOOLS,
+    MANUAL_APPROVAL_MCP_TOOLS,
+  } = require("../out/packages/extension/src/integrationConfig.js");
+  const temporary = await mkdtemp(join(tmpdir(), "kiro-approval-policy-test-"));
+  try {
+    const settings = join(temporary, ".kiro", "settings");
+    const policyPath = join(settings, "permissions.yaml");
+    await mkdir(settings, { recursive: true });
+    await writeFile(
+      policyPath,
+      [
+        "# Preserve this user rule",
+        "rules:",
+        "  - capability: fs_read",
+        "    match:",
+        '      - "./**"',
+        "    effect: allow",
+        "",
+      ].join("\n"),
+      { encoding: "utf8", mode: 0o640 },
+    );
+
+    const required = buildApprovalPolicyRules(TEST_SERVER_KEY);
+    assert.deepEqual(required[0], {
+      capability: "skill",
+      match: ["kiro-security"],
+      effect: "allow",
+    });
+    assert.deepEqual(
+      required[1].match,
+      AUTO_APPROVED_MCP_TOOLS.map(
+        (name) => `${TEST_SERVER_KEY}/${name}`,
+      ),
+    );
+    assert.deepEqual(
+      required[2].match,
+      MANUAL_APPROVAL_MCP_TOOLS.map(
+        (name) => `${TEST_SERVER_KEY}/${name}`,
+      ),
+    );
+    assert.equal(required[2].effect, "ask");
+    assert.equal(
+      required[1].match.some((match) => /start_scan|cancel_scan/.test(match)),
+      false,
+    );
+
+    assert.equal(
+      (await inspectApprovalPolicy({
+        serverKey: TEST_SERVER_KEY,
+        homeDirectory: temporary,
+      })).state,
+      "mismatch",
+    );
+    assert.equal(
+      (await installApprovalPolicy({
+        serverKey: TEST_SERVER_KEY,
+        homeDirectory: temporary,
+      })).changed,
+      true,
+    );
+    const installed = readFileSync(policyPath, "utf8");
+    assert.match(installed, /Preserve this user rule/);
+    assert.match(installed, /capability: fs_read/);
+    assert.match(installed, /capability: skill/);
+    assert.match(installed, /effect: ask/);
+    assert.doesNotMatch(installed, /rules:\s*\[/);
+    assert.equal(
+      (await inspectApprovalPolicy({
+        serverKey: TEST_SERVER_KEY,
+        homeDirectory: temporary,
+      })).state,
+      "installed",
+    );
+    assert.equal(
+      (await installApprovalPolicy({
+        serverKey: TEST_SERVER_KEY,
+        homeDirectory: temporary,
+      })).changed,
+      false,
+    );
+    if (process.platform !== "win32") {
+      assert.equal((await stat(policyPath)).mode & 0o777, 0o640);
+    }
+
+    const freshHome = join(temporary, "fresh-home");
+    await installApprovalPolicy({
+      serverKey: TEST_SERVER_KEY,
+      homeDirectory: freshHome,
+    });
+    const freshPolicy = readFileSync(
+      join(freshHome, ".kiro", "settings", "permissions.yaml"),
+      "utf8",
+    );
+    assert.match(freshPolicy, /rules:\n  - capability: skill/);
+    assert.doesNotMatch(freshPolicy, /rules:\s*\[/);
+  } finally {
+    await rm(temporary, { force: true, recursive: true });
+  }
+});
+
+test("Trust v2 policy supports JSON and refuses malformed shared files", async () => {
+  const {
+    inspectApprovalPolicy,
+    installApprovalPolicy,
+  } = require("../out/packages/extension/src/approvalPolicy.js");
+  const temporary = await mkdtemp(join(tmpdir(), "kiro-approval-json-test-"));
+  try {
+    const settings = join(temporary, ".kiro", "settings");
+    const jsonPath = join(settings, "permissions.json");
+    await mkdir(settings, { recursive: true });
+    await writeFile(jsonPath, '{"rules":[]}\n', "utf8");
+    assert.equal(
+      (await installApprovalPolicy({
+        serverKey: TEST_SERVER_KEY,
+        homeDirectory: temporary,
+      })).changed,
+      true,
+    );
+    const parsed = JSON.parse(readFileSync(jsonPath, "utf8"));
+    assert.ok(
+      parsed.rules.some(
+        (rule) =>
+          rule.capability === "mcp" &&
+          rule.effect === "ask" &&
+          rule.match.includes(
+            `${TEST_SERVER_KEY}/kiro_security_start_scan`,
+          ),
+      ),
+    );
+
+    await writeFile(jsonPath, '{"rules":[],"rules":[]}\n', "utf8");
+    const inspection = await inspectApprovalPolicy({
+      serverKey: TEST_SERVER_KEY,
+      homeDirectory: temporary,
+    });
+    assert.equal(inspection.state, "conflict");
+    assert.match(inspection.detail, /duplicate JSON object key/);
+    await assert.rejects(
+      installApprovalPolicy({
+        serverKey: TEST_SERVER_KEY,
+        homeDirectory: temporary,
+      }),
+      /duplicate JSON object key/,
+    );
+  } finally {
+    await rm(temporary, { force: true, recursive: true });
+  }
 });
 
 test("installation MCP identity is random, persistent, and private", async () => {
@@ -561,6 +712,8 @@ test("actual VSIX selection contains direct integration assets and no Power entr
   assert.ok(files.includes("engine/kiro_security/mcp_server.py"));
   assert.ok(files.includes("engine/kiro_security/mcp_tools.py"));
   assert.ok(files.includes("node_modules/jsonc-parser/lib/umd/main.js"));
+  assert.ok(files.includes("node_modules/yaml/dist/index.js"));
+  assert.ok(files.includes("out/packages/extension/src/approvalPolicy.js"));
   assert.ok(files.includes("out/packages/extension/src/integrationConfig.js"));
   assert.ok(files.includes("out/packages/extension/src/integrationFiles.js"));
   assert.ok(files.includes("out/packages/extension/src/integration.js"));

@@ -48,8 +48,8 @@ Kiro Security Power를 로컬에 설치된 Codex Security Plugin 0.1.11의 실�
 ### 2. 실행 경계
 
 - Agent chat 전용 scan start
-- 명시적 사용자 승인 UI가 self-contained Python/Engine runtime과 Hook bridge를 `globalStorageUri`에 준비하고, 설치별로 원자적으로 생성·보존한 임의의 `ksp_…` key 하나만 Kiro 사용자 전역 `~/.kiro/settings/mcp.json`에 JSONC local edit로 등록한다. MCP tool ID·Hook matcher·`autoApprove` 값은 모두 이 key에서 파생하며 다른 MCP 항목과 주석은 보존한다.
-- 사용자 전역 Permission 파일은 수정하지 않는다. 관리 MCP entry의 `autoApprove`에는 설치별 namespaced tool ID 중 non-Start/non-Cancel만 넣고, Start/Cancel은 Kiro의 승인 정책에 맡긴다.
+- 명시적 사용자 승인 UI가 self-contained Python/Engine runtime과 Hook bridge를 `globalStorageUri`에 준비하고, 설치별로 원자적으로 생성·보존한 임의의 `ksp_…` key 하나만 Kiro 사용자 전역 `~/.kiro/settings/mcp.json`에 JSONC local edit로 등록한다. MCP tool ID와 Hook matcher는 이 key에서 파생하며 다른 MCP 항목과 주석은 보존한다.
+- 같은 승인으로 사용자 전역 Trust v2 Permission 파일에 `kiro-security` steering과 설치별 non-Start/non-Cancel MCP resource만 정확히 `allow`하고, Start/Cancel resource는 정확히 `ask`하는 규칙을 추가한다. 기존 규칙은 보존하며 `mcp.json`의 일회성 migration 입력인 `autoApprove`를 런타임 권한으로 사용하지 않는다.
 - 같은 UI가 auto-inclusion steering 전용 파일 `~/.kiro/steering/kiro-security-power.md`와 Hook 전용 파일 `~/.kiro/hooks/kiro-security-power.json`을 설치하고 현재 상태를 표시한다. 기존 설치가 현재 Extension과 다르면 상태만 표시하며 덮어쓰기·수리·제거하지 않는다. custom Agent와 Power import는 사용하지 않는다.
 - Hook matcher는 설치한 Kiro Security direct MCP tool ID들의 exact allowlist로 고정한다. bridge는 실제 Kiro `session_id`, raw MCP tool name, exact argument digest와 fresh nonce를 결합하며 다른 도구 호출은 처리하지 않는다.
 - newline-delimited JSON-RPC stdio shared MCP transport와 schema-validated workbench tool

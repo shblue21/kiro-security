@@ -98,7 +98,8 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
         modal: true,
         detail: [
           `Adds only the installation-specific '${this.integration.serverKey}' entry in ${this.integration.mcpPath}.`,
-          "Auto-approves only this installation's non-Start/non-Cancel MCP tools. Start and Cancel remain subject to Kiro's approval policy.",
+          "Adds exact Kiro Trust rules that auto-approve only this steering file and this installation's non-Start/non-Cancel MCP tools.",
+          "Start and Cancel always remain subject to explicit Kiro approval.",
           `Creates dedicated files at ${this.integration.chatBinding.hookPath} and ${this.integration.steeringPath}.`,
           "The Hook matches only exact Kiro Security direct MCP tool IDs. No custom Agent configuration is installed.",
           "Runtime, database, and scan artifacts remain in Extension global storage.",
@@ -146,6 +147,11 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
         mcp: { state: "absent", detail: errorMessage(error) },
         steering: { state: "absent", detail: errorMessage(error) },
         runtime: { ready: false, detail: errorMessage(error) },
+        approval: {
+          state: "conflict",
+          detail: errorMessage(error),
+          path: "",
+        },
         hookPath: this.integration.chatBinding.hookPath,
         mcpPath: this.integration.mcpPath,
         steeringPath: this.integration.steeringPath,
@@ -298,6 +304,11 @@ export function renderSetupHtml(input: {
           "Chat identity Hook",
           input.integration.hook.detail,
           input.integration.hook.state === "ready",
+        )}
+        ${checkRow(
+          "Chat approvals",
+          input.integration.approval.detail,
+          input.integration.approval.state === "installed",
         )}
       </div>
     </details>

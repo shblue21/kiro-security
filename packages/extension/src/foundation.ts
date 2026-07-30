@@ -17,7 +17,10 @@ export async function prepareFoundationStorage(
   context: vscode.ExtensionContext,
 ): Promise<FoundationPaths> {
   const stateRoot = context.globalStorageUri;
-  if (stateRoot.scheme !== "file") {
+  if (
+    stateRoot.scheme !== "file" &&
+    stateRoot.scheme !== "vscode-userdata"
+  ) {
     throw new Error(
       "Kiro Security requires a filesystem-backed extension global storage directory.",
     );

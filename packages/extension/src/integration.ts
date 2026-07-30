@@ -1,6 +1,11 @@
 import * as vscode from "vscode";
 
 import {
+  inspectApprovalPolicy,
+  installApprovalPolicy,
+  type ApprovalPolicyInspection,
+} from "./approvalPolicy";
+import {
   ChatBindingManager,
   type ChatBindingInspection,
 } from "./chatBinding";
@@ -43,6 +48,7 @@ export interface KiroIntegrationInspection {
   readonly mcp: IntegrationFileInspection;
   readonly steering: IntegrationFileInspection;
   readonly runtime: RuntimeInspection;
+  readonly approval: ApprovalPolicyInspection;
   readonly hookPath: string;
   readonly mcpPath: string;
   readonly steeringPath: string;
@@ -84,7 +90,10 @@ export class KiroIntegrationManager {
     try {
       pythonExecutable = await resolvePythonExecutable();
     } catch (error) {
-      const hook = await this.chatBinding.inspect();
+      const [hook, approval] = await Promise.all([
+        this.chatBinding.inspect(),
+        inspectApprovalPolicy({ serverKey: this.serverKey }),
+      ]);
       return {
         state: "unavailable",
         detail: errorMessage(error),
@@ -96,6 +105,7 @@ export class KiroIntegrationManager {
           steeringPath: this.steeringPath,
         }),
         runtime: { ready: false, detail: "Python is unavailable." },
+        approval,
         hookPath: this.chatBinding.hookPath,
         mcpPath: this.mcpPath,
         steeringPath: this.steeringPath,
@@ -103,7 +113,7 @@ export class KiroIntegrationManager {
       };
     }
     const expected = this.expectedMcpConfiguration(pythonExecutable);
-    const [hook, mcp, steering, runtime] = await Promise.all([
+    const [hook, mcp, steering, runtime, approval] = await Promise.all([
       this.chatBinding.inspect(),
       inspectMcpRegistration({
         mcpPath: this.mcpPath,
@@ -118,18 +128,24 @@ export class KiroIntegrationManager {
         extensionRoot: this.extensionRoot,
         stateRoot: this.paths.stateRoot.fsPath,
       }),
+      inspectApprovalPolicy({ serverKey: this.serverKey }),
     ]);
-    const state = combinedState({ hook, mcp, steering, runtime });
+    const state = combinedState({ hook, mcp, steering, runtime, approval });
     return {
       state,
-      detail: [hook.detail, mcp.detail, steering.detail, runtime.detail].join(
-        " ",
-      ),
+      detail: [
+        hook.detail,
+        mcp.detail,
+        steering.detail,
+        runtime.detail,
+        approval.detail,
+      ].join(" "),
       serverKey: this.serverKey,
       hook,
       mcp,
       steering,
       runtime,
+      approval,
       hookPath: this.chatBinding.hookPath,
       mcpPath: this.mcpPath,
       steeringPath: this.steeringPath,
@@ -173,6 +189,12 @@ export class KiroIntegrationManager {
           expected: this.expectedMcpConfiguration(pythonExecutable),
         })
       ).changed || changed;
+    changed =
+      (
+        await installApprovalPolicy({
+          serverKey: this.serverKey,
+        })
+      ).changed || changed;
     const after = await this.inspect();
     if (after.state !== "ready") {
       throw new Error(after.detail);
@@ -206,11 +228,13 @@ function combinedState(input: {
   readonly mcp: IntegrationFileInspection;
   readonly steering: IntegrationFileInspection;
   readonly runtime: RuntimeInspection;
+  readonly approval: ApprovalPolicyInspection;
 }): KiroIntegrationState {
   if (
     input.hook.state === "conflict" ||
     input.mcp.state === "conflict" ||
-    input.steering.state === "conflict"
+    input.steering.state === "conflict" ||
+    input.approval.state === "conflict"
   ) {
     return "conflict";
   }
@@ -221,14 +245,16 @@ function combinedState(input: {
     input.hook.state === "ready" &&
     input.mcp.state === "installed" &&
     input.steering.state === "installed" &&
-    input.runtime.ready
+    input.runtime.ready &&
+    input.approval.state === "installed"
   ) {
     return "ready";
   }
   if (
     input.hook.state === "absent" &&
     input.mcp.state === "absent" &&
-    input.steering.state === "absent"
+    input.steering.state === "absent" &&
+    input.approval.state === "absent"
   ) {
     return "absent";
   }

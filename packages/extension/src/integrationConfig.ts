@@ -82,7 +82,6 @@ export interface DirectMcpServerConfiguration {
   readonly env: Readonly<Record<string, string>>;
   readonly timeout: number;
   readonly disabled: false;
-  readonly autoApprove: readonly string[];
 }
 
 export function buildDirectMcpServerConfiguration(
@@ -101,9 +100,6 @@ export function buildDirectMcpServerConfiguration(
     },
     timeout: 900_000,
     disabled: false,
-    autoApprove: AUTO_APPROVED_MCP_TOOLS.map((name) =>
-      directMcpToolId(input.serverKey, name),
-    ),
   };
 }
 
