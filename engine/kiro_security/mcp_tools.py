@@ -82,12 +82,6 @@ def _setup_schema(target_required):
     return _schema(properties, required=("targetPath",) if target_required else ())
 
 
-READ_ONLY_TOOLS = (
-    "kiro_security_get_capabilities",
-    "kiro_security_get_workspace",
-    "kiro_security_get_scan_context",
-)
-
 TOOL_DEFINITIONS = (
     {
         "name": "kiro_security_get_capabilities",

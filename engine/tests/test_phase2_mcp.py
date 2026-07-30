@@ -6,7 +6,6 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
-import time
 import unittest
 import uuid
 from pathlib import Path
@@ -37,34 +36,6 @@ class McpClient:
             / "kiro_security_hook_bridge.py",
             self.bridge_path,
         )
-        guard_path = (
-            self.state_root
-            / "runtime"
-            / "mcp-shadow-guards"
-            / "11111111-1111-4111-8111-111111111111.json"
-        )
-        guard_path.parent.mkdir(parents=True, exist_ok=True)
-        guard_path.parent.chmod(0o700)
-        guard_path.write_text(
-            json.dumps(
-                {
-                    "version": 1,
-                    "serverKey": TEST_SERVER_KEY,
-                    "safe": True,
-                    "expiresAt": int(time.time() * 1000) + 60_000,
-                    "workspaceRoots": [str(self.state_root)],
-                    "sources": [
-                        {
-                            "path": str(self.state_root / "test-user-mcp.json"),
-                            "sha256": None,
-                        }
-                    ],
-                }
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        guard_path.chmod(0o600)
         environment = os.environ.copy()
         environment["PYTHONPATH"] = str(
             Path(__file__).resolve().parents[1]
