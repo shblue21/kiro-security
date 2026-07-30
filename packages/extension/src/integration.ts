@@ -32,6 +32,7 @@ import {
   type RuntimeInspection,
 } from "./integrationFiles";
 import { resolvePythonExecutable } from "./pythonRuntime";
+import { WorkbenchAdminClient } from "./workbenchClient";
 
 export type KiroIntegrationState =
   | "absent"
@@ -200,6 +201,19 @@ export class KiroIntegrationManager {
       throw new Error(after.detail);
     }
     return { changed };
+  }
+
+  async callWorkbench<T>(
+    operation: string,
+    args: Readonly<Record<string, unknown>> = {},
+  ): Promise<T> {
+    const pythonExecutable = await resolvePythonExecutable();
+    return new WorkbenchAdminClient(
+      pythonExecutable,
+      this.launcherPath,
+      this.paths.stateRoot.fsPath,
+      this.paths.scanRoot.fsPath,
+    ).call<T>(operation, args);
   }
 
   private expectedMcpConfiguration(pythonExecutable: string) {

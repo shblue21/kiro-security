@@ -126,7 +126,7 @@ class TargetInspector:
                 diff_target=refreshed,
             )
             revision = refreshed.head_revision
-            snapshot_digest = None
+            snapshot_digest = refreshed.content_digest
         else:
             revision = self.git_revision(target)
             if revision == "unversioned":
@@ -274,7 +274,13 @@ class TargetInspector:
                         "commit_parent_mismatch",
                         "Commit base must match the selected commit parent.",
                     )
-            return DiffTarget("commit", parent, head, None)
+            digest = self.diff_digest(target, parent, head)
+            if requested.content_digest and requested.content_digest != digest:
+                raise WorkbenchError(
+                    "diff_content_changed",
+                    "Commit contents changed after they were selected.",
+                )
+            return DiffTarget("commit", parent, head, digest)
         base = self.resolve_commit(target, requested.base_revision or "", "base")
         head = self.resolve_commit(target, requested.head_revision or "", "head")
         if base == head:
@@ -282,7 +288,37 @@ class TargetInspector:
                 "empty_diff_range",
                 "Diff base and head must identify different commits.",
             )
-        return DiffTarget("range", base, head, None)
+        digest = self.diff_digest(target, base, head)
+        if requested.content_digest and requested.content_digest != digest:
+            raise WorkbenchError(
+                "diff_content_changed",
+                "Range contents changed after they were selected.",
+            )
+        return DiffTarget("range", base, head, digest)
+
+    def diff_digest(self, target, base, head):
+        # type: (Path, str, str) -> str
+        content = Git.bytes(
+            target,
+            "diff",
+            "--binary",
+            "--full-index",
+            "--no-ext-diff",
+            "--no-textconv",
+            base,
+            head,
+            "--",
+            ".",
+        )
+        if content is None:
+            raise WorkbenchError(
+                "snapshot_failed",
+                "Could not snapshot the selected Git diff.",
+            )
+        digest = hashlib.sha256()
+        _update_digest(digest, b"format", b"codex-security-snapshot/v1")
+        _update_digest(digest, b"git-diff", content)
+        return "codex-security-snapshot/v1:sha256:%s" % digest.hexdigest()
 
     def resolve_commit(self, target, value, label):
         # type: (Path, str, str) -> str

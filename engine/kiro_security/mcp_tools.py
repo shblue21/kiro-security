@@ -45,6 +45,14 @@ def _sha256(description):
     }
 
 
+def _json_object(description):
+    return {
+        "type": "object",
+        "description": description,
+        "additionalProperties": True,
+    }
+
+
 def _attested_schema(properties, required=()):
     attested_properties = {
         "requestNonce": {
@@ -158,13 +166,18 @@ TOOL_DEFINITIONS = (
         "title": "Get authoritative scan context",
         "description": (
             "Read the immutable snapshot and current lifecycle state for an exact "
-            "scanId."
+            "scanId, or atomically deliver an explicitly claimed recovery."
         ),
         "inputSchema": _attested_schema(
-            {"scanId": _uuid("Durable scan UUID.")},
+            {
+                "scanId": _uuid("Durable scan UUID."),
+                "recoveryRequestId": _uuid("Optional recovery request UUID."),
+                "recoveryToken": _uuid("Optional token returned by recovery claim."),
+                "expectedVersion": _integer(1),
+            },
             required=("scanId",),
         ),
-        "annotations": {"readOnlyHint": True, "idempotentHint": True},
+        "annotations": {"readOnlyHint": False, "idempotentHint": False},
     },
     {
         "name": "kiro_security_update_scan_progress",
@@ -193,6 +206,214 @@ TOOL_DEFINITIONS = (
                 "deepReviewPass": _integer(1),
             },
             required=("scanId",),
+        ),
+        "annotations": {"readOnlyHint": False, "idempotentHint": True},
+    },
+    {
+        "name": "kiro_security_get_artifact_contract",
+        "title": "Get authoritative scan artifact contract",
+        "description": (
+            "Read mode-specific required descriptors, JSON schemas, phase closure, "
+            "and already persisted artifacts for a running scan."
+        ),
+        "inputSchema": _attested_schema(
+            {"scanId": _uuid("Durable scan UUID.")},
+            required=("scanId",),
+        ),
+        "annotations": {"readOnlyHint": True, "idempotentHint": True},
+    },
+    {
+        "name": "kiro_security_write_scan_artifact",
+        "title": "Write one validated scan artifact",
+        "description": (
+            "Validate and atomically persist one allowlisted JSON artifact for the "
+            "current semantic phase."
+        ),
+        "inputSchema": _attested_schema(
+            {
+                "scanId": _uuid("Durable scan UUID."),
+                "descriptor": _string("Allowlisted artifact descriptor."),
+                "content": _json_object("Artifact JSON content."),
+                "expectedDigest": _sha256(
+                    "Optional digest for idempotent compare-and-swap replacement."
+                ),
+            },
+            required=("scanId", "descriptor", "content"),
+        ),
+        "annotations": {"readOnlyHint": False, "idempotentHint": True},
+    },
+    {
+        "name": "kiro_security_complete_scan",
+        "title": "Finalize and complete a scan",
+        "description": (
+            "Validate phase closure and canonical artifacts, deterministically "
+            "write report and exports, seal the artifact tree, index findings, "
+            "and atomically publish scan completion."
+        ),
+        "inputSchema": _attested_schema(
+            {"scanId": _uuid("Durable scan UUID.")},
+            required=("scanId",),
+        ),
+        "annotations": {"readOnlyHint": False, "idempotentHint": True},
+    },
+    {
+        "name": "kiro_security_export_scan",
+        "title": "Export a completed scan",
+        "description": (
+            "Strictly regenerate and return the selected completed-scan export."
+        ),
+        "inputSchema": _attested_schema(
+            {
+                "scanId": _uuid("Durable scan UUID."),
+                "format": {
+                    "type": "string",
+                    "enum": ["json", "sarif", "csv"],
+                },
+            },
+            required=("scanId", "format"),
+        ),
+        "annotations": {"readOnlyHint": False, "idempotentHint": True},
+    },
+    {
+        "name": "kiro_security_claim_scan_recovery",
+        "title": "Claim a scan recovery request",
+        "description": (
+            "Claim an exact VSIX-created running scan recovery request for this "
+            "Kiro chat."
+        ),
+        "inputSchema": _attested_schema(
+            {
+                "requestId": _uuid("Durable recovery request UUID."),
+                "expectedVersion": _integer(1),
+            },
+            required=("requestId", "expectedVersion"),
+        ),
+        "annotations": {"readOnlyHint": False, "idempotentHint": True},
+    },
+    {
+        "name": "kiro_security_release_scan_recovery",
+        "title": "Release a scan recovery claim",
+        "description": "Release an undelivered scan recovery claim.",
+        "inputSchema": _attested_schema(
+            {
+                "requestId": _uuid("Durable recovery request UUID."),
+                "recoveryToken": _uuid("Token returned by recovery claim."),
+                "expectedVersion": _integer(1),
+            },
+            required=("requestId", "recoveryToken", "expectedVersion"),
+        ),
+        "annotations": {"readOnlyHint": False, "idempotentHint": True},
+    },
+    {
+        "name": "kiro_security_claim_remediation",
+        "title": "Claim an exact remediation action",
+        "description": (
+            "Claim a VSIX-requested generate, apply, or verify action with "
+            "version compare-and-swap."
+        ),
+        "inputSchema": _attested_schema(
+            {
+                "requestId": _uuid("Durable remediation request UUID."),
+                "expectedVersion": _integer(1),
+            },
+            required=("requestId", "expectedVersion"),
+        ),
+        "annotations": {"readOnlyHint": False, "idempotentHint": True},
+    },
+    {
+        "name": "kiro_security_get_remediation",
+        "title": "Get claimed remediation context",
+        "description": (
+            "Deliver authoritative scan, finding, patch, and action context to "
+            "the chat holding the exact claim."
+        ),
+        "inputSchema": _attested_schema(
+            {
+                "requestId": _uuid("Durable remediation request UUID."),
+                "actionToken": _uuid("Token returned by remediation claim."),
+                "expectedVersion": _integer(1),
+            },
+            required=("requestId", "actionToken", "expectedVersion"),
+        ),
+        "annotations": {"readOnlyHint": False, "idempotentHint": False},
+    },
+    {
+        "name": "kiro_security_set_remediation",
+        "title": "Publish a remediation action result",
+        "description": (
+            "Publish one exact generated, applied, verified, or failed result "
+            "using occurrence, request, token, and expected version."
+        ),
+        "inputSchema": _attested_schema(
+            {
+                "occurrenceId": _string("Canonical occurrence identifier."),
+                "requestId": _uuid("Durable remediation request UUID."),
+                "actionToken": _uuid("Delivered remediation action token."),
+                "expectedVersion": _integer(1),
+                "state": {
+                    "type": "string",
+                    "enum": ["generated", "applied", "verified", "failed"],
+                },
+                "patchPath": {"type": "string"},
+                "patchDigest": _sha256("Exact generated patch digest."),
+                "appliedContentDigest": _sha256("Exact checkout digest after apply."),
+                "summary": {"type": "string"},
+                "verificationSummary": {"type": "string"},
+            },
+            required=(
+                "occurrenceId",
+                "requestId",
+                "actionToken",
+                "expectedVersion",
+                "state",
+            ),
+        ),
+        "annotations": {"readOnlyHint": False, "idempotentHint": False},
+    },
+    {
+        "name": "kiro_security_release_remediation",
+        "title": "Release a remediation action claim",
+        "description": "Release an undelivered remediation action claim.",
+        "inputSchema": _attested_schema(
+            {
+                "requestId": _uuid("Durable remediation request UUID."),
+                "actionToken": _uuid("Token returned by remediation claim."),
+                "expectedVersion": _integer(1),
+            },
+            required=("requestId", "actionToken", "expectedVersion"),
+        ),
+        "annotations": {"readOnlyHint": False, "idempotentHint": True},
+    },
+    {
+        "name": "kiro_security_claim_tracking",
+        "title": "Claim an exact finding tracking handoff",
+        "description": (
+            "Claim a VSIX-created tracking request for one sealed finding."
+        ),
+        "inputSchema": _attested_schema(
+            {
+                "requestId": _uuid("Durable tracking request UUID."),
+                "expectedVersion": _integer(1),
+            },
+            required=("requestId", "expectedVersion"),
+        ),
+        "annotations": {"readOnlyHint": False, "idempotentHint": True},
+    },
+    {
+        "name": "kiro_security_get_tracking",
+        "title": "Get claimed tracking context",
+        "description": (
+            "Deliver one seal-verified finding and scan context to the chat "
+            "holding the exact tracking claim, and re-verify the same delivered "
+            "context immediately before an external write."
+        ),
+        "inputSchema": _attested_schema(
+            {
+                "requestId": _uuid("Durable tracking request UUID."),
+                "trackingToken": _uuid("Token returned by tracking claim."),
+                "expectedVersion": _integer(1),
+            },
+            required=("requestId", "trackingToken", "expectedVersion"),
         ),
         "annotations": {"readOnlyHint": False, "idempotentHint": True},
     },
@@ -272,7 +493,11 @@ class WorkbenchTools:
                 "scanStartOwner": "kiro_agent_chat",
                 "chatIdentity": "kiro_hook_one_time_attestation",
                 "semanticAnalysisOwner": "kiro_agent_steering",
-                "semanticWorkflowsAvailable": False,
+                "semanticWorkflowsAvailable": True,
+                "scanModes": ["standard", "diff", "deep"],
+                "finalization": "canonical_v1_seal",
+                "recovery": "explicit_kiro_chat_transfer",
+                "findingFollowup": ["triage", "remediation", "tracking_workflow"],
                 "directContinuation": "start_scan_then_get_scan_context",
             }
         if name == "kiro_security_create_workspace":
@@ -313,9 +538,20 @@ class WorkbenchTools:
                 owner_session_hash=owner_session_hash,
             )
         if name == "kiro_security_get_scan_context":
-            _reject_unknown(args, ("scanId",))
+            _reject_unknown(
+                args,
+                (
+                    "scanId",
+                    "recoveryRequestId",
+                    "recoveryToken",
+                    "expectedVersion",
+                ),
+            )
             return self.workbench.get_scan_context(
                 _required_string(args, "scanId"),
+                recovery_request_id=_optional_string(args, "recoveryRequestId"),
+                recovery_token=_optional_string(args, "recoveryToken"),
+                expected_version=args.get("expectedVersion"),
                 owner_session_hash=owner_session_hash,
             )
         if name == "kiro_security_update_scan_progress":
@@ -337,6 +573,131 @@ class WorkbenchTools:
                 args.get("reviewItemsCompleted"),
                 args.get("reportableFindingsCount"),
                 args.get("deepReviewPass"),
+                owner_session_hash=owner_session_hash,
+            )
+        if name == "kiro_security_get_artifact_contract":
+            _reject_unknown(args, ("scanId",))
+            return self.workbench.get_scan_artifact_contract(
+                _required_string(args, "scanId"),
+                owner_session_hash=owner_session_hash,
+            )
+        if name == "kiro_security_write_scan_artifact":
+            _reject_unknown(
+                args,
+                ("scanId", "descriptor", "content", "expectedDigest"),
+            )
+            return self.workbench.write_scan_artifact(
+                _required_string(args, "scanId"),
+                _required_string(args, "descriptor"),
+                _required_object(args, "content"),
+                _optional_string(args, "expectedDigest"),
+                owner_session_hash=owner_session_hash,
+            )
+        if name == "kiro_security_complete_scan":
+            _reject_unknown(args, ("scanId",))
+            return self.workbench.complete_scan(
+                _required_string(args, "scanId"),
+                owner_session_hash=owner_session_hash,
+            )
+        if name == "kiro_security_export_scan":
+            _reject_unknown(args, ("scanId", "format"))
+            return self.workbench.export_scan(
+                _required_string(args, "scanId"),
+                _required_string(args, "format"),
+                owner_session_hash=owner_session_hash,
+            )
+        if name == "kiro_security_claim_scan_recovery":
+            _reject_unknown(args, ("requestId", "expectedVersion"))
+            return self.workbench.claim_scan_recovery(
+                _required_string(args, "requestId"),
+                _required_integer(args, "expectedVersion", 1),
+                owner_session_hash=owner_session_hash,
+            )
+        if name == "kiro_security_release_scan_recovery":
+            _reject_unknown(
+                args,
+                ("requestId", "recoveryToken", "expectedVersion"),
+            )
+            return self.workbench.release_scan_recovery(
+                _required_string(args, "requestId"),
+                _required_string(args, "recoveryToken"),
+                _required_integer(args, "expectedVersion", 1),
+                owner_session_hash=owner_session_hash,
+            )
+        if name == "kiro_security_claim_remediation":
+            _reject_unknown(args, ("requestId", "expectedVersion"))
+            return self.workbench.claim_remediation_action(
+                _required_string(args, "requestId"),
+                _required_integer(args, "expectedVersion", 1),
+                owner_session_hash=owner_session_hash,
+            )
+        if name == "kiro_security_get_remediation":
+            _reject_unknown(
+                args,
+                ("requestId", "actionToken", "expectedVersion"),
+            )
+            return self.workbench.get_remediation_context(
+                _required_string(args, "requestId"),
+                _required_string(args, "actionToken"),
+                _required_integer(args, "expectedVersion", 1),
+                owner_session_hash=owner_session_hash,
+            )
+        if name == "kiro_security_set_remediation":
+            _reject_unknown(
+                args,
+                (
+                    "occurrenceId",
+                    "requestId",
+                    "actionToken",
+                    "expectedVersion",
+                    "state",
+                    "patchPath",
+                    "patchDigest",
+                    "appliedContentDigest",
+                    "summary",
+                    "verificationSummary",
+                ),
+            )
+            return self.workbench.set_finding_remediation(
+                _required_string(args, "occurrenceId"),
+                _required_string(args, "requestId"),
+                _required_integer(args, "expectedVersion", 1),
+                _required_string(args, "actionToken"),
+                _required_string(args, "state"),
+                _optional_string(args, "patchPath"),
+                _optional_string(args, "patchDigest"),
+                _optional_string(args, "appliedContentDigest"),
+                _optional_string(args, "summary"),
+                _optional_string(args, "verificationSummary"),
+                owner_session_hash=owner_session_hash,
+            )
+        if name == "kiro_security_release_remediation":
+            _reject_unknown(
+                args,
+                ("requestId", "actionToken", "expectedVersion"),
+            )
+            return self.workbench.release_remediation_claim(
+                _required_string(args, "requestId"),
+                _required_integer(args, "expectedVersion", 1),
+                _required_string(args, "actionToken"),
+                owner_session_hash=owner_session_hash,
+            )
+        if name == "kiro_security_claim_tracking":
+            _reject_unknown(args, ("requestId", "expectedVersion"))
+            return self.workbench.claim_tracking_request(
+                _required_string(args, "requestId"),
+                _required_integer(args, "expectedVersion", 1),
+                owner_session_hash=owner_session_hash,
+            )
+        if name == "kiro_security_get_tracking":
+            _reject_unknown(
+                args,
+                ("requestId", "trackingToken", "expectedVersion"),
+            )
+            return self.workbench.get_tracking_context(
+                _required_string(args, "requestId"),
+                _required_string(args, "trackingToken"),
+                _required_integer(args, "expectedVersion", 1),
                 owner_session_hash=owner_session_hash,
             )
         if name == "kiro_security_fail_scan":
@@ -398,6 +759,13 @@ def _required_integer(arguments, key, minimum):
             "invalid_arguments",
             "%s must be an integer greater than or equal to %s." % (key, minimum),
         )
+    return value
+
+
+def _required_object(arguments, key):
+    value = arguments.get(key)
+    if not isinstance(value, dict):
+        raise WorkbenchError("invalid_arguments", "%s must be an object." % key)
     return value
 
 

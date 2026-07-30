@@ -5,7 +5,7 @@ SCHEMA_VERSION = 1
 MIGRATIONS = (
     (
         1,
-        "fresh trusted Kiro chat workspace and scan foundation",
+        "fresh trusted Kiro chat security workbench",
         (
             """
             CREATE TABLE workspaces (
@@ -37,6 +37,7 @@ MIGRATIONS = (
             CREATE TABLE scans (
                 id TEXT PRIMARY KEY,
                 workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                owner_session_hash TEXT NOT NULL,
                 target_path TEXT NOT NULL,
                 target_revision TEXT NOT NULL,
                 target_snapshot_digest TEXT,
@@ -109,6 +110,169 @@ MIGRATIONS = (
                 arguments_hash TEXT NOT NULL,
                 expires_at INTEGER NOT NULL
             )
+            """,
+            """
+            CREATE TABLE scan_artifacts (
+                scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+                kind TEXT NOT NULL CHECK (
+                    kind IN ('coverage', 'findings', 'manifest', 'markdownReport')
+                ),
+                path TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (scan_id, kind)
+            )
+            """,
+            """
+            CREATE TABLE findings (
+                id TEXT PRIMARY KEY,
+                fingerprint TEXT NOT NULL UNIQUE,
+                rule_id TEXT NOT NULL,
+                identity_anchor TEXT NOT NULL,
+                identity_instance TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE finding_occurrences (
+                id TEXT PRIMARY KEY,
+                finding_id TEXT NOT NULL REFERENCES findings(id) ON DELETE CASCADE,
+                scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+                title TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                severity TEXT NOT NULL CHECK (
+                    severity IN ('critical', 'high', 'medium', 'low', 'informational')
+                ),
+                confidence TEXT NOT NULL,
+                remediation TEXT,
+                details_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                UNIQUE (scan_id, finding_id)
+            )
+            """,
+            """
+            CREATE INDEX finding_occurrences_by_scan_and_severity
+            ON finding_occurrences(scan_id, severity, finding_id)
+            """,
+            """
+            CREATE TABLE finding_locations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                occurrence_id TEXT NOT NULL
+                    REFERENCES finding_occurrences(id) ON DELETE CASCADE,
+                relative_path TEXT NOT NULL,
+                start_line INTEGER NOT NULL CHECK (start_line >= 1),
+                end_line INTEGER NOT NULL CHECK (end_line >= start_line),
+                role TEXT,
+                sort_order INTEGER NOT NULL CHECK (sort_order >= 0),
+                UNIQUE (occurrence_id, sort_order)
+            )
+            """,
+            """
+            CREATE TABLE finding_triage (
+                occurrence_id TEXT PRIMARY KEY
+                    REFERENCES finding_occurrences(id) ON DELETE CASCADE,
+                status TEXT NOT NULL DEFAULT 'open'
+                    CHECK (status IN ('open', 'closed')),
+                close_reason TEXT CHECK (
+                    close_reason IS NULL
+                    OR close_reason IN ('already_fixed', 'wont_fix', 'false_positive')
+                ),
+                note TEXT,
+                updated_at TEXT NOT NULL,
+                CHECK (
+                    (status = 'open' AND close_reason IS NULL)
+                    OR (status = 'closed' AND close_reason IS NOT NULL)
+                ),
+                CHECK (
+                    close_reason != 'wont_fix'
+                    OR (note IS NOT NULL AND length(trim(note)) > 0)
+                )
+            )
+            """,
+            """
+            CREATE TABLE finding_remediation_attempts (
+                request_id TEXT PRIMARY KEY,
+                occurrence_id TEXT NOT NULL
+                    REFERENCES finding_occurrences(id) ON DELETE CASCADE,
+                state TEXT NOT NULL CHECK (
+                    state IN (
+                        'idle',
+                        'requested',
+                        'generated',
+                        'applied',
+                        'verifying',
+                        'verified',
+                        'failed',
+                        'superseded'
+                    )
+                ),
+                version INTEGER NOT NULL CHECK (version >= 1),
+                base_revision TEXT,
+                base_content_digest TEXT,
+                expected_applied_content_digest TEXT,
+                applied_content_digest TEXT,
+                pending_action TEXT CHECK (
+                    pending_action IS NULL
+                    OR pending_action IN ('generate', 'apply', 'verify')
+                ),
+                patch_path TEXT,
+                patch_digest TEXT,
+                summary TEXT,
+                verification_summary TEXT,
+                pending_action_claimed_at INTEGER,
+                pending_action_claim_token TEXT,
+                pending_action_delivered_at INTEGER,
+                claimed_session_hash TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE INDEX remediation_attempts_by_occurrence
+            ON finding_remediation_attempts(occurrence_id, created_at DESC)
+            """,
+            """
+            CREATE TABLE scan_recovery_requests (
+                id TEXT PRIMARY KEY,
+                scan_id TEXT NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
+                status TEXT NOT NULL CHECK (
+                    status IN ('pending', 'claimed', 'delivered', 'canceled')
+                ),
+                version INTEGER NOT NULL CHECK (version >= 1),
+                claimed_session_hash TEXT,
+                claim_token TEXT,
+                claimed_at INTEGER,
+                delivered_at INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE UNIQUE INDEX one_open_scan_recovery_request
+            ON scan_recovery_requests(scan_id)
+            WHERE status IN ('pending', 'claimed')
+            """,
+            """
+            CREATE TABLE finding_tracking_requests (
+                id TEXT PRIMARY KEY,
+                occurrence_id TEXT NOT NULL
+                    REFERENCES finding_occurrences(id) ON DELETE CASCADE,
+                status TEXT NOT NULL CHECK (
+                    status IN ('pending', 'claimed', 'delivered', 'canceled')
+                ),
+                version INTEGER NOT NULL CHECK (version >= 1),
+                claimed_session_hash TEXT,
+                claim_token TEXT,
+                claimed_at INTEGER,
+                delivered_at INTEGER,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            """
+            CREATE UNIQUE INDEX one_open_finding_tracking_request
+            ON finding_tracking_requests(occurrence_id)
+            WHERE status IN ('pending', 'claimed')
             """,
         ),
     ),

@@ -206,6 +206,18 @@ class PhaseTwoMcpTests(unittest.TestCase):
                     "kiro_security_start_scan",
                     "kiro_security_get_scan_context",
                     "kiro_security_update_scan_progress",
+                    "kiro_security_get_artifact_contract",
+                    "kiro_security_write_scan_artifact",
+                    "kiro_security_complete_scan",
+                    "kiro_security_export_scan",
+                    "kiro_security_claim_scan_recovery",
+                    "kiro_security_release_scan_recovery",
+                    "kiro_security_claim_remediation",
+                    "kiro_security_get_remediation",
+                    "kiro_security_set_remediation",
+                    "kiro_security_release_remediation",
+                    "kiro_security_claim_tracking",
+                    "kiro_security_get_tracking",
                     "kiro_security_fail_scan",
                     "kiro_security_cancel_scan",
                 },
@@ -252,7 +264,7 @@ class PhaseTwoMcpTests(unittest.TestCase):
                 capabilities["structuredContent"]["stateRoot"],
                 str(self.state_root.resolve()),
             )
-            self.assertFalse(
+            self.assertTrue(
                 capabilities["structuredContent"]["semanticWorkflowsAvailable"]
             )
             self.assertEqual(
@@ -304,6 +316,39 @@ class PhaseTwoMcpTests(unittest.TestCase):
             )
             self.assertEqual(context["workspaceId"], session_id)
 
+            contract = client.call_tool(
+                "kiro_security_get_artifact_contract",
+                {"scanId": scan_id},
+            )["structuredContent"]
+            self.assertIn("derived-writeup", contract["requiredDescriptors"])
+            client.call_tool(
+                "kiro_security_write_scan_artifact",
+                {
+                    "scanId": scan_id,
+                    "descriptor": "brief",
+                    "content": {
+                        "scanId": scan_id,
+                        "mode": "standard",
+                        "target": str(self.target),
+                        "scope": ".",
+                    },
+                },
+            )
+            client.call_tool(
+                "kiro_security_update_scan_progress",
+                {"scanId": scan_id, "phase": "threat_model"},
+            )
+            client.call_tool(
+                "kiro_security_write_scan_artifact",
+                {
+                    "scanId": scan_id,
+                    "descriptor": "threat-model",
+                    "content": {
+                        "scanId": scan_id,
+                        "summary": "MCP integration threat model.",
+                    },
+                },
+            )
             progress = client.call_tool(
                 "kiro_security_update_scan_progress",
                 {
@@ -328,6 +373,17 @@ class PhaseTwoMcpTests(unittest.TestCase):
             client.call_tool(
                 "kiro_security_update_scan_progress",
                 {"scanId": scan_id, "reviewItemsCompleted": 2},
+            )
+            client.call_tool(
+                "kiro_security_write_scan_artifact",
+                {
+                    "scanId": scan_id,
+                    "descriptor": "discovery",
+                    "content": {
+                        "scanId": scan_id,
+                        "candidates": [],
+                    },
+                },
             )
             later = client.call_tool(
                 "kiro_security_update_scan_progress",
@@ -535,6 +591,28 @@ class PhaseTwoMcpTests(unittest.TestCase):
         )
         scan_id = started["scanId"]
 
+        workbench.write_scan_artifact(
+            scan_id,
+            "brief",
+            {
+                "scanId": scan_id,
+                "mode": "deep",
+                "target": str(self.target),
+                "scope": ".",
+            },
+            owner_session_hash=owner_session_hash,
+        )
+        workbench.update_scan_progress(
+            scan_id,
+            phase="threat_model",
+            owner_session_hash=owner_session_hash,
+        )
+        workbench.write_scan_artifact(
+            scan_id,
+            "threat-model",
+            {"scanId": scan_id, "summary": "Deep progress test."},
+            owner_session_hash=owner_session_hash,
+        )
         first = workbench.update_scan_progress(
             scan_id,
             phase="discovery",

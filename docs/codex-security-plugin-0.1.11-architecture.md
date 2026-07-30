@@ -2,7 +2,7 @@
 
 ## 문서 지위
 
-이 문서는 로컬에 설치된 OpenAI Codex Security Plugin `0.1.11`의 패키지, 스킬, Python workbench, MCP/App 동작과 공개된 제품 설명을 분석한 **버전 고정형 참고 자료**다. Kiro Security Power의 규범적 설계 문서가 아니며, Kiro 구현의 현재 계약은 `docs/architecture.md`와 Power의 실행 계약이 결정한다.
+이 문서는 로컬에 설치된 OpenAI Codex Security Plugin `0.1.11`의 패키지, 스킬, Python workbench, MCP/App 동작과 공개된 제품 설명을 분석한 **버전 고정형 참고 자료**다. Kiro Security Power의 규범적 설계 문서가 아니며, Kiro 구현의 현재 계약은 `docs/codex-security-0.1.11-rebuild-plan.md`, 설치된 steering, MCP schema와 fresh DB schema가 함께 결정한다.
 
 - 분석 대상: 로컬 Codex chat에서 실행되는 `codex-security@0.1.11`
 - 분석 시점: 2026-07-23

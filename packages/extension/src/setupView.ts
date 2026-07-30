@@ -8,21 +8,53 @@ import {
   KiroIntegrationManager,
   type KiroIntegrationInspection,
 } from "./integration";
+import type {
+  DashboardProjection,
+  FindingProjection,
+  RecoveryRequestProjection,
+  RemediationRequestProjection,
+  ScanProjection,
+} from "./workbenchClient";
 
 const VIEW_ID = "kiroSecurity.setup";
 
+type ViewTab = "setup" | "dashboard" | "findings";
 type SetupCommand =
   | "refresh"
+  | "selectTab"
   | "connectIntegration"
   | "showHookFile"
   | "showMcpFile"
-  | "showSteeringFile";
+  | "showSteeringFile"
+  | "createRecovery"
+  | "cancelRecovery"
+  | "openTriage"
+  | "closeTriage"
+  | "requestRemediation"
+  | "copyRemediationPrompt"
+  | "exportScan"
+  | "openArtifact"
+  | "trackFinding";
+
+interface SetupMessage {
+  readonly command: SetupCommand;
+  readonly tab?: ViewTab;
+  readonly scanId?: string;
+  readonly occurrenceId?: string;
+  readonly requestId?: string;
+  readonly action?: "generate" | "apply" | "verify";
+  readonly version?: string;
+  readonly format?: "json" | "sarif" | "csv";
+  readonly path?: string;
+}
 
 export class SecuritySetupView implements vscode.WebviewViewProvider {
   static readonly viewId = VIEW_ID;
   private readonly integration: KiroIntegrationManager;
   private busy = false;
   private feedback: string | undefined;
+  private activeTab: ViewTab = "setup";
+  private dashboard: DashboardProjection | undefined;
 
   constructor(
     context: vscode.ExtensionContext,
@@ -55,6 +87,11 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
       switch (message.command) {
         case "refresh":
           break;
+        case "selectTab":
+          if (message.tab) {
+            this.activeTab = message.tab;
+          }
+          break;
         case "connectIntegration":
           await this.connectIntegration();
           break;
@@ -76,6 +113,47 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
             "The Kiro Security steering file does not exist yet.",
           );
           break;
+        case "createRecovery":
+          await this.createRecovery(message.scanId);
+          break;
+        case "cancelRecovery":
+          await this.callWorkbench("cancelRecovery", {
+            requestId: requiredValue(message.requestId, "requestId"),
+          });
+          this.feedback = "Recovery request canceled.";
+          break;
+        case "openTriage":
+          await this.callWorkbench("setTriage", {
+            occurrenceId: requiredValue(message.occurrenceId, "occurrenceId"),
+            status: "open",
+          });
+          this.feedback = "Finding reopened.";
+          break;
+        case "closeTriage":
+          await this.closeTriage(message.occurrenceId);
+          break;
+        case "requestRemediation":
+          await this.requestRemediation(message);
+          break;
+        case "copyRemediationPrompt":
+          await this.copyRemediationPrompt(
+            requiredValue(message.requestId, "requestId"),
+            requiredVersion(message.version),
+            requiredValue(message.action, "remediation action"),
+          );
+          break;
+        case "exportScan":
+          await this.exportScan(message);
+          break;
+        case "openArtifact":
+          await this.showFile(
+            requiredValue(message.path, "artifact path"),
+            "The selected scan artifact does not exist.",
+          );
+          break;
+        case "trackFinding":
+          await this.createTracking(message.occurrenceId);
+          break;
       }
     } catch (error) {
       const detail = errorMessage(error);
@@ -89,6 +167,131 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
         this.busy = false;
       }
     }
+  }
+
+  private async callWorkbench<T>(
+    operation: string,
+    args: Readonly<Record<string, unknown>>,
+  ): Promise<T> {
+    return this.integration.callWorkbench<T>(operation, args);
+  }
+
+  private async createRecovery(scanId: string | undefined): Promise<void> {
+    const recovery = await this.callWorkbench<{
+      readonly id: string;
+      readonly scanId: string;
+      readonly version: number;
+    }>("createRecovery", {
+      scanId: requiredValue(scanId, "scanId"),
+    });
+    const prompt = [
+      "Resume this Kiro Security scan in this chat.",
+      `Recovery request: ${recovery.id}`,
+      `Expected version: ${recovery.version}`,
+      "Claim the exact recovery request, then deliver it through the recovery form of kiro_security_get_scan_context.",
+    ].join("\n");
+    await vscode.env.clipboard.writeText(prompt);
+    this.feedback = "Recovery prompt copied. Paste it into the Kiro chat that should resume the scan.";
+  }
+
+  private async closeTriage(
+    occurrenceId: string | undefined,
+  ): Promise<void> {
+    const closeReason = await vscode.window.showQuickPick(
+      [
+        { label: "Already fixed", value: "already_fixed" },
+        { label: "Won't fix", value: "wont_fix" },
+        { label: "False positive", value: "false_positive" },
+      ],
+      { title: "Close security finding" },
+    );
+    if (!closeReason) {
+      return;
+    }
+    const note =
+      closeReason.value === "wont_fix"
+        ? await vscode.window.showInputBox({
+            title: "Why won't this finding be fixed?",
+            validateInput: (value) =>
+              value.trim() ? undefined : "A note is required.",
+          })
+        : undefined;
+    if (closeReason.value === "wont_fix" && note === undefined) {
+      return;
+    }
+    await this.callWorkbench("setTriage", {
+      occurrenceId: requiredValue(occurrenceId, "occurrenceId"),
+      status: "closed",
+      closeReason: closeReason.value,
+      note,
+    });
+    this.feedback = "Finding closed.";
+  }
+
+  private async requestRemediation(message: SetupMessage): Promise<void> {
+    const action = requiredValue(message.action, "remediation action");
+    const result = await this.callWorkbench<{
+      readonly requestId: string;
+      readonly version: number;
+      readonly pendingAction: string;
+    }>("requestRemediation", {
+      occurrenceId: requiredValue(message.occurrenceId, "occurrenceId"),
+      action,
+      requestId: message.requestId,
+    });
+    await this.copyRemediationPrompt(
+      result.requestId,
+      result.version,
+      requiredRemediationAction(result.pendingAction),
+    );
+  }
+
+  private async copyRemediationPrompt(
+    requestId: string,
+    version: number,
+    action: "generate" | "apply" | "verify",
+  ): Promise<void> {
+    const prompt = [
+      `Continue Kiro Security remediation ${action}.`,
+      `Request: ${requestId}`,
+      `Expected version: ${version}`,
+      "Claim the exact remediation action and load its authoritative context before changing any source.",
+    ].join("\n");
+    await vscode.env.clipboard.writeText(prompt);
+    this.feedback = "Remediation prompt copied. Paste it into Kiro Chat.";
+  }
+
+  private async exportScan(message: SetupMessage): Promise<void> {
+    const result = await this.callWorkbench<{ readonly path: string }>(
+      "export",
+      {
+        scanId: requiredValue(message.scanId, "scanId"),
+        format: requiredValue(message.format, "export format"),
+      },
+    );
+    await this.showFile(result.path, "The generated export does not exist.");
+    this.feedback = `Exported ${message.format?.toUpperCase()}.`;
+  }
+
+  private async createTracking(
+    occurrenceId: string | undefined,
+  ): Promise<void> {
+    const exactOccurrence = requiredValue(occurrenceId, "occurrenceId");
+    const tracking = await this.callWorkbench<{
+      readonly requestId: string;
+      readonly version: number;
+    }>("createTracking", {
+      occurrenceId: exactOccurrence,
+    });
+    const prompt = [
+      "Track this completed Kiro Security finding.",
+      `Tracking request: ${tracking.requestId}`,
+      `Expected version: ${tracking.version}`,
+      `Occurrence: ${exactOccurrence}`,
+      "Claim and deliver the exact tracking request before provider access. Then verify the sealed source, check duplicates, preview the exact provider payload and visibility, ask for approval, write once, and read back using one selected provider.",
+    ].join("\n");
+    await vscode.env.clipboard.writeText(prompt);
+    this.feedback = "Tracking workflow prompt copied. Paste it into Kiro Chat.";
   }
 
   private async connectIntegration(): Promise<void> {
@@ -158,10 +361,27 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
         runtimeRoot: this.integration.runtimeRoot,
       };
     }
+    if (integration.runtime.ready) {
+      try {
+        this.dashboard =
+          await this.integration.callWorkbench<DashboardProjection>(
+            "dashboard",
+          );
+      } catch (error) {
+        this.dashboard = undefined;
+        this.output.appendLine(
+          `Unable to read workbench dashboard: ${errorMessage(error)}`,
+        );
+      }
+    } else {
+      this.dashboard = undefined;
+    }
     view.webview.html = renderSetupHtml({
       webview: view.webview,
       stateRoot: this.paths.stateRoot.fsPath,
       integration,
+      activeTab: this.activeTab,
+      dashboard: this.dashboard,
       feedback: this.feedback,
     });
   }
@@ -171,6 +391,8 @@ export function renderSetupHtml(input: {
   readonly webview: vscode.Webview;
   readonly stateRoot: string;
   readonly integration: KiroIntegrationInspection;
+  readonly activeTab: ViewTab;
+  readonly dashboard?: DashboardProjection;
   readonly feedback?: string;
 }): string {
   const nonce = randomBytes(16).toString("base64");
@@ -199,9 +421,9 @@ export function renderSetupHtml(input: {
   </header>
 
   <nav class="tabs" aria-label="Security panel sections">
-    <button class="tab active" aria-current="page">Setup</button>
-    <button class="tab" disabled>Dashboard</button>
-    <button class="tab" disabled>Findings</button>
+    ${tabButton("setup", "Setup", input.activeTab)}
+    ${tabButton("dashboard", "Dashboard", input.activeTab)}
+    ${tabButton("findings", "Findings", input.activeTab)}
   </nav>
 
   <main class="content">
@@ -211,6 +433,7 @@ export function renderSetupHtml(input: {
         : ""
     }
 
+    <div class="page ${input.activeTab === "setup" ? "active" : ""}">
     <section class="card">
       <div class="card-title">
         <div>
@@ -312,19 +535,387 @@ export function renderSetupHtml(input: {
         )}
       </div>
     </details>
+    </div>
+    <div class="page ${input.activeTab === "dashboard" ? "active" : ""}">
+      ${renderDashboardPage(input.dashboard)}
+    </div>
+    <div class="page ${input.activeTab === "findings" ? "active" : ""}">
+      ${renderFindingsPage(input.dashboard)}
+    </div>
   </main>
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
     for (const button of document.querySelectorAll('[data-command]')) {
       button.addEventListener('click', () => {
         if (!button.disabled) {
-          vscode.postMessage({ command: button.dataset.command });
+          vscode.postMessage({
+            command: button.dataset.command,
+            tab: button.dataset.tab,
+            scanId: button.dataset.scanId,
+            occurrenceId: button.dataset.occurrenceId,
+            requestId: button.dataset.requestId,
+            action: button.dataset.action,
+            version: button.dataset.version,
+            format: button.dataset.format,
+            path: button.dataset.path
+          });
         }
       });
     }
+    const applyFindingFilters = () => {
+      const scan = document.getElementById('scan-filter')?.value || '';
+      const severity = document.getElementById('severity-filter')?.value || '';
+      const triage = document.getElementById('triage-filter')?.value || '';
+      for (const card of document.querySelectorAll('.finding-card')) {
+        card.hidden =
+          (scan && card.dataset.scanId !== scan) ||
+          (severity && card.dataset.severity !== severity) ||
+          (triage && card.dataset.triage !== triage);
+      }
+    };
+    document.getElementById('scan-filter')?.addEventListener('change', applyFindingFilters);
+    document.getElementById('severity-filter')?.addEventListener('change', applyFindingFilters);
+    document.getElementById('triage-filter')?.addEventListener('change', applyFindingFilters);
   </script>
 </body>
 </html>`;
+}
+
+function tabButton(
+  tab: ViewTab,
+  label: string,
+  activeTab: ViewTab,
+): string {
+  const active = tab === activeTab;
+  return `<button class="tab ${active ? "active" : ""}" data-command="selectTab" data-tab="${tab}" ${
+    active ? 'aria-current="page"' : ""
+  }>${label}</button>`;
+}
+
+function renderDashboardPage(
+  dashboard: DashboardProjection | undefined,
+): string {
+  if (!dashboard) {
+    return emptyState(
+      "Dashboard unavailable",
+      "Connect Kiro Security Chat to initialize the extension-global workbench.",
+    );
+  }
+  if (dashboard.scans.length === 0) {
+    return emptyState(
+      "No scans yet",
+      "Start a Kiro Security scan from ordinary Kiro Chat. The Extension never starts scans.",
+    );
+  }
+  return dashboard.scans
+    .map((scan) =>
+      renderScanCard(
+        scan,
+        dashboard.recoveryRequests.filter(
+          (request) => request.scanId === scan.id,
+        ),
+      ),
+    )
+    .join("");
+}
+
+function renderScanCard(
+  scan: ScanProjection,
+  recoveryRequests: readonly RecoveryRequestProjection[],
+): string {
+  const total = scan.progress.reviewItemsTotal;
+  const complete = scan.progress.reviewItemsCompleted;
+  const percent = total === 0 ? 0 : Math.floor((complete / total) * 100);
+  const artifactButtons =
+    scan.status === "complete"
+      ? `
+        <button data-command="openArtifact" data-path="${escapeHtml(
+          `${scan.scanDir}/report.md`,
+        )}">Report</button>
+        <button data-command="openArtifact" data-path="${escapeHtml(
+          `${scan.scanDir}/scan-manifest.json`,
+        )}">Manifest</button>
+        <button data-command="openArtifact" data-path="${escapeHtml(
+          `${scan.scanDir}/coverage.json`,
+        )}">Coverage</button>
+        <button data-command="exportScan" data-scan-id="${escapeHtml(
+          scan.id,
+        )}" data-format="sarif">SARIF</button>
+        <button data-command="exportScan" data-scan-id="${escapeHtml(
+          scan.id,
+        )}" data-format="csv">CSV</button>`
+      : "";
+  const recovery =
+    scan.status === "running"
+      ? renderRecoveryControls(scan.id, recoveryRequests[0])
+      : "";
+  return `<section class="card scan-card">
+    <div class="card-title">
+      <div>
+        <h2>${escapeHtml(scan.target.path)}</h2>
+        <p>${escapeHtml(scan.mode)} · ${escapeHtml(scan.scope)}</p>
+      </div>
+      <span class="badge ${statusBadge(scan.status)}">${escapeHtml(
+        scan.status,
+      )}</span>
+    </div>
+    <dl class="scan-facts">
+      <dt>Phase</dt><dd>${escapeHtml(scan.phase)}</dd>
+      <dt>Revision</dt><dd class="mono">${escapeHtml(
+        scan.target.revision,
+      )}</dd>
+      <dt>Progress</dt><dd>${complete}/${total} (${percent}%)</dd>
+      <dt>Findings</dt><dd>${scan.progress.reportableFindingsCount}</dd>
+      <dt>Updated</dt><dd>${escapeHtml(scan.updatedAt)}</dd>
+    </dl>
+    ${
+      scan.failureMessage
+        ? `<p class="error-text">${escapeHtml(scan.failureMessage)}</p>`
+        : ""
+    }
+    <div class="button-row">${recovery}${artifactButtons}</div>
+  </section>`;
+}
+
+function renderRecoveryControls(
+  scanId: string,
+  request: RecoveryRequestProjection | undefined,
+): string {
+  if (!request) {
+    return `<button class="primary" data-command="createRecovery" data-scan-id="${escapeHtml(
+      scanId,
+    )}">Resume in chat</button>`;
+  }
+  if (request.status === "delivered" || request.status === "canceled") {
+    return `<span class="request-state">Latest recovery ${escapeHtml(
+      request.status,
+    )} · v${request.version}</span>
+      <button class="primary" data-command="createRecovery" data-scan-id="${escapeHtml(
+        scanId,
+      )}">Resume in chat</button>`;
+  }
+  return `<span class="request-state">Recovery ${escapeHtml(
+    request.status,
+  )} · v${request.version}</span>
+    <button class="primary" data-command="createRecovery" data-scan-id="${escapeHtml(
+      scanId,
+    )}">Copy resume prompt again</button>
+    <button data-command="cancelRecovery" data-request-id="${escapeHtml(
+      request.id,
+    )}">Cancel recovery</button>`;
+}
+
+function renderFindingsPage(
+  dashboard: DashboardProjection | undefined,
+): string {
+  if (!dashboard) {
+    return emptyState(
+      "Findings unavailable",
+      "Connect Kiro Security Chat to initialize the extension-global workbench.",
+    );
+  }
+  if (dashboard.findings.length === 0) {
+    return emptyState(
+      "No completed findings",
+      "Findings appear only after canonical scan finalization succeeds.",
+    );
+  }
+  const findingScans = dashboard.scans.filter((scan) =>
+    dashboard.findings.some((finding) => finding.scanId === scan.id),
+  );
+  const filters = `
+    <section class="card finding-toolbar">
+      <label>Scan
+        <select id="scan-filter">
+          <option value="">All scans</option>
+          ${findingScans
+            .map(
+              (scan) =>
+                `<option value="${escapeHtml(scan.id)}">${escapeHtml(
+                  `${scan.target.path} · ${scan.target.revision}`,
+                )}</option>`,
+            )
+            .join("")}
+        </select>
+      </label>
+      <label>Severity
+        <select id="severity-filter">
+          <option value="">All</option>
+          <option value="critical">Critical</option>
+          <option value="high">High</option>
+          <option value="medium">Medium</option>
+          <option value="low">Low</option>
+          <option value="informational">Informational</option>
+        </select>
+      </label>
+      <label>State
+        <select id="triage-filter">
+          <option value="">All</option>
+          <option value="open">Open</option>
+          <option value="closed">Closed</option>
+        </select>
+      </label>
+    </section>`;
+  return `${filters}${dashboard.findings
+    .map((finding) =>
+      renderFindingCard(
+        finding,
+        dashboard,
+        dashboard.scans.find((scan) => scan.id === finding.scanId),
+      ),
+    )
+    .join("")}`;
+}
+
+function renderFindingCard(
+  finding: FindingProjection,
+  dashboard: DashboardProjection,
+  scan: ScanProjection | undefined,
+): string {
+  const latest = dashboard.remediationRequests
+    .filter(
+      (request) => request.occurrenceId === finding.occurrenceId,
+    )
+    .sort((left, right) =>
+      right.updatedAt.localeCompare(left.updatedAt),
+    )[0];
+  let remediationButton = "";
+  if (latest?.pendingAction) {
+    remediationButton = remediationPromptButtonHtml(latest);
+  } else if (
+    !latest ||
+    ["verified", "failed", "superseded"].includes(latest.state)
+  ) {
+    remediationButton = remediationButtonHtml(finding, "generate");
+  } else if (latest.state === "generated") {
+    remediationButton = remediationButtonHtml(
+      finding,
+      "apply",
+      latest.requestId,
+    );
+  } else if (latest.state === "applied") {
+    remediationButton = remediationButtonHtml(
+      finding,
+      "verify",
+      latest.requestId,
+    );
+  }
+  const triageButton =
+    finding.triage.status === "open"
+      ? `<button data-command="closeTriage" data-occurrence-id="${escapeHtml(
+          finding.occurrenceId,
+        )}">Close</button>`
+      : `<button data-command="openTriage" data-occurrence-id="${escapeHtml(
+          finding.occurrenceId,
+        )}">Reopen</button>`;
+  const locations = finding.locations
+    .map(
+      (location) =>
+        `${escapeHtml(location.path)}:${location.startLine}${
+          location.endLine !== location.startLine
+            ? `-${location.endLine}`
+            : ""
+        }${location.role ? ` · ${escapeHtml(location.role)}` : ""}`,
+    )
+    .join("<br>");
+  return `<section class="card finding-card" data-scan-id="${escapeHtml(
+    finding.scanId,
+  )}" data-severity="${escapeHtml(
+    finding.severity,
+  )}" data-triage="${escapeHtml(finding.triage.status)}">
+    <div class="card-title">
+      <div>
+        <h2>${escapeHtml(finding.title)}</h2>
+        <p>${escapeHtml(finding.findingId)}</p>
+      </div>
+      <span class="badge ${severityBadge(finding.severity)}">${escapeHtml(
+        finding.severity,
+      )}</span>
+    </div>
+    <p>${escapeHtml(finding.summary)}</p>
+    <dl class="scan-facts">
+      <dt>Confidence</dt><dd>${escapeHtml(finding.confidence)}</dd>
+      <dt>Target</dt><dd class="mono">${escapeHtml(
+        scan?.target.path ?? "Unknown target",
+      )}</dd>
+      <dt>Revision</dt><dd class="mono">${escapeHtml(
+        scan?.target.revision ?? "Unknown revision",
+      )}</dd>
+      <dt>Triage</dt><dd>${escapeHtml(finding.triage.status)}${
+        finding.triage.closeReason
+          ? ` · ${escapeHtml(finding.triage.closeReason)}`
+          : ""
+      }</dd>
+      <dt>Locations</dt><dd class="mono">${locations}</dd>
+    </dl>
+    <details class="setup-options">
+      <summary>Recommended remediation</summary>
+      <div class="setup-options-body">
+        <p>${escapeHtml(finding.remediation)}</p>
+        <p class="muted">Open the sealed JSON export for complete evidence, validation, and attack-path details.</p>
+      </div>
+    </details>
+    <div class="button-row">
+      ${triageButton}
+      ${remediationButton}
+      <button data-command="trackFinding" data-occurrence-id="${escapeHtml(
+        finding.occurrenceId,
+      )}">Track</button>
+      <button data-command="exportScan" data-scan-id="${escapeHtml(
+        finding.scanId,
+      )}" data-format="json">JSON</button>
+    </div>
+  </section>`;
+}
+
+function remediationPromptButtonHtml(
+  request: RemediationRequestProjection,
+): string {
+  const action = request.pendingAction;
+  if (!action) {
+    return "";
+  }
+  return `<button class="primary" data-command="copyRemediationPrompt" data-request-id="${escapeHtml(
+    request.requestId,
+  )}" data-action="${escapeHtml(action)}" data-version="${
+    request.version
+  }">Copy ${escapeHtml(action)} prompt again</button>`;
+}
+
+function remediationButtonHtml(
+  finding: FindingProjection,
+  action: "generate" | "apply" | "verify",
+  requestId?: string,
+): string {
+  return `<button class="${action === "apply" ? "primary" : ""}" data-command="requestRemediation" data-occurrence-id="${escapeHtml(
+    finding.occurrenceId,
+  )}" data-action="${action}" ${
+    requestId ? `data-request-id="${escapeHtml(requestId)}"` : ""
+  }>${action[0].toUpperCase()}${action.slice(1)}</button>`;
+}
+
+function emptyState(title: string, detail: string): string {
+  return `<section class="card empty-state"><h2>${escapeHtml(
+    title,
+  )}</h2><p class="muted">${escapeHtml(detail)}</p></section>`;
+}
+
+function statusBadge(status: string): string {
+  if (status === "complete") {
+    return "badge-ready";
+  }
+  if (status === "failed" || status === "canceled") {
+    return "badge-error";
+  }
+  return "badge-warning";
+}
+
+function severityBadge(severity: string): string {
+  return severity === "critical" || severity === "high"
+    ? "badge-error"
+    : severity === "medium"
+      ? "badge-warning"
+      : "badge-neutral";
 }
 
 function integrationPresentation(integration: KiroIntegrationInspection): {
@@ -422,6 +1013,8 @@ function setupStyles(): string {
       opacity: 1;
     }
     .content { padding: 12px; display: grid; gap: 12px; }
+    .page { display: none; gap: 12px; }
+    .page.active { display: grid; }
     .feedback {
       border-left: 3px solid var(--vscode-focusBorder);
       padding: 7px 9px;
@@ -474,9 +1067,11 @@ function setupStyles(): string {
     .button-row {
       display: flex;
       flex-wrap: wrap;
+      align-items: center;
       gap: 7px;
       margin-top: 12px;
     }
+    .request-state { color: var(--vscode-descriptionForeground); }
     .setup-options {
       margin-top: 12px;
       border-top: 1px solid var(--vscode-panel-border);
@@ -523,6 +1118,34 @@ function setupStyles(): string {
       color: var(--vscode-descriptionForeground);
       font-weight: normal;
     }
+    .scan-facts { margin-top: 12px; }
+    .finding-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .finding-toolbar label {
+      display: grid;
+      gap: 4px;
+      color: var(--vscode-descriptionForeground);
+    }
+    select {
+      color: var(--vscode-dropdown-foreground);
+      background: var(--vscode-dropdown-background);
+      border: 1px solid var(--vscode-dropdown-border);
+      padding: 4px 7px;
+    }
+    pre {
+      max-height: 280px;
+      overflow: auto;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      padding: 8px;
+      background: var(--vscode-textCodeBlock-background);
+      font: 11px/1.4 var(--vscode-editor-font-family);
+    }
+    .error-text { color: var(--vscode-errorForeground); }
+    .empty-state h2 { margin: 0 0 6px; font-size: 14px; }
   `;
 }
 
@@ -543,7 +1166,7 @@ function escapeHtml(value: unknown): string {
     .replace(/'/g, "&#039;");
 }
 
-function isSetupMessage(value: unknown): value is { command: SetupCommand } {
+function isSetupMessage(value: unknown): value is SetupMessage {
   if (
     typeof value !== "object" ||
     value === null ||
@@ -554,11 +1177,45 @@ function isSetupMessage(value: unknown): value is { command: SetupCommand } {
   }
   return new Set<SetupCommand>([
     "refresh",
+    "selectTab",
     "connectIntegration",
     "showHookFile",
     "showMcpFile",
     "showSteeringFile",
+    "createRecovery",
+    "cancelRecovery",
+    "openTriage",
+    "closeTriage",
+    "requestRemediation",
+    "copyRemediationPrompt",
+    "exportScan",
+    "openArtifact",
+    "trackFinding",
   ]).has((value as { command: SetupCommand }).command);
+}
+
+function requiredValue<T>(value: T | undefined, name: string): T {
+  if (value === undefined || value === "") {
+    throw new Error(`Missing ${name}.`);
+  }
+  return value;
+}
+
+function requiredVersion(value: string | undefined): number {
+  const version = Number(value);
+  if (!Number.isSafeInteger(version) || version < 1) {
+    throw new Error("Missing or invalid request version.");
+  }
+  return version;
+}
+
+function requiredRemediationAction(
+  value: string,
+): "generate" | "apply" | "verify" {
+  if (value !== "generate" && value !== "apply" && value !== "verify") {
+    throw new Error("Invalid remediation action.");
+  }
+  return value;
 }
 
 async function regularFileExists(candidate: string): Promise<boolean> {

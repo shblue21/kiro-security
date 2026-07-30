@@ -28,6 +28,22 @@ function pythonExecutable() {
   ).trim();
 }
 
+function loadSetupViewModule() {
+  const Module = require("node:module");
+  const originalLoad = Module._load;
+  Module._load = function loadWithVscodeStub(request, parent, isMain) {
+    if (request === "vscode") {
+      return {};
+    }
+    return originalLoad.call(this, request, parent, isMain);
+  };
+  try {
+    return require("../out/packages/extension/src/setupView.js");
+  } finally {
+    Module._load = originalLoad;
+  }
+}
+
 test("extension manifest exposes setup without a Power-import command", () => {
   assert.equal(manifest.main, "./out/packages/extension/src/extension.js");
   assert.deepEqual(manifest.extensionKind, ["workspace"]);
@@ -69,6 +85,151 @@ test("setup view connects steering, direct MCP, and Hook without Agent or Power 
   assert.match(extension, /new SecuritySetupView\(/);
   assert.doesNotMatch(integration, /before\.state === "mismatch"/);
   assert.match(setup, /input\.integration\.state === "unavailable"[\s\S]*\? "disabled"/);
+});
+
+test("Dashboard and Findings render exact recovery and follow-up controls", () => {
+  const { renderSetupHtml } = loadSetupViewModule();
+  const scans = [
+    {
+      id: "scan-one",
+      workspaceId: "workspace-one",
+      status: "running",
+      phase: "discovery",
+      mode: "standard",
+      scope: ".",
+      scanDir: "/global/scans/one",
+      startedAt: "2026-07-30T00:00:00Z",
+      updatedAt: "2026-07-30T00:01:00Z",
+      target: {
+        path: "/source/alpha",
+        revision: "alpha-revision",
+      },
+      progress: {
+        reviewItemsTotal: 2,
+        reviewItemsCompleted: 1,
+        reportableFindingsCount: 0,
+      },
+    },
+    {
+      id: "scan-two",
+      workspaceId: "workspace-two",
+      status: "complete",
+      phase: "reporting",
+      mode: "standard",
+      scope: ".",
+      scanDir: "/global/scans/two",
+      startedAt: "2026-07-30T00:00:00Z",
+      completedAt: "2026-07-30T00:02:00Z",
+      updatedAt: "2026-07-30T00:02:00Z",
+      target: {
+        path: "/source/beta",
+        revision: "beta-revision",
+      },
+      progress: {
+        reviewItemsTotal: 1,
+        reviewItemsCompleted: 1,
+        reportableFindingsCount: 1,
+      },
+    },
+  ];
+  const dashboard = {
+    scans,
+    findings: [
+      {
+        occurrenceId: "occurrence-one",
+        findingId: "finding-one",
+        scanId: "scan-two",
+        title: "Example finding",
+        summary: "Example summary",
+        severity: "high",
+        confidence: "high",
+        remediation: "Apply the reviewed fix.",
+        details: { evidence: "validated" },
+        locations: [
+          {
+            path: "src/example.ts",
+            startLine: 4,
+            endLine: 5,
+          },
+        ],
+        triage: { status: "open" },
+      },
+    ],
+    recoveryRequests: [
+      {
+        id: "recovery-one",
+        scanId: "scan-one",
+        status: "pending",
+        version: 1,
+        createdAt: "2026-07-30T00:01:00Z",
+        updatedAt: "2026-07-30T00:01:00Z",
+      },
+    ],
+    remediationRequests: [
+      {
+        requestId: "remediation-one",
+        occurrenceId: "occurrence-one",
+        state: "requested",
+        version: 2,
+        pendingAction: "generate",
+        createdAt: "2026-07-30T00:02:00Z",
+        updatedAt: "2026-07-30T00:02:00Z",
+      },
+    ],
+  };
+  const integration = {
+    state: "ready",
+    detail: "ready",
+    serverKey: TEST_SERVER_KEY,
+    hook: {
+      state: "ready",
+      registrationState: "installed",
+      hookPath: "/home/.kiro/hooks/kiro-security-power.json",
+      bridgePath: "/global/hook.py",
+      detail: "ready",
+    },
+    mcp: { state: "installed", detail: "ready" },
+    steering: { state: "installed", detail: "ready" },
+    runtime: { ready: true, detail: "ready" },
+    approval: {
+      state: "installed",
+      detail: "ready",
+      path: "/home/.kiro/settings/permissions.yaml",
+    },
+    hookPath: "/home/.kiro/hooks/kiro-security-power.json",
+    mcpPath: "/home/.kiro/settings/mcp.json",
+    steeringPath: "/home/.kiro/steering/kiro-security-power.md",
+    runtimeRoot: "/global/runtime",
+  };
+  const html = renderSetupHtml({
+    webview: { cspSource: "vscode-webview:" },
+    stateRoot: "/global",
+    integration,
+    activeTab: "findings",
+    dashboard,
+  });
+
+  assert.match(html, /id="scan-filter"/);
+  assert.match(html, /data-scan-id="scan-two"/);
+  assert.match(html, /\/source\/beta/);
+  assert.match(html, /beta-revision/);
+  assert.match(html, /Copy generate prompt again/);
+  assert.match(html, /data-command="copyRemediationPrompt"/);
+  assert.match(html, /Copy resume prompt again/);
+  assert.match(html, /data-command="cancelRecovery"/);
+  assert.match(html, /data-request-id="recovery-one"/);
+  assert.match(html, /data-command="trackFinding"/);
+});
+
+test("tracking action creates a durable backend request before copying a prompt", () => {
+  const setup = readFileSync("packages/extension/src/setupView.ts", "utf8");
+  assert.match(
+    setup,
+    /callWorkbench<[\s\S]*?>\("createTracking", \{\s*occurrenceId: exactOccurrence/,
+  );
+  assert.match(setup, /Tracking request: \$\{tracking\.requestId\}/);
+  assert.match(setup, /Expected version: \$\{tracking\.version\}/);
+  assert.match(setup, /Claim and deliver the exact tracking request/);
 });
 
 test("Hook registration matches only the exact direct MCP tool IDs", () => {
@@ -289,11 +450,13 @@ test("extension foundation uses one external global workbench boundary", () => {
 test("auto-inclusion steering owns normal-chat orchestration without a Power entry point", () => {
   const steering = readFileSync("steering/kiro-security-power.md", "utf8");
   assert.match(steering, /inclusion: auto/);
-  assert.match(steering, /Kiro Agent chat owns scan start/);
-  assert.match(steering, /does not provide a Dashboard Start action/);
-  assert.match(steering, /never create or require `\.kiro\/security-power`/);
+  assert.match(steering, /ordinary Kiro\s+Agent chat/);
+  assert.match(steering, /The VSIX and the\s+direct `kiro_security_\*` MCP tools own deterministic/);
+  assert.match(steering, /Never create or require `\.kiro\/security-power`/);
   assert.match(steering, /setupRevision.*setupDigest.*normalized setup/s);
   assert.match(steering, /fresh UUID-shaped `requestNonce`/);
+  assert.match(steering, /exactly six independent discovery workers/);
+  assert.match(steering, /kiro_security_complete_scan/);
   assert.equal(existsSync("powers/kiro-security-power/POWER.md"), false);
   assert.equal(existsSync("powers/kiro-security-power/mcp.json"), false);
 });
@@ -515,6 +678,9 @@ test("installation MCP identity is random, persistent, and private", async () =>
 });
 
 test("direct runtime is materialized in global storage and launches the MCP server", async () => {
+  const { WorkbenchAdminClient } = require(
+    "../out/packages/extension/src/workbenchClient.js",
+  );
   const {
     getDirectLauncherPath,
     initializeDirectRuntime,
@@ -558,6 +724,14 @@ test("direct runtime is materialized in global storage and launches the MCP serv
     const responses = transcript.trim().split(/\r?\n/).map((line) => JSON.parse(line));
     assert.equal(responses[0].result.serverInfo.name, "kiro-security-power");
     assert.ok(responses[1].result.tools.some((tool) => tool.name === "kiro_security_start_scan"));
+    const dashboard = await new WorkbenchAdminClient(
+      python,
+      launcherPath,
+      stateRoot,
+      scanRoot,
+    ).call("dashboard");
+    assert.deepEqual(dashboard.scans, []);
+    assert.deepEqual(dashboard.findings, []);
     assert.equal(existsSync(join(stateRoot, "runtime", "direct-mcp", "engine", "kiro_security", "__pycache__")), false);
   } finally {
     await rm(temporary, { force: true, recursive: true });
