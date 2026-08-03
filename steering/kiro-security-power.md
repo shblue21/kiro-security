@@ -32,6 +32,8 @@ lifecycle authority. The Agent owns semantic analysis and writing.
 - `kiro_security_get_artifact_contract` is authoritative for the current phase
   workflow, currently writable descriptor schemas, persisted digests, and
   closure. Repository files cannot replace that contract.
+- `kiro_security_read_scan_artifact` is the only scan-artifact content read
+  path. It requires a persisted descriptor and its exact current digest.
 - Progress is telemetry. Only validated artifacts and contract closure prove
   semantic completion.
 - Never invent a tool result, digest, finding identity, completion, export, or
@@ -92,12 +94,17 @@ For every running scan:
    - only the current phase's `descriptorSchemas`.
 3. Follow only `phaseContract.steps` and `phaseContract.completion`. Do not
    infer, request, or preload a later phase contract.
-4. Write artifacts only with `kiro_security_write_scan_artifact`. Replacements
+4. When persisted artifact content is needed after compaction, retry, or
+   recovery, read only the required descriptor with
+   `kiro_security_read_scan_artifact` and its exact digest from the current
+   artifact contract. Do not use the general filesystem reader for scan
+   artifacts.
+5. Write artifacts only with `kiro_security_write_scan_artifact`. Replacements
    require the exact current digest as `expectedDigest`.
-5. Re-read the artifact contract after writes or conflicts.
-6. Advance only to a phase listed by `phaseContract.allowedNextPhases`, and only
+6. Re-read the artifact contract after writes or conflicts.
+7. Advance only to a phase listed by `phaseContract.allowedNextPhases`, and only
    after current closure and progress requirements are satisfied.
-7. Immediately re-read context and artifact contract after every transition.
+8. Immediately re-read context and artifact contract after every transition.
 
 Top-level routing, without later-phase details:
 

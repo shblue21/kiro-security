@@ -674,6 +674,32 @@ class Workbench:
             scan = self._require_owned_scan(connection, scan_uuid, owner_hash)
             return self.semantic_artifacts.contract(scan)
 
+    def read_scan_artifact(
+        self,
+        scan_id,
+        descriptor,
+        expected_digest,
+        owner_session_hash=None,
+    ):
+        scan_uuid = _require_uuid(scan_id, "scan")
+        owner_hash = require_session_hash(owner_session_hash)
+        expected = _optional_digest(expected_digest)
+        if expected is None:
+            raise WorkbenchError(
+                "artifact_digest_required",
+                "Reading an artifact requires its current expected digest.",
+            )
+        with self._owned_scan_lock(
+            scan_uuid,
+            owner_hash,
+        ), self.database.connect() as connection:
+            scan = self._require_owned_scan(connection, scan_uuid, owner_hash)
+            return self.semantic_artifacts.read_for_agent(
+                scan,
+                descriptor,
+                expected,
+            )
+
     def write_scan_artifact(
         self,
         scan_id,

@@ -1478,6 +1478,34 @@ class PhaseThreeWorkflowTests(unittest.TestCase):
             "discovery-round-1-worker-1-checkpoint",
             checkpoint,
         )
+        readback = self.workbench.read_scan_artifact(
+            scan_id,
+            "discovery-round-1-worker-1-checkpoint",
+            written["artifact"]["digest"],
+            owner_session_hash=self.owner_a,
+        )
+        self.assertEqual(readback["content"], {"scanId": scan_id, **checkpoint})
+        self.assertEqual(
+            readback["artifact"]["digest"],
+            written["artifact"]["digest"],
+        )
+        self.assertNotIn("path", readback["artifact"])
+        with self.assertRaises(WorkbenchError) as raised:
+            self.workbench.read_scan_artifact(
+                scan_id,
+                "discovery-round-1-worker-1-checkpoint",
+                written["artifact"]["digest"],
+                owner_session_hash=self.owner_b,
+            )
+        self.assertEqual(raised.exception.code, "scan_not_owned")
+        with self.assertRaises(WorkbenchError) as raised:
+            self.workbench.read_scan_artifact(
+                scan_id,
+                "discovery-round-1-worker-1-checkpoint",
+                "0" * 64,
+                owner_session_hash=self.owner_a,
+            )
+        self.assertEqual(raised.exception.code, "artifact_changed")
         checkpoint_path = Path(written["artifact"]["path"])
         self.assertEqual(
             json.loads(checkpoint_path.read_text(encoding="utf-8"))["attempt"],
@@ -1634,6 +1662,40 @@ class PhaseThreeWorkflowTests(unittest.TestCase):
             )
         )
 
+    def test_scan_artifact_read_rejects_invalid_and_unsafe_files(self):
+        _workspace_id, scan_id = self._start()
+        written = self._write(
+            scan_id,
+            "brief",
+            {
+                "mode": "standard",
+                "target": str(self.target),
+                "scope": ".",
+            },
+        )
+        digest = written["artifact"]["digest"]
+        with self.assertRaises(WorkbenchError) as raised:
+            self.workbench.read_scan_artifact(
+                scan_id,
+                "../../outside",
+                digest,
+                owner_session_hash=self.owner_a,
+            )
+        self.assertEqual(raised.exception.code, "invalid_artifact_descriptor")
+
+        artifact_path = Path(written["artifact"]["path"])
+        outside = self.root / "outside-brief.json"
+        artifact_path.replace(outside)
+        artifact_path.symlink_to(outside)
+        with self.assertRaises(WorkbenchError) as raised:
+            self.workbench.read_scan_artifact(
+                scan_id,
+                "brief",
+                digest,
+                owner_session_hash=self.owner_a,
+            )
+        self.assertEqual(raised.exception.code, "unsafe_artifact_path")
+
     def test_phase_skip_and_unclosed_coverage_are_rejected(self):
         _workspace_id, scan_id = self._start()
         self._write(
@@ -1775,6 +1837,7 @@ class PhaseThreeWorkflowTests(unittest.TestCase):
         self.assertIn("exactly four usable workers", deep)
         self.assertIn("Retry or replace only the failed or missing worker slot", deep)
         self.assertIn("latest checkpoint with expectedDigest CAS", deep)
+        self.assertIn("kiro_security_read_scan_artifact", deep)
         self.assertIn("checkpoints never contribute to lineage", deep)
         self.assertIn("cannot produce four usable outputs", deep)
         self.assertIn("Never shrink the round", deep)

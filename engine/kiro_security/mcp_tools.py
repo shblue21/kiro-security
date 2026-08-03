@@ -223,6 +223,26 @@ TOOL_DEFINITIONS = (
         "annotations": {"readOnlyHint": True, "idempotentHint": True},
     },
     {
+        "name": "kiro_security_read_scan_artifact",
+        "title": "Read one validated scan artifact",
+        "description": (
+            "Read one digest-bound semantic artifact owned by this Kiro chat. "
+            "The server resolves the allowlisted descriptor inside the scan; "
+            "arbitrary filesystem paths are not accepted."
+        ),
+        "inputSchema": _attested_schema(
+            {
+                "scanId": _uuid("Durable scan UUID."),
+                "descriptor": _string("Allowlisted semantic artifact descriptor."),
+                "expectedDigest": _sha256(
+                    "Exact digest from the current artifact contract."
+                ),
+            },
+            required=("scanId", "descriptor", "expectedDigest"),
+        ),
+        "annotations": {"readOnlyHint": True, "idempotentHint": True},
+    },
+    {
         "name": "kiro_security_write_scan_artifact",
         "title": "Write one validated scan artifact",
         "description": (
@@ -579,6 +599,14 @@ class WorkbenchTools:
             _reject_unknown(args, ("scanId",))
             return self.workbench.get_scan_artifact_contract(
                 _required_string(args, "scanId"),
+                owner_session_hash=owner_session_hash,
+            )
+        if name == "kiro_security_read_scan_artifact":
+            _reject_unknown(args, ("scanId", "descriptor", "expectedDigest"))
+            return self.workbench.read_scan_artifact(
+                _required_string(args, "scanId"),
+                _required_string(args, "descriptor"),
+                _required_sha256(args, "expectedDigest"),
                 owner_session_hash=owner_session_hash,
             )
         if name == "kiro_security_write_scan_artifact":

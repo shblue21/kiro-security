@@ -1,6 +1,7 @@
 """Validated scan-local semantic artifact staging for Kiro Agent workflows."""
 
 import hashlib
+import hmac
 import json
 import re
 import stat
@@ -9,6 +10,7 @@ from pathlib import Path
 from .artifacts import (
     ArtifactContractError,
     _atomic_write as _write_scan_file,
+    _read_regular_file as _read_scan_file,
     canonical_json_bytes,
 )
 from .errors import WorkbenchError
@@ -171,6 +173,60 @@ class SemanticArtifactStore:
         path = _semantic_root(_scan_dir(scan)) / ("%s.json" % normalized)
         data = _read_json(path)
         return data
+
+    def read_for_agent(self, scan, descriptor, expected_digest):
+        normalized = _require_descriptor(descriptor, scan["mode"])
+        root = _scan_dir(scan)
+        persisted = {
+            item["descriptor"]: item
+            for item in self._persisted(root, scan["mode"])
+        }
+        artifact = persisted.get(normalized)
+        if artifact is None:
+            raise WorkbenchError(
+                "artifact_missing",
+                "Requested semantic artifact does not exist.",
+            )
+        if not hmac.compare_digest(artifact["digest"], expected_digest):
+            raise WorkbenchError(
+                "artifact_changed",
+                "Artifact changed after its contract was read.",
+            )
+        try:
+            encoded = _read_scan_file(
+                root,
+                "artifacts/semantic/%s.json" % normalized,
+            )
+        except ArtifactContractError as exc:
+            raise WorkbenchError(
+                "unsafe_artifact_path",
+                "Semantic artifact path is missing or unsafe.",
+            ) from exc
+        actual_digest = hashlib.sha256(encoded).hexdigest()
+        if not hmac.compare_digest(actual_digest, expected_digest):
+            raise WorkbenchError(
+                "artifact_changed",
+                "Artifact changed while it was being read.",
+            )
+        content = _decode_json(encoded)
+        _validate_content(scan, normalized, content)
+        if DEEP_WORKER_RE.fullmatch(normalized):
+            self._require_deep_worker_receipt(scan, content)
+        elif DEEP_CHECKPOINT_RE.fullmatch(normalized):
+            self._require_deep_checkpoint_binding(scan, content)
+        elif DEEP_MERGE_RE.fullmatch(normalized):
+            round_number = int(DEEP_MERGE_RE.fullmatch(normalized).group(1))
+            self._require_deep_merge_binding(scan, round_number, content)
+        elif normalized == "canonical-result":
+            self.require_candidate_finding_binding(scan, content)
+        return {
+            "artifact": {
+                "descriptor": normalized,
+                "digest": actual_digest,
+                "sizeBytes": len(encoded),
+            },
+            "content": content,
+        }
 
     def _deep_contract(self, scan, persisted):
         brief = next(
@@ -1756,12 +1812,22 @@ def _read_json(path):
     if digest is None:
         raise WorkbenchError("artifact_missing", "Required semantic artifact is missing.")
     try:
+        return _decode_json(path.read_bytes())
+    except OSError as exc:
+        raise WorkbenchError("invalid_artifact", "Semantic artifact JSON is invalid.") from exc
+
+
+def _decode_json(content):
+    try:
         value = json.loads(
-            path.read_text(encoding="utf-8"),
+            content.decode("utf-8"),
             parse_constant=lambda token: (_raise_nonfinite(token)),
         )
-    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
-        raise WorkbenchError("invalid_artifact", "Semantic artifact JSON is invalid.") from exc
+    except (UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        raise WorkbenchError(
+            "invalid_artifact",
+            "Semantic artifact JSON is invalid.",
+        ) from exc
     if not isinstance(value, dict):
         raise WorkbenchError("invalid_artifact", "Semantic artifact must be an object.")
     return value

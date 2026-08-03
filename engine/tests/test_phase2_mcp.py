@@ -207,6 +207,7 @@ class PhaseTwoMcpTests(unittest.TestCase):
                     "kiro_security_get_scan_context",
                     "kiro_security_update_scan_progress",
                     "kiro_security_get_artifact_contract",
+                    "kiro_security_read_scan_artifact",
                     "kiro_security_write_scan_artifact",
                     "kiro_security_complete_scan",
                     "kiro_security_export_scan",
@@ -254,6 +255,19 @@ class PhaseTwoMcpTests(unittest.TestCase):
             self.assertNotIn(
                 "destructiveHint",
                 tools_by_name["kiro_security_update_scan_progress"]["annotations"],
+            )
+            self.assertTrue(
+                tools_by_name["kiro_security_read_scan_artifact"]["annotations"][
+                    "readOnlyHint"
+                ]
+            )
+            self.assertEqual(
+                set(
+                    tools_by_name["kiro_security_read_scan_artifact"][
+                        "inputSchema"
+                    ]["required"]
+                ),
+                {"requestNonce", "scanId", "descriptor", "expectedDigest"},
             )
 
             capabilities = client.call_tool(
@@ -324,7 +338,7 @@ class PhaseTwoMcpTests(unittest.TestCase):
             self.assertFalse(contract["phaseContract"]["readAhead"])
             self.assertEqual(set(contract["descriptorSchemas"]), {"brief"})
             self.assertNotIn("validation", json.dumps(contract["phaseContract"]))
-            client.call_tool(
+            brief_write = client.call_tool(
                 "kiro_security_write_scan_artifact",
                 {
                     "scanId": scan_id,
@@ -336,10 +350,38 @@ class PhaseTwoMcpTests(unittest.TestCase):
                         "scope": ".",
                     },
                 },
-            )
+            )["structuredContent"]
             client.call_tool(
                 "kiro_security_update_scan_progress",
                 {"scanId": scan_id, "phase": "threat_model"},
+            )
+            brief_read = client.call_tool(
+                "kiro_security_read_scan_artifact",
+                {
+                    "scanId": scan_id,
+                    "descriptor": "brief",
+                    "expectedDigest": brief_write["artifact"]["digest"],
+                },
+            )["structuredContent"]
+            self.assertEqual(brief_read["content"]["scanId"], scan_id)
+            self.assertEqual(
+                brief_read["artifact"]["digest"],
+                brief_write["artifact"]["digest"],
+            )
+            self.assertNotIn("path", brief_read["artifact"])
+            rejected_path = client.call_tool(
+                "kiro_security_read_scan_artifact",
+                {
+                    "scanId": scan_id,
+                    "descriptor": "brief",
+                    "expectedDigest": brief_write["artifact"]["digest"],
+                    "path": "/tmp/not-accepted",
+                },
+            )
+            self.assertTrue(rejected_path["isError"])
+            self.assertEqual(
+                rejected_path["structuredContent"]["error"]["code"],
+                "invalid_arguments",
             )
             client.call_tool(
                 "kiro_security_write_scan_artifact",

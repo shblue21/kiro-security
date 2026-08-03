@@ -240,8 +240,10 @@ DEEP_DISCOVERY = {
         "Preserve every accepted complete worker artifact and every available latest "
         "partial checkpoint. Retry or replace only the failed or missing worker slot "
         "with the identical canonical brief and worklist until the round has exactly "
-        "four usable outputs. A replacement may resume its assigned checkpoint, but "
-        "the coordinator must not use checkpoint contents as merge or novelty input.",
+        "four usable outputs. A replacement may resume its assigned checkpoint by "
+        "reading that exact descriptor and digest with "
+        "kiro_security_read_scan_artifact, but the coordinator must not use checkpoint "
+        "contents as merge or novelty input.",
         "Once a complete worker artifact is accepted, that artifact and its checkpoint "
         "are immutable. Only the complete worker artifact counts as a usable worker or "
         "merge input; checkpoints never contribute to lineage, novelty, closure, or "

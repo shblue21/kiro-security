@@ -26,6 +26,7 @@ MCP_TOOL_NAMES = (
     "kiro_security_get_scan_context",
     "kiro_security_update_scan_progress",
     "kiro_security_get_artifact_contract",
+    "kiro_security_read_scan_artifact",
     "kiro_security_write_scan_artifact",
     "kiro_security_complete_scan",
     "kiro_security_export_scan",
