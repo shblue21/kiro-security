@@ -320,7 +320,10 @@ class PhaseTwoMcpTests(unittest.TestCase):
                 "kiro_security_get_artifact_contract",
                 {"scanId": scan_id},
             )["structuredContent"]
-            self.assertIn("derived-writeup", contract["requiredDescriptors"])
+            self.assertEqual(contract["phaseContract"]["phase"], "preflight")
+            self.assertFalse(contract["phaseContract"]["readAhead"])
+            self.assertEqual(set(contract["descriptorSchemas"]), {"brief"})
+            self.assertNotIn("validation", json.dumps(contract["phaseContract"]))
             client.call_tool(
                 "kiro_security_write_scan_artifact",
                 {
@@ -599,18 +602,8 @@ class PhaseTwoMcpTests(unittest.TestCase):
                 "mode": "deep",
                 "target": str(self.target),
                 "scope": ".",
+                "worklist": [{"id": "app-source", "path": "app.py"}],
             },
-            owner_session_hash=owner_session_hash,
-        )
-        workbench.update_scan_progress(
-            scan_id,
-            phase="threat_model",
-            owner_session_hash=owner_session_hash,
-        )
-        workbench.write_scan_artifact(
-            scan_id,
-            "threat-model",
-            {"scanId": scan_id, "summary": "Deep progress test."},
             owner_session_hash=owner_session_hash,
         )
         first = workbench.update_scan_progress(

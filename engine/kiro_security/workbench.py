@@ -378,13 +378,14 @@ class Workbench:
                     "recovery_incomplete",
                     "Recovery context requires request, token, and expected version.",
                 )
-            delivered = self.followup.deliver_scan_recovery(
-                recovery_request_id,
-                recovery_token,
-                expected_version,
-                owner_hash,
-                scan_uuid,
-            )
+            with self._scan_lock_for_id(scan_uuid):
+                self.followup.deliver_scan_recovery(
+                    recovery_request_id,
+                    recovery_token,
+                    expected_version,
+                    owner_hash,
+                    scan_uuid,
+                )
         with self.database.connect() as connection:
             scan = self._require_owned_scan(connection, scan_uuid, owner_hash)
             workspace = self._require_workspace(connection, scan["workspace_id"])
@@ -426,7 +427,10 @@ class Workbench:
             "reportableFindingsCount",
         )
         requested_pass = _optional_positive_int(deep_review_pass, "deepReviewPass")
-        with self.database.connect() as connection:
+        with self._owned_scan_lock(
+            scan_uuid,
+            owner_hash,
+        ), self.database.connect() as connection:
             with immediate_transaction(connection):
                 scan = self._require_owned_scan(connection, scan_uuid, owner_hash)
                 if scan["status"] != "running":
@@ -452,16 +456,22 @@ class Workbench:
                         "progress_regression",
                         "Scan phase cannot move backward.",
                     )
-                if next_phase_index > current_phase_index + 1:
-                    raise WorkbenchError(
-                        "phase_skipped",
-                        "Scan phases must advance one semantic phase at a time.",
-                    )
-                if next_phase_index == current_phase_index + 1:
+                if next_phase != scan["phase"]:
                     self.semantic_artifacts.require_phase_exit(
                         scan,
                         scan["phase"],
                     )
+                    allowed_next = self.semantic_artifacts.allowed_next_phases(scan)
+                    if next_phase not in allowed_next:
+                        raise WorkbenchError(
+                            "phase_skipped",
+                            "The authoritative %s %s phase can advance only to: %s."
+                            % (
+                                scan["mode"],
+                                scan["phase"],
+                                ", ".join(allowed_next) or "no later phase",
+                            ),
+                        )
                 if (
                     scan["phase"] == "discovery"
                     and next_phase != "discovery"
@@ -571,7 +581,10 @@ class Workbench:
         scan_uuid = _require_uuid(scan_id, "scan")
         owner_hash = require_session_hash(owner_session_hash)
         failure_message = _optional_text(message, 2400)
-        with self.database.connect() as connection:
+        with self._owned_scan_lock(
+            scan_uuid,
+            owner_hash,
+        ), self.database.connect() as connection:
             with immediate_transaction(connection):
                 scan = self._require_owned_scan(connection, scan_uuid, owner_hash)
                 if scan["status"] == "failed":
@@ -614,7 +627,10 @@ class Workbench:
         # type: (str, object) -> dict
         scan_uuid = _require_uuid(scan_id, "scan")
         owner_hash = require_session_hash(owner_session_hash)
-        with self.database.connect() as connection:
+        with self._owned_scan_lock(
+            scan_uuid,
+            owner_hash,
+        ), self.database.connect() as connection:
             with immediate_transaction(connection):
                 scan = self._require_owned_scan(connection, scan_uuid, owner_hash)
                 workspace = self._require_workspace(connection, scan["workspace_id"])
@@ -669,7 +685,10 @@ class Workbench:
         scan_uuid = _require_uuid(scan_id, "scan")
         owner_hash = require_session_hash(owner_session_hash)
         expected = _optional_digest(expected_digest)
-        with self.database.connect() as connection:
+        with self._owned_scan_lock(
+            scan_uuid,
+            owner_hash,
+        ), self.database.connect() as connection:
             scan = self._require_owned_scan(connection, scan_uuid, owner_hash)
             artifact = self.semantic_artifacts.write(
                 scan,
@@ -683,10 +702,7 @@ class Workbench:
     def complete_scan(self, scan_id, owner_session_hash=None):
         scan_uuid = _require_uuid(scan_id, "scan")
         owner_hash = require_session_hash(owner_session_hash)
-        with self.database.connect() as connection:
-            scan = self._require_owned_scan(connection, scan_uuid, owner_hash)
-            scan_dir = Path(scan["scan_dir"])
-        with _scan_lock(scan_dir):
+        with self._owned_scan_lock(scan_uuid, owner_hash):
             with self.database.connect() as connection:
                 scan = self._require_owned_scan(connection, scan_uuid, owner_hash)
                 if scan["status"] == "failed":
@@ -729,6 +745,10 @@ class Workbench:
                 )
                 canonical_findings = canonical.get("findings", {}).get(
                     "findings",
+                )
+                self.semantic_artifacts.require_candidate_finding_binding(
+                    scan,
+                    canonical,
                 )
                 if (
                     not isinstance(canonical_findings, list)
@@ -1956,6 +1976,22 @@ class Workbench:
                 "Scan does not belong to this Kiro chat.",
             )
         return scan
+
+    def _owned_scan_lock(self, scan_id, owner_session_hash):
+        with self.database.connect() as connection:
+            scan = self._require_owned_scan(
+                connection,
+                scan_id,
+                owner_session_hash,
+            )
+            scan_dir = Path(scan["scan_dir"])
+        return _scan_lock(scan_dir)
+
+    def _scan_lock_for_id(self, scan_id):
+        with self.database.connect() as connection:
+            scan = self._require_scan(connection, scan_id)
+            scan_dir = Path(scan["scan_dir"])
+        return _scan_lock(scan_dir)
 
     @staticmethod
     def _running_scan(connection, workspace_id):

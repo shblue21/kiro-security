@@ -451,12 +451,15 @@ test("auto-inclusion steering owns normal-chat orchestration without a Power ent
   const steering = readFileSync("steering/kiro-security-power.md", "utf8");
   assert.match(steering, /inclusion: auto/);
   assert.match(steering, /ordinary Kiro\s+Agent chat/);
-  assert.match(steering, /The VSIX and the\s+direct `kiro_security_\*` MCP tools own deterministic/);
+  assert.match(steering, /The VSIX and direct\s+`kiro_security_\*` MCP tools own workspace/);
   assert.match(steering, /Never create or require `\.kiro\/security-power`/);
-  assert.match(steering, /setupRevision.*setupDigest.*normalized setup/s);
+  assert.match(steering, /exact returned setup revision,\s+digest, and normalized value/);
   assert.match(steering, /fresh UUID-shaped `requestNonce`/);
-  assert.match(steering, /exactly six independent discovery workers/);
+  assert.match(steering, /`phaseContract\.readAhead` equal to `false`/);
+  assert.match(steering, /preflight -> discovery/);
   assert.match(steering, /kiro_security_complete_scan/);
+  assert.doesNotMatch(steering, /^## (Threat-model|Validation|Attack-path) phase/m);
+  assert.doesNotMatch(steering, /^## (Standard|Diff|Deep) discovery/m);
   assert.equal(existsSync("powers/kiro-security-power/POWER.md"), false);
   assert.equal(existsSync("powers/kiro-security-power/mcp.json"), false);
 });
@@ -885,6 +888,7 @@ test("actual VSIX selection contains direct integration assets and no Power entr
   assert.ok(files.includes("engine/kiro_security/workbench.py"));
   assert.ok(files.includes("engine/kiro_security/mcp_server.py"));
   assert.ok(files.includes("engine/kiro_security/mcp_tools.py"));
+  assert.ok(files.includes("engine/kiro_security/phase_contracts.py"));
   assert.ok(files.includes("node_modules/jsonc-parser/lib/umd/main.js"));
   assert.ok(files.includes("node_modules/yaml/dist/index.js"));
   assert.ok(files.includes("out/packages/extension/src/approvalPolicy.js"));

@@ -213,8 +213,8 @@ TOOL_DEFINITIONS = (
         "name": "kiro_security_get_artifact_contract",
         "title": "Get authoritative scan artifact contract",
         "description": (
-            "Read mode-specific required descriptors, JSON schemas, phase closure, "
-            "and already persisted artifacts for a running scan."
+            "Read the current DB-authoritative phase workflow, only that phase's "
+            "writable JSON schemas, final closure, and persisted artifacts."
         ),
         "inputSchema": _attested_schema(
             {"scanId": _uuid("Durable scan UUID.")},
