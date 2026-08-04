@@ -64,7 +64,7 @@
     "lint": "tsc -p tsconfig.json --noEmit",
     "package:list": "vsce ls",
     "package:vsix": "npm run clean && npm run compile && node scripts/prepare-dist.mjs && vsce package --allow-missing-repository --out dist/kiro-security-power.vsix",
-    "test:node": "node --test tests/foundation.test.mjs",
+    "test:node": "node --test tests/approval.test.mjs tests/contracts.test.mjs tests/hook.test.mjs tests/integration-files.test.mjs tests/packaging.test.mjs tests/runtime.test.mjs tests/view.test.mjs",
     "test:python": "python3 -m unittest discover -s engine/tests -v",
     "test": "npm run clean && npm run compile && npm run lint && npm run test:node && npm run test:python && npm run package:list"
   },

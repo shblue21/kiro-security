@@ -14,7 +14,6 @@ from pathlib import Path
 
 from kiro_security.artifacts import (
     ArtifactContractError,
-    build_findings_csv,
     canonical_json_bytes,
     derive_finding_identity,
     finalize_scan,
@@ -22,6 +21,7 @@ from kiro_security.artifacts import (
     write_csv_projection,
     write_sarif_projection,
 )
+from kiro_security.artifact_projections import build_findings_csv
 
 
 class ArtifactFinalizerTest(unittest.TestCase):

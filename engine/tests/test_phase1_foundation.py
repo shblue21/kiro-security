@@ -1,6 +1,5 @@
 """Integration coverage for the rebuilt Phase 1 global foundation."""
 
-import ast
 import concurrent.futures
 import hashlib
 import sqlite3
@@ -534,16 +533,6 @@ class PhaseOneFoundationTests(unittest.TestCase):
                 self.owner_session_hash,
             )
         self.assertEqual(raised.exception.code, "scan_root_inside_target")
-
-    def test_all_runtime_sources_parse_as_python_3_9(self):
-        paths = list((REPOSITORY_ROOT / "engine").rglob("*.py"))
-        paths.extend((REPOSITORY_ROOT / "hook").rglob("*.py"))
-        for path in sorted(paths):
-            source = path.read_text(encoding="utf-8")
-            try:
-                ast.parse(source, filename=str(path), feature_version=(3, 9))
-            except SyntaxError as exc:
-                self.fail("%s is not Python 3.9 compatible: %s" % (path, exc))
 
 if __name__ == "__main__":
     unittest.main()

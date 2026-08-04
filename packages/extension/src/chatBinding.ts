@@ -17,7 +17,6 @@ import {
   type HookRegistrationMutation,
   type HookRegistrationState,
 } from "./chatBindingFiles";
-import { resolvePythonExecutable } from "./pythonRuntime";
 
 const PROBE_TIMEOUT_MS = 10_000;
 
@@ -54,26 +53,7 @@ export class ChatBindingManager {
     );
   }
 
-  async inspect(): Promise<ChatBindingInspection> {
-    let pythonExecutable: string;
-    try {
-      pythonExecutable = await resolvePythonExecutable();
-    } catch (error) {
-      const registration = await inspectHookRegistration({
-        hookPath: this.hookPath,
-      });
-      return {
-        state: "unavailable",
-        registrationState: registration.state,
-        hookPath: this.hookPath,
-        bridgePath: this.bridgePath,
-        detail:
-          error instanceof Error
-            ? error.message
-            : "Python 3.9 or newer is unavailable.",
-      };
-    }
-
+  async inspect(pythonExecutable: string): Promise<ChatBindingInspection> {
     const document = buildHookRegistrationDocument({
       pythonExecutable,
       bridgePath: this.bridgePath,
@@ -100,12 +80,28 @@ export class ChatBindingManager {
     });
   }
 
-  async install(): Promise<HookRegistrationMutation> {
-    return this.prepareAndPublish();
+  async inspectUnavailable(detail: string): Promise<ChatBindingInspection> {
+    const registration = await inspectHookRegistration({
+      hookPath: this.hookPath,
+    });
+    return {
+      state: "unavailable",
+      registrationState: registration.state,
+      hookPath: this.hookPath,
+      bridgePath: this.bridgePath,
+      detail,
+    };
   }
 
-  private async prepareAndPublish(): Promise<HookRegistrationMutation> {
-    const pythonExecutable = await resolvePythonExecutable();
+  async install(
+    pythonExecutable: string,
+  ): Promise<HookRegistrationMutation> {
+    return this.prepareAndPublish(pythonExecutable);
+  }
+
+  private async prepareAndPublish(
+    pythonExecutable: string,
+  ): Promise<HookRegistrationMutation> {
     await materializeHookBridge({
       sourcePath: this.sourceBridgePath,
       bridgePath: this.bridgePath,

@@ -32,7 +32,6 @@ import {
   type RuntimeInspection,
 } from "./integrationFiles";
 import { resolvePythonExecutable } from "./pythonRuntime";
-import { WorkbenchAdminClient } from "./workbenchClient";
 
 export type KiroIntegrationState =
   | "absent"
@@ -71,6 +70,7 @@ export class KiroIntegrationManager {
   readonly launcherPath: string;
   private readonly extensionRoot: string;
   private readonly steeringSourcePath: string;
+  private pythonExecutablePromise: Promise<string> | undefined;
 
   constructor(
     context: vscode.ExtensionContext,
@@ -89,10 +89,10 @@ export class KiroIntegrationManager {
   async inspect(): Promise<KiroIntegrationInspection> {
     let pythonExecutable: string;
     try {
-      pythonExecutable = await resolvePythonExecutable();
+      pythonExecutable = await this.getPythonExecutable();
     } catch (error) {
       const [hook, approval] = await Promise.all([
-        this.chatBinding.inspect(),
+        this.chatBinding.inspectUnavailable(errorMessage(error)),
         inspectApprovalPolicy({ serverKey: this.serverKey }),
       ]);
       return {
@@ -115,7 +115,7 @@ export class KiroIntegrationManager {
     }
     const expected = this.expectedMcpConfiguration(pythonExecutable);
     const [hook, mcp, steering, runtime, approval] = await Promise.all([
-      this.chatBinding.inspect(),
+      this.chatBinding.inspect(pythonExecutable),
       inspectMcpRegistration({
         mcpPath: this.mcpPath,
         serverKey: this.serverKey,
@@ -164,7 +164,7 @@ export class KiroIntegrationManager {
       return { changed: false };
     }
     const pythonExecutable =
-      before.pythonExecutable ?? (await resolvePythonExecutable());
+      before.pythonExecutable ?? (await this.getPythonExecutable());
     let changed = false;
     changed =
       (
@@ -181,7 +181,8 @@ export class KiroIntegrationManager {
           steeringPath: this.steeringPath,
         })
       ).changed || changed;
-    changed = (await this.chatBinding.install()).changed || changed;
+    changed =
+      (await this.chatBinding.install(pythonExecutable)).changed || changed;
     changed =
       (
         await installMcpRegistration({
@@ -203,17 +204,24 @@ export class KiroIntegrationManager {
     return { changed };
   }
 
-  async callWorkbench<T>(
-    operation: string,
-    args: Readonly<Record<string, unknown>> = {},
-  ): Promise<T> {
-    const pythonExecutable = await resolvePythonExecutable();
-    return new WorkbenchAdminClient(
-      pythonExecutable,
-      this.launcherPath,
-      this.paths.stateRoot.fsPath,
-      this.paths.scanRoot.fsPath,
-    ).call<T>(operation, args);
+  getPythonExecutable(): Promise<string> {
+    if (!this.pythonExecutablePromise) {
+      const resolution = resolvePythonExecutable();
+      this.pythonExecutablePromise = resolution;
+      void resolution.then(
+        () => {
+          if (this.pythonExecutablePromise === resolution) {
+            this.pythonExecutablePromise = undefined;
+          }
+        },
+        () => {
+          if (this.pythonExecutablePromise === resolution) {
+            this.pythonExecutablePromise = undefined;
+          }
+        },
+      );
+    }
+    return this.pythonExecutablePromise;
   }
 
   private expectedMcpConfiguration(pythonExecutable: string) {
@@ -234,7 +242,6 @@ export class KiroIntegrationManager {
       scanRoot: this.paths.scanRoot.fsPath,
     });
   }
-
 }
 
 function combinedState(input: {

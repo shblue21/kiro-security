@@ -10,41 +10,38 @@ The manifest is not part of its own artifact list.  ``manifest_digest`` from
 
 from __future__ import annotations
 
-import csv
 import hashlib
-import io
 import json
-import os
 import re
-import secrets
-import stat
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path, PurePosixPath
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
-from urllib.parse import quote, urlsplit
+from pathlib import Path
+from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
+from urllib.parse import urlsplit
+
+from .artifact_projections import (
+    CLOSE_REASONS,
+    SARIF_LEVELS,
+    SARIF_SCHEMA,
+    SEVERITY_ORDER,
+    TRIAGE_STATUSES,
+    build_findings_csv,
+    build_report_markdown,
+    build_sarif,
+    validate_sarif as _validate_sarif,
+)
+
+from .scan_files import (
+    ArtifactContractError,
+    atomic_write,
+    read_regular_file,
+    require_scan_directory,
+    validate_scan_relative_path,
+)
 
 
 SCHEMA_VERSION = "1.0"
 FINGERPRINT_ALGORITHM = "codex-security/v1"
-SARIF_SCHEMA = (
-    "https://docs.oasis-open.org/sarif/sarif/v2.1.0/os/schemas/"
-    "sarif-schema-2.1.0.json"
-)
-SEVERITY_ORDER = {
-    "critical": 0,
-    "high": 1,
-    "medium": 2,
-    "low": 3,
-    "informational": 4,
-}
-SARIF_LEVELS = {
-    "critical": "error",
-    "high": "error",
-    "medium": "warning",
-    "low": "note",
-    "informational": "note",
-}
 CONFIDENCES = {"high", "medium", "low"}
 TARGET_KINDS = {"git_revision", "git_worktree", "git_diff", "directory_snapshot"}
 COVERAGE_MODES = {
@@ -65,8 +62,6 @@ DISPOSITIONS = {
     "not_applicable",
     "needs_follow_up",
 }
-TRIAGE_STATUSES = {"open", "closed"}
-CLOSE_REASONS = {"already_fixed", "wont_fix", "false_positive"}
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._/-]*$")
 _ID_RE = re.compile(r"^(?:csf|occ)_[a-f0-9]{24}$")
@@ -78,10 +73,6 @@ _RFC3339_RE = re.compile(
     r"(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$"
 )
 _WRITEUP_RE = re.compile(r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$")
-
-
-class ArtifactContractError(ValueError):
-    """A canonical artifact violates the scan contract."""
 
 
 @dataclass(frozen=True)
@@ -162,7 +153,7 @@ def finalize_scan(
     regenerates the unsealed projections.
     """
 
-    root = _require_scan_directory(scan_dir)
+    root = require_scan_directory(scan_dir)
     manifest = _read_json(root, "scan-manifest.json")
     scan = _required_object(manifest, "scan", "manifest")
     _validate_contract_references(scan)
@@ -208,7 +199,7 @@ def finalize_scan(
         _validate_manifest_base(manifest, require_artifacts=True)
         _validate_coverage_receipts_are_sealed(scan, coverage)
         report = build_report_markdown(manifest, findings, coverage)
-        _atomic_write(root, "report.md", report)
+        atomic_write(root, "report.md", report)
         sarif_path = _write_sarif_best_effort(root, manifest, findings, source_root)
         manifest_bytes = canonical_json_bytes(manifest)
         return FinalizationResult(
@@ -232,7 +223,7 @@ def finalize_scan(
             _artifact_record(
                 receipt,
                 "application/octet-stream",
-                _read_regular_file(root, receipt),
+                read_regular_file(root, receipt),
             )
         )
     scan["artifacts"] = sorted(scan["artifacts"], key=lambda item: item["path"])
@@ -241,10 +232,10 @@ def finalize_scan(
     report = build_report_markdown(manifest, findings, coverage)
     manifest_bytes = canonical_json_bytes(manifest)
 
-    _atomic_write(root, "findings.json", findings_bytes)
-    _atomic_write(root, "coverage.json", coverage_bytes)
-    _atomic_write(root, "report.md", report)
-    _atomic_write(root, "scan-manifest.json", manifest_bytes)
+    atomic_write(root, "findings.json", findings_bytes)
+    atomic_write(root, "coverage.json", coverage_bytes)
+    atomic_write(root, "report.md", report)
+    atomic_write(root, "scan-manifest.json", manifest_bytes)
     _validate_seal(root, scan)
     sarif_path = _write_sarif_best_effort(root, manifest, findings, source_root)
     return FinalizationResult(
@@ -261,7 +252,7 @@ def finalize_scan(
 def verify_seal(scan_dir: Path) -> FinalizationResult:
     """Verify an existing seal without changing any file."""
 
-    root = _require_scan_directory(scan_dir)
+    root = require_scan_directory(scan_dir)
     manifest, manifest_bytes = _read_json_with_bytes(root, "scan-manifest.json")
     scan = _required_object(manifest, "scan", "manifest")
     _validate_contract_references(scan)
@@ -295,8 +286,8 @@ def write_sarif_projection(
     result = verify_seal(scan_dir)
     sarif = build_sarif(result.manifest, result.findings, source_root)
     _validate_sarif(sarif)
-    root = _require_scan_directory(scan_dir)
-    _atomic_write(root, "exports/results.sarif", canonical_json_bytes(sarif))
+    root = require_scan_directory(scan_dir)
+    atomic_write(root, "exports/results.sarif", canonical_json_bytes(sarif))
     return root / "exports" / "results.sarif"
 
 
@@ -319,426 +310,9 @@ def write_csv_projection(
         triage_by_occurrence or {},
         deep_scan=deep_scan,
     )
-    root = _require_scan_directory(scan_dir)
-    _atomic_write(root, "exports/findings.csv", content)
+    root = require_scan_directory(scan_dir)
+    atomic_write(root, "exports/findings.csv", content)
     return root / "exports" / "findings.csv"
-
-
-def build_findings_csv(
-    findings_document: Mapping[str, Any],
-    triage_by_occurrence: Mapping[str, Mapping[str, Any]],
-    deep_scan: bool = False,
-) -> bytes:
-    """Build deterministic spreadsheet-safe CSV from current local triage state."""
-
-    findings = findings_document.get("findings")
-    if not isinstance(findings, list):
-        raise ArtifactContractError("findings.findings: expected an array")
-    known_occurrences = {
-        finding.get("occurrenceId")
-        for finding in findings
-        if isinstance(finding, dict)
-    }
-    unknown_triage = sorted(set(triage_by_occurrence) - known_occurrences)
-    if unknown_triage:
-        raise ArtifactContractError(
-            "triage state references unknown occurrences: %s"
-            % ", ".join(unknown_triage)
-        )
-
-    output = io.StringIO(newline="")
-    writer = csv.writer(output, lineterminator="\r\n")
-    columns = [
-        "occurrence_id",
-        "finding_id",
-    ]
-    if deep_scan:
-        columns.append("candidate_id")
-    columns.extend(
-        [
-            "title",
-            "summary",
-            "severity",
-            "confidence",
-            "status",
-            "close_reason",
-            "note",
-            "remediation",
-            "path",
-            "start_line",
-            "end_line",
-        ]
-    )
-    writer.writerow(columns)
-    for finding in sorted(findings, key=lambda item: str(item.get("occurrenceId", ""))):
-        if not isinstance(finding, dict):
-            raise ArtifactContractError("findings.findings: entries must be objects")
-        occurrence_id = str(finding["occurrenceId"])
-        triage = triage_by_occurrence.get(occurrence_id, {})
-        status, close_reason, note = _validate_triage(triage, occurrence_id)
-        primary = _primary_location(finding)
-        row: List[Any] = [
-            occurrence_id,
-            finding["findingId"],
-        ]
-        if deep_scan:
-            extensions = finding.get("extensions")
-            candidate_id = (
-                extensions.get("candidateId") if isinstance(extensions, dict) else ""
-            )
-            row.append(candidate_id or "")
-        row.extend(
-            [
-                finding["title"],
-                finding["summary"],
-                finding["severity"]["level"],
-                finding["confidence"]["level"],
-                status,
-                close_reason or "",
-                note or "",
-                finding["remediation"],
-                primary["path"],
-                primary["startLine"],
-                primary.get("endLine", primary["startLine"]),
-            ]
-        )
-        writer.writerow([_csv_cell(value) for value in row])
-    return output.getvalue().encode("utf-8")
-
-
-def build_report_markdown(
-    manifest: Mapping[str, Any],
-    findings_document: Mapping[str, Any],
-    coverage: Mapping[str, Any],
-) -> bytes:
-    """Build the required deterministic human-readable projection."""
-
-    scan = manifest["scan"]
-    target = scan["target"]
-    scope = scan["scope"]
-    findings = sorted(
-        (
-            finding
-            for finding in findings_document["findings"]
-            if finding["severity"]["level"] != "informational"
-        ),
-        key=lambda finding: (
-            SEVERITY_ORDER[finding["severity"]["level"]],
-            finding["occurrenceId"],
-            finding["title"],
-        ),
-    )
-    severity_counts = [
-        "%s: %d" % (level, sum(f["severity"]["level"] == level for f in findings))
-        for level in SEVERITY_ORDER
-        if any(f["severity"]["level"] == level for f in findings)
-    ]
-    lines = [
-        "# Security Review: %s" % _markdown_text(target["displayName"]),
-        "",
-        "## Scope",
-        "",
-        _markdown_text(
-            scope.get("summary")
-            or "The scan reviewed the canonical include paths and exclusions below."
-        ),
-        "",
-        "- Scan mode: %s" % _markdown_text(coverage["mode"]),
-        "- Target kind: %s" % _markdown_text(target["kind"]),
-        "- Target ID: %s" % _markdown_text(target["targetId"]),
-        "- Inventory strategy: %s"
-        % _markdown_text(coverage["inventoryStrategy"]),
-        "- Included paths: %s"
-        % _markdown_text(", ".join(coverage["includePaths"]) or "none"),
-        "- Excluded paths: %s"
-        % _markdown_text(", ".join(coverage["excludePaths"]) or "none"),
-    ]
-    for label, key in (
-        ("Revision", "revision"),
-        ("Base revision", "baseRevision"),
-        ("Head revision", "headRevision"),
-        ("Snapshot digest", "snapshotDigest"),
-    ):
-        if target.get(key):
-            lines.append("- %s: %s" % (label, _markdown_text(target[key])))
-    limitations = scope.get("limitations", [])
-    if limitations:
-        lines.extend(["", "Limitations and exclusions:"])
-        lines.extend("- %s" % _markdown_text(item) for item in limitations)
-    lines.extend(
-        [
-            "",
-            "### Scan Summary",
-            "",
-            "| Field | Value |",
-            "| --- | --- |",
-            "| Reportable findings | %d |" % len(findings),
-            "| Severity mix | %s |"
-            % _markdown_cell(", ".join(severity_counts) or "none"),
-            "| Coverage | %s |" % _markdown_cell(coverage["completeness"]),
-            "",
-            "Canonical artifacts: `scan-manifest.json`, `findings.json`, and "
-            "`coverage.json`. This report is a deterministic projection of those files.",
-            "",
-            "## Threat Model",
-            "",
-        ]
-    )
-    threat_model = scan.get("threatModel")
-    if isinstance(threat_model, dict):
-        lines.append(
-            _markdown_text(
-                threat_model.get("summary")
-                or "No explicit canonical threat-model summary was recorded."
-            )
-        )
-        for heading, key in (
-            ("Assets", "assets"),
-            ("Trust Boundaries", "trustBoundaries"),
-            ("Attacker Capabilities", "attackerCapabilities"),
-            ("Security Objectives", "securityObjectives"),
-            ("Assumptions", "assumptions"),
-        ):
-            values = threat_model.get(key)
-            if isinstance(values, list) and values:
-                lines.extend(["", "### %s" % heading, ""])
-                lines.extend("- %s" % _markdown_text(value) for value in values)
-    else:
-        lines.append("No explicit canonical threat-model summary was recorded.")
-    lines.extend(["", "## Findings", ""])
-    if not findings:
-        lines.extend(
-            [
-                "### No findings",
-                "",
-                "No reportable findings survived the canonical discovery, validation, "
-                "and reportability gates.",
-            ]
-        )
-    else:
-        lines.extend(
-            [
-                "| Finding | Severity | Confidence | Location |",
-                "| --- | --- | --- | --- |",
-            ]
-        )
-        for number, finding in enumerate(findings, 1):
-            primary = _primary_location(finding)
-            location = "%s:%s" % (primary["path"], primary["startLine"])
-            lines.append(
-                "| [%s](#finding-%d) | %s | %s | %s |"
-                % (
-                    _markdown_cell(finding["title"]),
-                    number,
-                    _markdown_cell(finding["severity"]["level"]),
-                    _markdown_cell(finding["confidence"]["level"]),
-                    _markdown_cell(location),
-                )
-            )
-        for number, finding in enumerate(findings, 1):
-            primary = _primary_location(finding)
-            writeup = finding.get("writeup")
-            writeup_path = (
-                writeup.get("reportPath") if isinstance(writeup, dict) else None
-            )
-            lines.extend(
-                [
-                    "",
-                    '<a id="finding-%d"></a>' % number,
-                    "",
-                    "### [%d] %s" % (number, _markdown_text(finding["title"])),
-                    "",
-                    "| Field | Value |",
-                    "| --- | --- |",
-                    "| Finding ID | %s |"
-                    % _markdown_cell(finding["findingId"]),
-                    "| Severity | %s |"
-                    % _markdown_cell(finding["severity"]["level"]),
-                    "| Confidence | %s |"
-                    % _markdown_cell(finding["confidence"]["level"]),
-                    "| Category | %s |"
-                    % _markdown_cell(finding["taxonomy"]["category"]),
-                    "| CWE | %s |"
-                    % _markdown_cell(", ".join(finding["taxonomy"]["cwe"]) or "none"),
-                    "| Primary location | %s:%s |"
-                    % (
-                        _markdown_cell(primary["path"]),
-                        primary["startLine"],
-                    ),
-                    "",
-                    "#### Summary",
-                    "",
-                    (
-                        "See the [detailed technical write-up](%s)."
-                        % writeup_path
-                        if writeup_path
-                        else _markdown_text(finding["summary"])
-                    ),
-                    "",
-                    "#### Validation",
-                    "",
-                    (
-                        "See the [detailed technical write-up](%s)."
-                        % writeup_path
-                        if writeup_path
-                        else _section_summary(
-                            finding.get("validation"),
-                            finding["confidence"]["rationale"],
-                        )
-                    ),
-                    "",
-                    "#### Attack Path",
-                    "",
-                    (
-                        "See the [detailed technical write-up](%s)."
-                        % writeup_path
-                        if writeup_path
-                        else _section_summary(
-                            finding.get("attackPath"),
-                            "No expanded attack-path narrative was recorded.",
-                        )
-                    ),
-                    "",
-                    "#### Remediation",
-                    "",
-                    (
-                        "See the [detailed technical write-up](%s)."
-                        % writeup_path
-                        if writeup_path
-                        else _markdown_text(finding["remediation"])
-                    ),
-                ]
-            )
-    hardening = scan.get("hardening")
-    if isinstance(hardening, dict):
-        lines.extend(
-            [
-                "",
-                "## Structural Hardening",
-                "",
-                "The scan produced derived, unsealed design guidance. It does not "
-                "indicate that findings have been remediated.",
-                "",
-                "[Open the structural hardening portfolio](%s)"
-                % hardening["portfolioPath"],
-            ]
-        )
-    surfaces = coverage.get("surfaces", [])
-    if surfaces:
-        lines.extend(
-            [
-                "",
-                "## Reviewed Surfaces",
-                "",
-                "| Surface | Risk area | Outcome | Evidence |",
-                "| --- | --- | --- | --- |",
-            ]
-        )
-        for surface in surfaces:
-            lines.append(
-                "| %s | %s | %s | %s |"
-                % (
-                    _markdown_cell(surface["label"]),
-                    _markdown_cell(surface.get("riskArea", "not recorded")),
-                    _markdown_cell(surface["disposition"]),
-                    _markdown_cell(", ".join(surface.get("receiptRefs", [])) or "none"),
-                )
-            )
-    deferred = coverage.get("deferred", [])
-    open_questions = coverage.get("openQuestions", [])
-    if deferred or open_questions:
-        lines.extend(["", "## Open Questions And Follow Up", ""])
-        for item in deferred:
-            lines.append(
-                "- Deferred `%s`: %s"
-                % (_markdown_text(item["id"]), _markdown_text(item["reason"]))
-            )
-        for item in open_questions:
-            lines.append("- %s" % _markdown_text(item["question"]))
-    return ("\n".join(lines).rstrip() + "\n").encode("utf-8")
-
-
-def build_sarif(
-    manifest: Mapping[str, Any],
-    findings_document: Mapping[str, Any],
-    source_root: Optional[Path] = None,
-) -> Dict[str, Any]:
-    """Build deterministic SARIF 2.1.0 from canonical findings."""
-
-    del source_root  # Reserved for a future bounded source-line hash projection.
-    scan = manifest["scan"]
-    findings = sorted(
-        findings_document["findings"], key=lambda item: item["occurrenceId"]
-    )
-    rule_ids = sorted({finding["ruleId"] for finding in findings})
-    rule_index = {rule_id: index for index, rule_id in enumerate(rule_ids)}
-    results: List[Dict[str, Any]] = []
-    for finding in findings:
-        primary = _primary_location(finding)
-        related = [
-            _sarif_location(location, index)
-            for index, location in enumerate(finding["locations"])
-            if location is not primary
-        ]
-        result: Dict[str, Any] = {
-            "ruleId": finding["ruleId"],
-            "ruleIndex": rule_index[finding["ruleId"]],
-            "level": SARIF_LEVELS[finding["severity"]["level"]],
-            "message": {"text": finding["summary"]},
-            "locations": [_sarif_location(primary)],
-            "partialFingerprints": {
-                "codexSecurity/v1": finding["fingerprints"]["primary"]
-            },
-            "properties": {
-                "category": finding["taxonomy"]["category"],
-                "confidence": finding["confidence"]["level"],
-                "findingId": finding["findingId"],
-                "occurrenceId": finding["occurrenceId"],
-                "severity": finding["severity"]["level"],
-            },
-        }
-        extensions = finding.get("extensions")
-        if isinstance(extensions, dict) and extensions.get("candidateId"):
-            result["properties"]["candidateId"] = extensions["candidateId"]
-        if related:
-            result["relatedLocations"] = related
-        results.append(result)
-    run: Dict[str, Any] = {
-        "tool": {
-            "driver": {
-                "name": "Kiro Security",
-                "version": scan["producer"]["version"],
-                "rules": [
-                    {
-                        "id": rule_id,
-                        "name": rule_id,
-                        "shortDescription": {"text": rule_id},
-                        "properties": {"tags": ["security"]},
-                    }
-                    for rule_id in rule_ids
-                ],
-            }
-        },
-        "automationDetails": {"id": scan["id"]},
-        "results": results,
-        "properties": {
-            "codexSecuritySchemaVersion": manifest["schemaVersion"],
-            "codexSecurityTargetKind": scan["target"]["kind"],
-        },
-    }
-    target = scan["target"]
-    if (
-        target["kind"] == "git_revision"
-        and target.get("remote")
-        and target.get("revision")
-    ):
-        run["versionControlProvenance"] = [
-            {
-                "repositoryUri": target["remote"],
-                "revisionId": target["revision"],
-            }
-        ]
-    return {"$schema": SARIF_SCHEMA, "version": "2.1.0", "runs": [run]}
 
 
 def _validate_manifest_base(
@@ -775,7 +349,7 @@ def _validate_manifest_base(
                 raise ArtifactContractError(
                     "manifest.scan.scope.%s[%d]: expected a string" % (key, index)
                 )
-            _safe_relative_path(
+            validate_scan_relative_path(
                 value,
                 "manifest.scan.scope.%s[%d]" % (key, index),
                 allow_dot=True,
@@ -818,7 +392,7 @@ def _validate_manifest_base(
             context = "manifest.scan.artifacts[%d]" % index
             if not isinstance(artifact, dict):
                 raise ArtifactContractError("%s: expected an object" % context)
-            path = _safe_relative_path(
+            path = validate_scan_relative_path(
                 _required_string(artifact, "path", context),
                 "%s.path" % context,
             )
@@ -1070,7 +644,7 @@ def _validate_finding(finding: Mapping[str, Any], context: str) -> None:
             raise ArtifactContractError(
                 "%s.id: expected a lowercase semantic slug" % evidence_context
             )
-        _safe_relative_path(evidence["path"], "%s.path" % evidence_context)
+        validate_scan_relative_path(evidence["path"], "%s.path" % evidence_context)
         start = evidence.get("startLine")
         end = evidence.get("endLine", start)
         if not isinstance(start, int) or isinstance(start, bool) or start < 1:
@@ -1153,7 +727,9 @@ def _validate_finding(finding: Mapping[str, Any], context: str) -> None:
 def _validate_location(value: Any, context: str) -> None:
     if not isinstance(value, dict):
         raise ArtifactContractError("%s: expected an object" % context)
-    _safe_relative_path(_required_string(value, "path", context), "%s.path" % context)
+    validate_scan_relative_path(
+        _required_string(value, "path", context), "%s.path" % context
+    )
     start = value.get("startLine")
     end = value.get("endLine", start)
     if not isinstance(start, int) or isinstance(start, bool) or start < 1:
@@ -1213,7 +789,9 @@ def _validate_coverage(
         ("coverage.excludePaths", exclude_paths),
     ):
         for index, value in enumerate(values):
-            _safe_relative_path(value, "%s[%d]" % (context, index), allow_dot=True)
+            validate_scan_relative_path(
+                value, "%s[%d]" % (context, index), allow_dot=True
+            )
 
     surface_ids: Set[str] = set()
     needs_follow_up = False
@@ -1238,7 +816,7 @@ def _validate_coverage(
             _optional_nonempty_string(surface, key, context)
         refs = _string_array(surface.get("receiptRefs"), "%s.receiptRefs" % context)
         for ref_index, ref in enumerate(refs):
-            normalized = _safe_relative_path(
+            normalized = validate_scan_relative_path(
                 ref, "%s.receiptRefs[%d]" % (context, ref_index)
             )
             if not normalized.startswith("artifacts/"):
@@ -1246,7 +824,7 @@ def _validate_coverage(
                     "%s.receiptRefs[%d]: expected a file under artifacts/"
                     % (context, ref_index)
                 )
-            _read_regular_file(root, normalized)
+            read_regular_file(root, normalized)
 
     exclusions = _required_array(coverage, "explicitExclusions", "coverage")
     for index, exclusion in enumerate(exclusions):
@@ -1303,10 +881,10 @@ def _validate_derived_references(
                 "findings.findings[%d].writeup.reportPath: duplicate reference" % index
             )
         seen_writeups.add(path)
-        _read_regular_file(root, path)
+        read_regular_file(root, path)
     hardening = manifest["scan"].get("hardening")
     if isinstance(hardening, dict):
-        _read_regular_file(root, hardening["portfolioPath"])
+        read_regular_file(root, hardening["portfolioPath"])
 
 
 def _validate_contract_references(scan: Mapping[str, Any]) -> None:
@@ -1339,7 +917,7 @@ def _validate_seal(
         context = "manifest.scan.artifacts[%d]" % index
         if not isinstance(artifact, dict):
             raise ArtifactContractError("%s: expected an object" % context)
-        path = _safe_relative_path(
+        path = validate_scan_relative_path(
             _required_string(artifact, "path", context), "%s.path" % context
         )
         if path in seen:
@@ -1348,7 +926,7 @@ def _validate_seal(
         expected = _required_string(artifact, "sha256", context)
         content = (known_contents or {}).get(path)
         if content is None:
-            content = _read_regular_file(root, path)
+            content = read_regular_file(root, path)
         if _sha256(content) != expected:
             raise ArtifactContractError(
                 "%s: sealed artifact changed or is missing" % context
@@ -1377,30 +955,10 @@ def _coverage_receipt_refs(coverage: Mapping[str, Any]) -> List[str]:
 
 def _artifact_record(path: str, media_type: str, content: bytes) -> Dict[str, str]:
     return {
-        "path": _safe_relative_path(path, "artifact path"),
+        "path": validate_scan_relative_path(path, "artifact path"),
         "sha256": _sha256(content),
         "mediaType": media_type,
     }
-
-
-def _validate_sarif(sarif: Mapping[str, Any]) -> None:
-    if sarif.get("version") != "2.1.0":
-        raise ArtifactContractError("SARIF: expected version 2.1.0")
-    runs = sarif.get("runs")
-    if not isinstance(runs, list) or len(runs) != 1:
-        raise ArtifactContractError("SARIF: expected exactly one run")
-    rule_ids = {
-        rule["id"] for rule in runs[0]["tool"]["driver"].get("rules", [])
-    }
-    for result in runs[0].get("results", []):
-        if result.get("ruleId") not in rule_ids:
-            raise ArtifactContractError(
-                "SARIF: result references an unknown rule"
-            )
-        if not result.get("partialFingerprints"):
-            raise ArtifactContractError(
-                "SARIF: result is missing partialFingerprints"
-            )
 
 
 def _write_sarif_best_effort(
@@ -1412,99 +970,10 @@ def _write_sarif_best_effort(
     try:
         sarif = build_sarif(manifest, findings, source_root)
         _validate_sarif(sarif)
-        _atomic_write(root, "exports/results.sarif", canonical_json_bytes(sarif))
+        atomic_write(root, "exports/results.sarif", canonical_json_bytes(sarif))
     except (ArtifactContractError, OSError, TypeError, ValueError):
         return None
     return root / "exports" / "results.sarif"
-
-
-def _sarif_location(
-    location: Mapping[str, Any], location_id: Optional[int] = None
-) -> Dict[str, Any]:
-    result: Dict[str, Any] = {
-        "physicalLocation": {
-            "artifactLocation": {"uri": quote(location["path"], safe="/")},
-            "region": {
-                "startLine": location["startLine"],
-                "endLine": location.get("endLine", location["startLine"]),
-            },
-        }
-    }
-    if location_id is not None:
-        result["id"] = location_id
-    if location.get("role"):
-        result["message"] = {"text": location["role"]}
-    return result
-
-
-def _primary_location(finding: Mapping[str, Any]) -> Mapping[str, Any]:
-    for location in finding["locations"]:
-        if location.get("role") == "root_control":
-            return location
-    return finding["locations"][0]
-
-
-def _validate_triage(
-    triage: Mapping[str, Any], occurrence_id: str
-) -> Tuple[str, Optional[str], Optional[str]]:
-    if not isinstance(triage, Mapping):
-        raise ArtifactContractError(
-            "triage[%s]: expected an object" % occurrence_id
-        )
-    status = triage.get("status", "open")
-    close_reason = triage.get("closeReason", triage.get("close_reason"))
-    note = triage.get("note")
-    if status not in TRIAGE_STATUSES:
-        raise ArtifactContractError(
-            "triage[%s].status: expected open or closed" % occurrence_id
-        )
-    if close_reason is not None and close_reason not in CLOSE_REASONS:
-        raise ArtifactContractError(
-            "triage[%s].closeReason: unsupported close reason" % occurrence_id
-        )
-    if note is not None and not isinstance(note, str):
-        raise ArtifactContractError(
-            "triage[%s].note: expected a string" % occurrence_id
-        )
-    if status == "open" and close_reason is not None:
-        raise ArtifactContractError(
-            "triage[%s]: open findings cannot have a close reason" % occurrence_id
-        )
-    if status == "closed" and close_reason is None:
-        raise ArtifactContractError(
-            "triage[%s]: closed findings require a close reason" % occurrence_id
-        )
-    if close_reason == "wont_fix" and not note:
-        raise ArtifactContractError(
-            "triage[%s]: wont_fix requires a note" % occurrence_id
-        )
-    return status, close_reason, note
-
-
-def _csv_cell(value: Any) -> Any:
-    if isinstance(value, str) and value.startswith(("=", "+", "-", "@", "\t", "\r")):
-        return "'%s" % value
-    return value
-
-
-def _section_summary(value: Any, fallback: str) -> str:
-    if isinstance(value, dict) and isinstance(value.get("summary"), str):
-        return _markdown_text(value["summary"])
-    if isinstance(value, str) and value.strip():
-        return _markdown_text(value)
-    return _markdown_text(fallback)
-
-
-def _markdown_text(value: Any) -> str:
-    text = " ".join(str(value).split())
-    text = re.sub(r"([\\`*\[\]<>])", r"\\\1", text)
-    if re.match(r"^(?:#{1,6}\s|[-*+]\s|>\s|```|\d+\.\s|\|)", text):
-        return "Text: %s" % text
-    return text
-
-
-def _markdown_cell(value: Any) -> str:
-    return _markdown_text(value).replace("|", "\\|")
 
 
 def _stable_id(prefix: str, *parts: str) -> str:
@@ -1577,148 +1046,6 @@ def _string_array(
     return value
 
 
-def _safe_relative_path(
-    value: str, context: str, allow_dot: bool = False
-) -> str:
-    if not isinstance(value, str):
-        raise ArtifactContractError("%s: expected a string" % context)
-    try:
-        value.encode("utf-8")
-    except UnicodeEncodeError as exc:
-        raise ArtifactContractError(
-            "%s: expected a safe relative POSIX path" % context
-        ) from exc
-    path = PurePosixPath(value)
-    normalized = path.as_posix()
-    if (
-        not value
-        or (normalized == "." and not allow_dot)
-        or "\\" in value
-        or "\0" in value
-        or path.is_absolute()
-        or ".." in path.parts
-    ):
-        raise ArtifactContractError(
-            "%s: expected a safe relative POSIX path" % context
-        )
-    return normalized
-
-
-def _require_scan_directory(scan_dir: Path) -> Path:
-    root = Path(scan_dir).absolute()
-    try:
-        metadata = root.lstat()
-        resolved = root.resolve(strict=True)
-    except OSError as exc:
-        raise ArtifactContractError(
-            "scan directory: expected an existing non-symlink directory"
-        ) from exc
-    if not stat.S_ISDIR(metadata.st_mode) or resolved != root:
-        raise ArtifactContractError(
-            "scan directory: expected a canonical non-symlink directory"
-        )
-    return root
-
-
-def _open_root(root: Path) -> int:
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    try:
-        descriptor = os.open(str(root), flags)
-    except OSError as exc:
-        raise ArtifactContractError("scan directory: could not open safely") from exc
-    if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
-        os.close(descriptor)
-        raise ArtifactContractError("scan directory: expected a directory")
-    return descriptor
-
-
-def _open_parent(
-    root_fd: int, parts: Sequence[str], create: bool
-) -> int:
-    descriptor = os.dup(root_fd)
-    try:
-        for part in parts:
-            if create:
-                try:
-                    os.mkdir(part, mode=0o700, dir_fd=descriptor)
-                except FileExistsError:
-                    pass
-            expected = os.stat(part, dir_fd=descriptor, follow_symlinks=False)
-            if not stat.S_ISDIR(expected.st_mode):
-                raise ArtifactContractError(
-                    "scan-local path: expected a regular directory"
-                )
-            flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-            if hasattr(os, "O_NOFOLLOW"):
-                flags |= os.O_NOFOLLOW
-            next_descriptor = os.open(part, flags, dir_fd=descriptor)
-            opened = os.fstat(next_descriptor)
-            if (
-                not stat.S_ISDIR(opened.st_mode)
-                or (expected.st_dev, expected.st_ino) != (opened.st_dev, opened.st_ino)
-            ):
-                os.close(next_descriptor)
-                raise ArtifactContractError(
-                    "scan-local path: expected a regular directory"
-                )
-            os.close(descriptor)
-            descriptor = next_descriptor
-        return descriptor
-    except (OSError, ArtifactContractError) as exc:
-        os.close(descriptor)
-        if isinstance(exc, ArtifactContractError):
-            raise
-        raise ArtifactContractError(
-            "scan-local path: expected non-symlink directories"
-        ) from exc
-
-
-def _read_regular_file(root: Path, relative_path: str) -> bytes:
-    normalized = _safe_relative_path(relative_path, relative_path)
-    parts = PurePosixPath(normalized).parts
-    root_fd = _open_root(root)
-    parent_fd = -1
-    file_fd = -1
-    try:
-        parent_fd = _open_parent(root_fd, parts[:-1], create=False)
-        expected = os.stat(parts[-1], dir_fd=parent_fd, follow_symlinks=False)
-        if not stat.S_ISREG(expected.st_mode):
-            raise ArtifactContractError(
-                "%s: missing or unsafe regular file" % normalized
-            )
-        flags = os.O_RDONLY
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        file_fd = os.open(parts[-1], flags, dir_fd=parent_fd)
-        opened = os.fstat(file_fd)
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or (expected.st_dev, expected.st_ino) != (opened.st_dev, opened.st_ino)
-        ):
-            raise ArtifactContractError("%s: expected a regular file" % normalized)
-        chunks = []
-        while True:
-            chunk = os.read(file_fd, 1024 * 1024)
-            if not chunk:
-                break
-            chunks.append(chunk)
-        return b"".join(chunks)
-    except (OSError, ArtifactContractError) as exc:
-        if isinstance(exc, ArtifactContractError) and str(exc).startswith(normalized):
-            raise
-        raise ArtifactContractError(
-            "%s: missing or unsafe regular file" % normalized
-        ) from exc
-    finally:
-        if file_fd >= 0:
-            os.close(file_fd)
-        if parent_fd >= 0:
-            os.close(parent_fd)
-        os.close(root_fd)
-
-
 def _read_json(root: Path, relative_path: str) -> Dict[str, Any]:
     return _read_json_with_bytes(root, relative_path)[0]
 
@@ -1726,7 +1053,7 @@ def _read_json(root: Path, relative_path: str) -> Dict[str, Any]:
 def _read_json_with_bytes(
     root: Path, relative_path: str
 ) -> Tuple[Dict[str, Any], bytes]:
-    content = _read_regular_file(root, relative_path)
+    content = read_regular_file(root, relative_path)
     try:
         payload = json.loads(content, parse_constant=_reject_non_finite)
     except (UnicodeDecodeError, ValueError) as exc:
@@ -1740,49 +1067,6 @@ def _read_json_with_bytes(
 
 def _reject_non_finite(value: str) -> None:
     raise ValueError("non-finite JSON number %r is not supported" % value)
-
-
-def _atomic_write(root: Path, relative_path: str, content: bytes) -> None:
-    normalized = _safe_relative_path(relative_path, "scan-local output path")
-    parts = PurePosixPath(normalized).parts
-    root_fd = _open_root(root)
-    parent_fd = -1
-    temp_name = ".%s.%s.tmp" % (parts[-1], secrets.token_hex(8))
-    try:
-        parent_fd = _open_parent(root_fd, parts[:-1], create=True)
-        try:
-            existing = os.stat(parts[-1], dir_fd=parent_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            existing = None
-        if existing is not None and not stat.S_ISREG(existing.st_mode):
-            raise ArtifactContractError(
-                "%s: expected a regular non-symlink output" % normalized
-            )
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        temp_fd = os.open(temp_name, flags, 0o600, dir_fd=parent_fd)
-        try:
-            offset = 0
-            while offset < len(content):
-                offset += os.write(temp_fd, content[offset:])
-            os.fsync(temp_fd)
-        finally:
-            os.close(temp_fd)
-        os.replace(temp_name, parts[-1], src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
-        os.fsync(parent_fd)
-    except OSError as exc:
-        raise ArtifactContractError(
-            "%s: could not write atomically" % normalized
-        ) from exc
-    finally:
-        if parent_fd >= 0:
-            try:
-                os.unlink(temp_name, dir_fd=parent_fd)
-            except FileNotFoundError:
-                pass
-            os.close(parent_fd)
-        os.close(root_fd)
 
 
 __all__ = [
