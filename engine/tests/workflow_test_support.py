@@ -393,6 +393,9 @@ class WorkflowTestCase(unittest.TestCase):
                     "role": "root_control",
                 }
             ],
+            "rootCause": {
+                "summary": "Untrusted input reaches an execution boundary."
+            },
             "remediation": "Validate input before the execution boundary.",
             "validation": {"summary": "Static validation confirmed the path."},
             "attackPath": {"summary": "Caller input reaches execute."},

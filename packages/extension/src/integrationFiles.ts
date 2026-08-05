@@ -277,7 +277,9 @@ export async function installSteering(input: {
     input.steeringPath,
     source.contents,
   );
-  requireInstallable(inspection, "steering file");
+  if (inspection.state === "conflict") {
+    throw new Error(inspection.detail);
+  }
   if (inspection.state === "installed") {
     return { changed: false };
   }
@@ -483,20 +485,6 @@ function isManagedServerEntry(value: unknown): boolean {
     (env as Record<string, unknown>).KIRO_SECURITY_MANAGED_BY ===
       MCP_MANAGED_MARKER
   );
-}
-
-function requireInstallable(
-  inspection: IntegrationFileInspection,
-  label: string,
-): void {
-  if (inspection.state === "conflict") {
-    throw new Error(inspection.detail);
-  }
-  if (inspection.state === "mismatch") {
-    throw new Error(
-      `The existing ${label} differs from this Extension and will not be overwritten.`,
-    );
-  }
 }
 
 async function writeSharedConfig(

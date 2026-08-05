@@ -140,6 +140,30 @@ def derive_finding_identity(
     )
 
 
+def validate_finding_authoring(
+    finding: Mapping[str, Any], context: str
+) -> FindingIdentity:
+    """Validate one unsealed finding while keeping derived identity server-owned."""
+
+    if not isinstance(finding, dict):
+        raise ArtifactContractError("%s: expected an object" % context)
+    for key in ("findingId", "occurrenceId", "fingerprints"):
+        if key in finding:
+            raise ArtifactContractError(
+                "%s.%s: finalizer-owned field is not accepted" % (context, key)
+            )
+    identity = derive_finding_identity("authoring-target", "authoring-scan", finding)
+    materialized = dict(finding)
+    materialized["findingId"] = identity.finding_id
+    materialized["occurrenceId"] = identity.occurrence_id
+    materialized["fingerprints"] = {
+        "algorithm": FINGERPRINT_ALGORITHM,
+        "primary": identity.fingerprint,
+    }
+    _validate_finding(materialized, context)
+    return identity
+
+
 def finalize_scan(
     scan_dir: Path,
     source_root: Optional[Path] = None,

@@ -55,7 +55,7 @@ test("Hook registration matches only the exact direct MCP tool IDs", () => {
   assert.doesNotMatch(JSON.stringify(document), /workbench\.sqlite3|scanRoot/);
 });
 
-test("Hook install is idempotent and refuses to overwrite a changed dedicated file", async () => {
+test("Hook install is idempotent and refreshes its changed dedicated file", async () => {
   const {
     buildHookRegistrationDocument,
     getHookBridgePath,
@@ -83,11 +83,8 @@ test("Hook install is idempotent and refuses to overwrite a changed dedicated fi
     const drifted = { ...document, hooks: [{ ...document.hooks[0], timeout: 11 }] };
     await writeFile(hookPath, `${JSON.stringify(drifted, null, 2)}\n`, "utf8");
     assert.equal((await inspectHookRegistration({ hookPath, expected: document })).state, "mismatch");
-    await assert.rejects(
-      installHookRegistration({ hookPath, document }),
-      /will not be overwritten/,
-    );
-    assert.deepEqual(JSON.parse(readFileSync(hookPath, "utf8")), drifted);
+    assert.equal((await installHookRegistration({ hookPath, document })).changed, true);
+    assert.deepEqual(JSON.parse(readFileSync(hookPath, "utf8")), document);
   } finally {
     await rm(temporary, { force: true, recursive: true });
   }

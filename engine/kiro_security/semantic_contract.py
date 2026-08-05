@@ -3,8 +3,19 @@
 import hashlib
 import re
 
-from .artifacts import ArtifactContractError, canonical_json_bytes
+from .artifacts import (
+    COMPLETENESS,
+    CONFIDENCES,
+    DISPOSITIONS,
+    INVENTORY_STRATEGIES,
+    SCHEMA_VERSION,
+    SEVERITY_ORDER,
+    ArtifactContractError,
+    canonical_json_bytes,
+    validate_finding_authoring,
+)
 from .errors import WorkbenchError
+from .scan_files import validate_scan_relative_path
 
 
 BASE_DESCRIPTORS = (
@@ -34,7 +45,8 @@ DEEP_MERGE_RE = re.compile(r"^discovery-round-(10|[1-9])-merge$")
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
-def descriptor_schemas(mode):
+def descriptor_schemas(scan):
+    mode = scan["mode"]
     common = {
         "brief": (
             _deep_brief_schema()
@@ -50,27 +62,21 @@ def descriptor_schemas(mode):
                 "termination",
             )
             if mode == "deep"
-            else ("scanId", "candidates")
+            else ("scanId", "candidates"),
+            {"candidates": _record_array_schema("id")},
         ),
-        "validation": _schema(("scanId", "results")),
-        "attack-path": _schema(("scanId", "results")),
-        "coverage": _schema(
-            (
-                "documentType",
-                "schemaVersion",
-                "scanId",
-                "mode",
-                "completeness",
-                "inventoryStrategy",
-                "includePaths",
-                "excludePaths",
-                "surfaces",
-                "deferred",
-            )
+        "validation": _schema(
+            ("scanId", "results"),
+            {"results": _record_array_schema("candidateId")},
         ),
-        "canonical-result": _schema(("scanId", "manifest", "findings")),
-        "derived-writeup": _schema(("scanId", "outputs")),
-        "derived-hardening": _schema(("scanId", "outputs")),
+        "attack-path": _schema(
+            ("scanId", "results"),
+            {"results": _record_array_schema("candidateId")},
+        ),
+        "coverage": _coverage_schema(scan),
+        "canonical-result": _canonical_schema(),
+        "derived-writeup": _derived_schema("derived-writeup"),
+        "derived-hardening": _derived_schema("derived-hardening"),
     }
     if mode == "deep":
         common[DEEP_WORKER_SCHEMA_KEY] = _deep_worker_schema()
@@ -88,7 +94,7 @@ def validate_content(scan, descriptor, content):
             "Artifact scanId must match the authoritative scan.",
         )
     schema_key = descriptor_schema_key(descriptor)
-    schema = descriptor_schemas(scan["mode"])[schema_key]
+    schema = descriptor_schemas(scan)[schema_key]
     missing = [key for key in schema["required"] if key not in content]
     if missing:
         raise WorkbenchError(
@@ -96,41 +102,11 @@ def validate_content(scan, descriptor, content):
             "Artifact is missing required fields: %s." % ", ".join(missing),
         )
     if descriptor == "canonical-result":
-        if not isinstance(content.get("manifest"), dict) or not isinstance(
-            content.get("findings"),
-            dict,
-        ):
-            raise WorkbenchError(
-                "invalid_artifact",
-                "canonical-result requires manifest and findings objects.",
-            )
+        _validate_canonical_result(content)
     if descriptor == "brief" and scan["mode"] == "deep":
         worklist_ids(content.get("worklist"))
     if descriptor == "coverage":
-        surfaces = content.get("surfaces")
-        if not isinstance(surfaces, list):
-            raise WorkbenchError(
-                "invalid_artifact",
-                "coverage.surfaces must be an array.",
-            )
-        for surface in surfaces:
-            if not isinstance(surface, dict) or not isinstance(
-                surface.get("receipt"),
-                dict,
-            ):
-                raise WorkbenchError(
-                    "invalid_artifact",
-                    "Every coverage surface requires an embedded receipt object.",
-                )
-            receipt = surface["receipt"]
-            if receipt.get("closed") is not True or not isinstance(
-                receipt.get("reviewedPaths"),
-                list,
-            ):
-                raise WorkbenchError(
-                    "invalid_artifact",
-                    "Every coverage receipt must be closed and list reviewedPaths.",
-                )
+        _validate_coverage(scan, content)
     if descriptor == "discovery":
         record_ids(content.get("candidates"), "discovery.candidates")
     if descriptor == "validation":
@@ -230,6 +206,8 @@ def validate_content(scan, descriptor, content):
                 not isinstance(output, dict)
                 or not isinstance(output.get("path"), str)
                 or not isinstance(output.get("markdown"), str)
+                or not output["path"].strip()
+                or not output["markdown"].strip()
             ):
                 raise WorkbenchError(
                     "invalid_artifact",
@@ -245,6 +223,190 @@ def validate_content(scan, descriptor, content):
         canonical_json_bytes(content)
     except ArtifactContractError as exc:
         raise WorkbenchError("invalid_artifact", str(exc))
+
+
+def _validate_canonical_result(content):
+    manifest = content.get("manifest")
+    findings = content.get("findings")
+    if not isinstance(manifest, dict) or not isinstance(findings, dict):
+        raise WorkbenchError(
+            "invalid_artifact",
+            "canonical-result requires manifest and findings objects.",
+        )
+    if not isinstance(manifest.get("scan"), dict):
+        raise WorkbenchError(
+            "invalid_canonical_result",
+            "Canonical manifest requires a scan object.",
+        )
+    seen = set()
+    for index, finding in enumerate(canonical_findings(content)):
+        context = "findings.findings[%d]" % index
+        for key in ("rootCause", "validation", "attackPath", "writeup"):
+            if key not in finding:
+                raise WorkbenchError(
+                    "invalid_canonical_result",
+                    "%s.%s is required." % (context, key),
+                )
+        root_cause = finding["rootCause"]
+        if not isinstance(root_cause, (dict, str)) or (
+            isinstance(root_cause, str) and not root_cause.strip()
+        ):
+            raise WorkbenchError(
+                "invalid_canonical_result",
+                "%s.rootCause must be a non-empty string or object." % context,
+            )
+        for key in ("validation", "attackPath", "writeup"):
+            if not isinstance(finding[key], dict):
+                raise WorkbenchError(
+                    "invalid_canonical_result",
+                    "%s.%s must be an object." % (context, key),
+                )
+        try:
+            identity = validate_finding_authoring(finding, context)
+        except ArtifactContractError as exc:
+            raise WorkbenchError("invalid_canonical_result", str(exc)) from exc
+        if identity.fingerprint in seen:
+            raise WorkbenchError(
+                "invalid_canonical_result",
+                "Canonical findings contain duplicate logical identities.",
+            )
+        seen.add(identity.fingerprint)
+
+
+def _validate_coverage(scan, content):
+    if content.get("documentType", "codex-security.coverage") != (
+        "codex-security.coverage"
+    ):
+        _invalid("coverage.documentType must be codex-security.coverage.")
+    if content.get("schemaVersion", SCHEMA_VERSION) != SCHEMA_VERSION:
+        _invalid("coverage.schemaVersion must be %s." % SCHEMA_VERSION)
+    if content.get("mode") != coverage_mode(scan):
+        _invalid("coverage.mode must match the authoritative scan mode.")
+    if content.get("completeness") not in COMPLETENESS:
+        _invalid("coverage.completeness is unsupported.")
+    if content.get("inventoryStrategy") not in INVENTORY_STRATEGIES:
+        _invalid("coverage.inventoryStrategy is unsupported.")
+    include_paths = _string_array(content.get("includePaths"), "coverage.includePaths")
+    exclude_paths = _string_array(content.get("excludePaths"), "coverage.excludePaths")
+    if include_paths != [scan["scope"]]:
+        _invalid("coverage.includePaths must match the authoritative scan scope.")
+    for context, paths in (
+        ("coverage.includePaths", include_paths),
+        ("coverage.excludePaths", exclude_paths),
+    ):
+        for index, path in enumerate(paths):
+            _validate_relative(path, "%s[%d]" % (context, index), allow_dot=True)
+
+    surfaces = content.get("surfaces")
+    if not isinstance(surfaces, list):
+        _invalid("coverage.surfaces must be an array.")
+    surface_ids = set()
+    receipt_slugs = set()
+    needs_follow_up = False
+    for index, surface in enumerate(surfaces):
+        context = "coverage.surfaces[%d]" % index
+        if not isinstance(surface, dict):
+            _invalid("%s must be an object." % context)
+        surface_id = _nonempty_string(surface.get("id"), "%s.id" % context)
+        _nonempty_string(surface.get("label"), "%s.label" % context)
+        if surface_id in surface_ids:
+            _invalid("%s.id is duplicated." % context)
+        surface_ids.add(surface_id)
+        slug = re.sub(r"[^a-z0-9._-]+", "-", surface_id.lower()).strip("-")
+        if not slug or slug in receipt_slugs:
+            _invalid("Coverage surface ids must produce unique safe receipt names.")
+        receipt_slugs.add(slug)
+        disposition = surface.get("disposition")
+        if disposition not in DISPOSITIONS:
+            _invalid("%s.disposition is unsupported." % context)
+        needs_follow_up = needs_follow_up or disposition == "needs_follow_up"
+        for key in ("riskArea", "notes"):
+            if key in surface:
+                _nonempty_string(surface[key], "%s.%s" % (context, key))
+        receipt = surface.get("receipt")
+        if not isinstance(receipt, dict):
+            _invalid("%s.receipt must be an object." % context)
+        if receipt.get("closed") is not True:
+            _invalid("%s.receipt.closed must be true." % context)
+        reviewed = _string_array(
+            receipt.get("reviewedPaths"),
+            "%s.receipt.reviewedPaths" % context,
+        )
+        for path_index, path in enumerate(reviewed):
+            _validate_relative(
+                path,
+                "%s.receipt.reviewedPaths[%d]" % (context, path_index),
+            )
+
+    exclusions = content.get("explicitExclusions")
+    if not isinstance(exclusions, list):
+        _invalid("coverage.explicitExclusions must be an array.")
+    for index, exclusion in enumerate(exclusions):
+        context = "coverage.explicitExclusions[%d]" % index
+        if not isinstance(exclusion, dict):
+            _invalid("%s must be an object." % context)
+        _nonempty_string(exclusion.get("pattern"), "%s.pattern" % context)
+        _nonempty_string(exclusion.get("reason"), "%s.reason" % context)
+
+    deferred = content.get("deferred")
+    if not isinstance(deferred, list):
+        _invalid("coverage.deferred must be an array.")
+    for index, item in enumerate(deferred):
+        context = "coverage.deferred[%d]" % index
+        if not isinstance(item, dict):
+            _invalid("%s must be an object." % context)
+        _nonempty_string(item.get("id"), "%s.id" % context)
+        _nonempty_string(item.get("reason"), "%s.reason" % context)
+        if "paths" in item:
+            for path_index, path in enumerate(
+                _string_array(item["paths"], "%s.paths" % context)
+            ):
+                _validate_relative(path, "%s.paths[%d]" % (context, path_index))
+        if "surfaceIds" in item:
+            _string_array(item["surfaceIds"], "%s.surfaceIds" % context)
+    if content["completeness"] == "complete" and (
+        needs_follow_up or deferred
+    ):
+        _invalid("Complete coverage cannot contain deferred work.")
+
+    questions = content.get("openQuestions", [])
+    if not isinstance(questions, list):
+        _invalid("coverage.openQuestions must be an array.")
+    for index, question in enumerate(questions):
+        context = "coverage.openQuestions[%d]" % index
+        if not isinstance(question, dict):
+            _invalid("%s must be an object." % context)
+        _nonempty_string(question.get("question"), "%s.question" % context)
+        if "followUpPrompt" in question:
+            _nonempty_string(
+                question["followUpPrompt"],
+                "%s.followUpPrompt" % context,
+            )
+
+
+def _string_array(value, context):
+    if not isinstance(value, list):
+        _invalid("%s must be an array." % context)
+    for index, item in enumerate(value):
+        _nonempty_string(item, "%s[%d]" % (context, index))
+    return value
+
+
+def _nonempty_string(value, context):
+    if not isinstance(value, str) or not value.strip():
+        _invalid("%s must be a non-empty string." % context)
+    return value
+
+
+def _validate_relative(value, context, allow_dot=False):
+    try:
+        validate_scan_relative_path(value, context, allow_dot=allow_dot)
+    except ArtifactContractError as exc:
+        raise WorkbenchError("invalid_artifact", str(exc)) from exc
+
+
+def _invalid(message):
+    raise WorkbenchError("invalid_artifact", message)
 
 
 def record_ids(value, context, key="id"):
@@ -512,12 +674,269 @@ def descriptor_schema_key(descriptor):
     return descriptor
 
 
-def _schema(required):
-    return {
+def _schema(required, properties=None):
+    schema = {
         "type": "object",
         "required": list(required),
         "additionalProperties": True,
     }
+    if properties:
+        schema["properties"] = properties
+    return schema
+
+
+def _record_array_schema(key):
+    return {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "required": [key],
+            "properties": {key: {"type": "string", "minLength": 1}},
+            "additionalProperties": True,
+        },
+    }
+
+
+def _string_array_schema():
+    return {
+        "type": "array",
+        "items": {"type": "string", "minLength": 1},
+    }
+
+
+def _coverage_schema(scan):
+    text = {"type": "string", "minLength": 1}
+    receipt = {
+        "type": "object",
+        "required": ["closed", "reviewedPaths"],
+        "properties": {
+            "closed": {"const": True},
+            "reviewedPaths": _string_array_schema(),
+        },
+        "additionalProperties": True,
+    }
+    surface = {
+        "type": "object",
+        "required": ["id", "label", "disposition", "receipt"],
+        "properties": {
+            "id": text,
+            "label": text,
+            "disposition": {"enum": sorted(DISPOSITIONS)},
+            "riskArea": text,
+            "notes": text,
+            "receipt": receipt,
+        },
+        "additionalProperties": True,
+    }
+    deferred = {
+        "type": "object",
+        "required": ["id", "reason"],
+        "properties": {
+            "id": text,
+            "reason": text,
+            "paths": _string_array_schema(),
+            "surfaceIds": _string_array_schema(),
+        },
+        "additionalProperties": True,
+    }
+    exclusion = {
+        "type": "object",
+        "required": ["pattern", "reason"],
+        "properties": {"pattern": text, "reason": text},
+        "additionalProperties": True,
+    }
+    question = {
+        "type": "object",
+        "required": ["question"],
+        "properties": {"question": text, "followUpPrompt": text},
+        "additionalProperties": True,
+    }
+    return _schema(
+        (
+            "scanId",
+            "mode",
+            "completeness",
+            "inventoryStrategy",
+            "includePaths",
+            "excludePaths",
+            "surfaces",
+            "explicitExclusions",
+            "deferred",
+        ),
+        {
+            "documentType": {"const": "codex-security.coverage"},
+            "schemaVersion": {"const": SCHEMA_VERSION},
+            "mode": {"const": coverage_mode(scan)},
+            "completeness": {"enum": sorted(COMPLETENESS)},
+            "inventoryStrategy": {"enum": sorted(INVENTORY_STRATEGIES)},
+            "includePaths": {
+                "const": [scan["scope"]],
+            },
+            "excludePaths": _string_array_schema(),
+            "surfaces": {"type": "array", "items": surface},
+            "explicitExclusions": {"type": "array", "items": exclusion},
+            "deferred": {"type": "array", "items": deferred},
+            "openQuestions": {"type": "array", "items": question},
+        },
+    )
+
+
+def _canonical_schema():
+    text = {"type": "string", "minLength": 1}
+    location = {
+        "type": "object",
+        "required": ["path", "startLine"],
+        "properties": {
+            "path": text,
+            "startLine": {"type": "integer", "minimum": 1},
+            "endLine": {"type": "integer", "minimum": 1},
+            "role": text,
+        },
+        "additionalProperties": True,
+    }
+    finding = {
+        "type": "object",
+        "required": [
+            "ruleId",
+            "identity",
+            "title",
+            "summary",
+            "severity",
+            "confidence",
+            "taxonomy",
+            "locations",
+            "rootCause",
+            "validation",
+            "attackPath",
+            "remediation",
+            "provenance",
+            "writeup",
+        ],
+        "properties": {
+            "ruleId": text,
+            "identity": {
+                "type": "object",
+                "required": ["anchor"],
+                "properties": {"anchor": text, "instance": text},
+                "additionalProperties": True,
+            },
+            "title": text,
+            "summary": text,
+            "severity": {
+                "type": "object",
+                "required": ["level"],
+                "properties": {
+                    "level": {"enum": sorted(SEVERITY_ORDER)},
+                    "score": {"type": "number", "minimum": 0, "maximum": 10},
+                    "scoringSystem": text,
+                    "vector": text,
+                    "rationale": text,
+                    "changeConditions": text,
+                },
+                "additionalProperties": True,
+            },
+            "confidence": {
+                "type": "object",
+                "required": ["level", "rationale"],
+                "properties": {
+                    "level": {"enum": sorted(CONFIDENCES)},
+                    "rationale": text,
+                },
+                "additionalProperties": True,
+            },
+            "taxonomy": {
+                "type": "object",
+                "required": ["category", "cwe"],
+                "properties": {
+                    "category": text,
+                    "cwe": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": text,
+                    },
+                },
+                "additionalProperties": True,
+            },
+            "locations": {"type": "array", "minItems": 1, "items": location},
+            "rootCause": {
+                "anyOf": [
+                    text,
+                    {
+                        "type": "object",
+                        "required": ["summary"],
+                        "properties": {"summary": text},
+                        "additionalProperties": True,
+                    },
+                ]
+            },
+            "validation": {"type": "object"},
+            "attackPath": {"type": "object"},
+            "remediation": text,
+            "provenance": {
+                "type": "object",
+                "required": ["source"],
+                "properties": {"source": text},
+                "additionalProperties": True,
+            },
+            "writeup": {
+                "type": "object",
+                "required": ["reportPath"],
+                "properties": {
+                    "reportPath": {
+                        "type": "string",
+                        "pattern": r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$",
+                    }
+                },
+                "additionalProperties": True,
+            },
+        },
+        "additionalProperties": True,
+    }
+    return _schema(
+        ("scanId", "manifest", "findings"),
+        {
+            "manifest": {
+                "type": "object",
+                "required": ["scan"],
+                "properties": {"scan": {"type": "object"}},
+                "additionalProperties": True,
+            },
+            "findings": {
+                "type": "object",
+                "required": ["findings"],
+                "properties": {
+                    "findings": {"type": "array", "items": finding},
+                },
+                "additionalProperties": True,
+            },
+        },
+    )
+
+
+def _derived_schema(descriptor):
+    path = (
+        {"const": "hardening/hardening.md"}
+        if descriptor == "derived-hardening"
+        else {
+            "type": "string",
+            "pattern": r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$",
+        }
+    )
+    outputs = {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "required": ["path", "markdown"],
+            "properties": {
+                "path": path,
+                "markdown": {"type": "string", "minLength": 1},
+            },
+            "additionalProperties": False,
+        },
+    }
+    if descriptor == "derived-hardening":
+        outputs.update({"minItems": 1, "maxItems": 1})
+    return _schema(("scanId", "outputs"), {"outputs": outputs})
 
 
 def _deep_brief_schema():

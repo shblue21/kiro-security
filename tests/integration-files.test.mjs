@@ -45,6 +45,29 @@ test("auto-inclusion steering owns normal-chat orchestration without a Power ent
   assert.equal(existsSync("powers/kiro-security-power/mcp.json"), false);
 });
 
+test("steering install refreshes its changed dedicated file", async () => {
+  const { inspectSteering, installSteering } = require(
+    "../out/packages/extension/src/integrationFiles.js",
+  );
+  const temporary = await mkdtemp(join(tmpdir(), "kiro-steering-files-test-"));
+  try {
+    const sourcePath = join(temporary, "packaged.md");
+    const steeringPath = join(temporary, ".kiro", "steering", "kiro-security-power.md");
+    await writeFile(sourcePath, "current steering\n", "utf8");
+
+    assert.equal((await inspectSteering({ sourcePath, steeringPath })).state, "absent");
+    assert.equal((await installSteering({ sourcePath, steeringPath })).changed, true);
+    assert.equal((await inspectSteering({ sourcePath, steeringPath })).state, "installed");
+
+    await writeFile(steeringPath, "previous steering\n", "utf8");
+    assert.equal((await inspectSteering({ sourcePath, steeringPath })).state, "mismatch");
+    assert.equal((await installSteering({ sourcePath, steeringPath })).changed, true);
+    assert.equal(readFileSync(steeringPath, "utf8"), "current steering\n");
+  } finally {
+    await rm(temporary, { force: true, recursive: true });
+  }
+});
+
 test("installation MCP identity is random, persistent, and private", async () => {
   const {
     getIntegrationIdentityPath,

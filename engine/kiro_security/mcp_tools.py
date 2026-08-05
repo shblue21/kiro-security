@@ -1,5 +1,6 @@
 """Model-visible MCP tools for the deterministic Kiro Security workbench."""
 
+import json
 import os
 
 from .errors import WorkbenchError
@@ -42,14 +43,6 @@ def _sha256(description):
         "type": "string",
         "pattern": "^[0-9a-f]{64}$",
         "description": description,
-    }
-
-
-def _json_object(description):
-    return {
-        "type": "object",
-        "description": description,
-        "additionalProperties": True,
     }
 
 
@@ -247,18 +240,21 @@ TOOL_DEFINITIONS = (
         "title": "Write one validated scan artifact",
         "description": (
             "Validate and atomically persist one allowlisted JSON artifact for the "
-            "current semantic phase."
+            "current semantic phase. Pass the exact artifact as contentJson so empty "
+            "arrays remain distinguishable from omitted fields."
         ),
         "inputSchema": _attested_schema(
             {
                 "scanId": _uuid("Durable scan UUID."),
                 "descriptor": _string("Allowlisted artifact descriptor."),
-                "content": _json_object("Artifact JSON content."),
+                "contentJson": _string(
+                    "Exact JSON object text; preserve every explicit empty array."
+                ),
                 "expectedDigest": _sha256(
                     "Optional digest for idempotent compare-and-swap replacement."
                 ),
             },
-            required=("scanId", "descriptor", "content"),
+            required=("scanId", "descriptor", "contentJson"),
         ),
         "annotations": {"readOnlyHint": False, "idempotentHint": True},
     },
@@ -612,12 +608,12 @@ class WorkbenchTools:
         if name == "kiro_security_write_scan_artifact":
             _reject_unknown(
                 args,
-                ("scanId", "descriptor", "content", "expectedDigest"),
+                ("scanId", "descriptor", "contentJson", "expectedDigest"),
             )
             return self.workbench.write_scan_artifact(
                 _required_string(args, "scanId"),
                 _required_string(args, "descriptor"),
-                _required_object(args, "content"),
+                _required_json_object(args, "contentJson"),
                 _optional_string(args, "expectedDigest"),
                 owner_session_hash=owner_session_hash,
             )
@@ -795,6 +791,41 @@ def _required_object(arguments, key):
     if not isinstance(value, dict):
         raise WorkbenchError("invalid_arguments", "%s must be an object." % key)
     return value
+
+
+def _required_json_object(arguments, key):
+    text = _required_string(arguments, key)
+    try:
+        value = json.loads(
+            text,
+            object_pairs_hook=_unique_json_object,
+            parse_constant=_reject_json_constant,
+        )
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise WorkbenchError(
+            "invalid_arguments",
+            "%s must encode one JSON object without duplicate keys or "
+            "non-finite numbers." % key,
+        ) from exc
+    if not isinstance(value, dict):
+        raise WorkbenchError(
+            "invalid_arguments",
+            "%s must encode a JSON object." % key,
+        )
+    return value
+
+
+def _unique_json_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate JSON object key")
+        value[key] = item
+    return value
+
+
+def _reject_json_constant(_value):
+    raise ValueError("non-finite JSON number")
 
 
 def _required_sha256(arguments, key):

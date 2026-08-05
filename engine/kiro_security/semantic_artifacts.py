@@ -113,6 +113,8 @@ class SemanticArtifactStore:
                 "Semantic artifacts can only be written for a running scan.",
             )
         normalized = _require_descriptor(descriptor, scan["mode"])
+        if normalized == "canonical-result":
+            self.require_candidate_finding_binding(scan, content)
         _validate_content(scan, normalized, content)
         persisted = None
         present = None
@@ -129,8 +131,13 @@ class SemanticArtifactStore:
             )
         if present is not None:
             self._require_deep_write_order(scan, normalized, content, present)
-        if normalized == "canonical-result":
-            self.require_candidate_finding_binding(scan, content)
+        if normalized == "derived-writeup":
+            _validate_derived_writeups(
+                self.read(scan, "canonical-result")["findings"],
+                content,
+            )
+        elif normalized == "derived-hardening":
+            _validate_derived_hardening(content)
         scan_root = _scan_dir(scan)
         root = _semantic_root(scan_root)
         destination = root / ("%s.json" % normalized)
@@ -606,23 +613,47 @@ class SemanticArtifactStore:
             scan["mode"],
         )
         present = {item["descriptor"] for item in values}
+        required = self._required_descriptors(scan, present)
         missing = [
             descriptor
-            for descriptor in self._required_descriptors(scan, present)
+            for descriptor in required
             if descriptor not in present
         ]
+        valid = {}
+        for descriptor in required:
+            if descriptor not in present:
+                continue
+            try:
+                content = self.read(scan, descriptor)
+                _validate_content(scan, descriptor, content)
+                valid[descriptor] = content
+            except WorkbenchError:
+                missing.append("%s.invalid" % descriptor)
         deep = self._deep_discovery_closure(scan, present)
         if deep is not None:
             missing.extend(deep["missing"])
         if all(
-            descriptor in present
+            descriptor in valid
             for descriptor in ("discovery", "validation", "attack-path")
         ):
             missing.extend(self._semantic_chain_missing(scan))
-        if "discovery" in present and "canonical-result" in present:
-            canonical = self.read(scan, "canonical-result")
+        canonical = valid.get("canonical-result")
+        if "discovery" in valid and canonical is not None:
             if self._candidate_finding_mismatch(scan, canonical):
                 missing.append("canonical-findings-require-discovery-candidates")
+        if canonical is not None and "derived-writeup" in valid:
+            try:
+                _validate_derived_writeups(
+                    canonical["findings"],
+                    valid["derived-writeup"],
+                )
+            except WorkbenchError:
+                missing.append("derived-writeup.invalid")
+        if "derived-hardening" in valid:
+            try:
+                _validate_derived_hardening(valid["derived-hardening"])
+            except WorkbenchError:
+                missing.append("derived-hardening.invalid")
         return {
             "complete": not missing,
             "missing": missing,
@@ -729,7 +760,7 @@ class SemanticArtifactStore:
         required.extend(("coverage", "canonical-result"))
         if (
             "canonical-result" in present
-            and self._canonical_finding_count(scan) > 0
+            and self._canonical_finding_count_or_zero(scan) > 0
         ):
             required.extend(("derived-writeup", "derived-hardening"))
         return required
@@ -744,6 +775,12 @@ class SemanticArtifactStore:
     def _canonical_finding_count(self, scan):
         canonical = self.read(scan, "canonical-result")
         return len(_canonical_findings(canonical))
+
+    def _canonical_finding_count_or_zero(self, scan):
+        try:
+            return self._canonical_finding_count(scan)
+        except WorkbenchError:
+            return 0
 
     def _candidate_finding_mismatch(self, scan, canonical):
         discovery = self.read(scan, "discovery")
@@ -894,7 +931,7 @@ class SemanticArtifactStore:
 
 
 def _current_descriptor_schemas(scan, deep_keys=None):
-    schemas = _descriptor_schemas(scan["mode"])
+    schemas = _descriptor_schemas(scan)
     phase = scan["phase"]
     keys = {
         "preflight": ("brief",),
@@ -1041,6 +1078,21 @@ def _materialize_coverage_receipts(root, coverage):
 
 
 def _materialize_derived_outputs(root, findings, manifest, writeups, hardening):
+    supplied_writeups = _validate_derived_writeups(findings, writeups)
+    hardening_output = _validate_derived_hardening(hardening)
+    for relative, markdown in supplied_writeups.items():
+        _atomic_write(root, relative, markdown.encode("utf-8"))
+    _atomic_write(
+        root,
+        "hardening/hardening.md",
+        hardening_output["markdown"].encode("utf-8"),
+    )
+    manifest["scan"]["hardening"] = {
+        "portfolioPath": "hardening/hardening.md",
+    }
+
+
+def _validate_derived_writeups(findings, writeups):
     finding_values = findings.get("findings", [])
     if any(
         not isinstance(finding.get("writeup"), dict)
@@ -1075,7 +1127,10 @@ def _materialize_derived_outputs(root, findings, manifest, writeups, hardening):
                 "invalid_derived_path",
                 "Finding writeups must use findings/<slug>/<slug>.md.",
             )
-        _atomic_write(root, relative, markdown.encode("utf-8"))
+    return supplied_writeups
+
+
+def _validate_derived_hardening(hardening):
     hardening_outputs = hardening["outputs"]
     if len(hardening_outputs) != 1 or hardening_outputs[0]["path"] != (
         "hardening/hardening.md"
@@ -1084,14 +1139,7 @@ def _materialize_derived_outputs(root, findings, manifest, writeups, hardening):
             "derived_hardening_mismatch",
             "Derived hardening must provide hardening/hardening.md.",
         )
-    _atomic_write(
-        root,
-        "hardening/hardening.md",
-        hardening_outputs[0]["markdown"].encode("utf-8"),
-    )
-    manifest["scan"]["hardening"] = {
-        "portfolioPath": "hardening/hardening.md",
-    }
+    return hardening_outputs[0]
 
 
 def _scan_dir(scan):

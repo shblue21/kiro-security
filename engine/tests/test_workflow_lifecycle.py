@@ -12,6 +12,99 @@ from kiro_security.models import DiffTarget, WorkspaceSetup
 
 
 class WorkflowLifecycleTests(WorkflowTestCase):
+    def test_invalid_canonical_replacement_is_side_effect_free(self):
+        def reject_invalid_replacement(scan_id):
+            contract = self.workbench.get_scan_artifact_contract(
+                scan_id,
+                self.owner_a,
+            )
+            canonical_schema = contract["descriptorSchemas"]["canonical-result"]
+            self.assertEqual(
+                canonical_schema["properties"]["findings"]["properties"]
+                ["findings"]["type"],
+                "array",
+            )
+            coverage_schema = contract["descriptorSchemas"]["coverage"]
+            self.assertIn("explicitExclusions", coverage_schema["required"])
+            self.assertEqual(
+                coverage_schema["properties"]["mode"],
+                {"const": "repository"},
+            )
+            self.assertEqual(
+                coverage_schema["properties"]["surfaces"]["items"]
+                ["properties"]["receipt"]["properties"]["closed"],
+                {"const": True},
+            )
+            persisted = {
+                item["descriptor"]: item
+                for item in contract["persisted"]
+            }
+            coverage_path = Path(persisted["coverage"]["path"])
+            original_coverage = coverage_path.read_bytes()
+            invalid_coverage = json.loads(original_coverage)
+            invalid_coverage["deferred"] = ["none"]
+            with self.assertRaises(WorkbenchError) as raised:
+                self.workbench.write_scan_artifact(
+                    scan_id,
+                    "coverage",
+                    invalid_coverage,
+                    expected_digest=persisted["coverage"]["digest"],
+                    owner_session_hash=self.owner_a,
+                )
+            self.assertEqual(raised.exception.code, "invalid_artifact")
+            self.assertEqual(coverage_path.read_bytes(), original_coverage)
+            coverage_path.write_text(
+                json.dumps(invalid_coverage),
+                encoding="utf-8",
+            )
+            legacy_contract = self.workbench.get_scan_artifact_contract(
+                scan_id,
+                self.owner_a,
+            )
+            self.assertFalse(legacy_contract["closure"]["complete"])
+            self.assertIn(
+                "coverage.invalid",
+                legacy_contract["closure"]["missing"],
+            )
+            coverage_path.write_bytes(original_coverage)
+
+            canonical_path = Path(persisted["canonical-result"]["path"])
+            original = canonical_path.read_bytes()
+            with self.assertRaises(WorkbenchError) as raised:
+                self.workbench.write_scan_artifact(
+                    scan_id,
+                    "canonical-result",
+                    {
+                        "scanId": scan_id,
+                        "manifest": {"scan": {}},
+                        "findings": {"count": 1},
+                    },
+                    expected_digest=persisted["canonical-result"]["digest"],
+                    owner_session_hash=self.owner_a,
+                )
+            self.assertEqual(raised.exception.code, "invalid_canonical_result")
+            self.assertEqual(canonical_path.read_bytes(), original)
+
+            writeup_path = Path(persisted["derived-writeup"]["path"])
+            original_writeup = writeup_path.read_bytes()
+            invalid_writeup = json.loads(original_writeup)
+            invalid_writeup["outputs"][0]["path"] = "findings/wrong/name.md"
+            with self.assertRaises(WorkbenchError) as raised:
+                self.workbench.write_scan_artifact(
+                    scan_id,
+                    "derived-writeup",
+                    invalid_writeup,
+                    expected_digest=persisted["derived-writeup"]["digest"],
+                    owner_session_hash=self.owner_a,
+                )
+            self.assertIn(
+                raised.exception.code,
+                ("derived_writeup_mismatch", "invalid_derived_path"),
+            )
+            self.assertEqual(writeup_path.read_bytes(), original_writeup)
+
+        self._complete(before_complete=reject_invalid_replacement)
+
     def test_semantic_artifacts_finalize_index_export_and_retry(self):
         scan_id, completed = self._complete()
         self.assertEqual(completed["scan"]["status"], "complete")
@@ -477,6 +570,7 @@ class WorkflowLifecycleTests(WorkflowTestCase):
                             "receipt": {"reviewedPaths": ["app.py"]},
                         }
                     ],
+                    "explicitExclusions": [],
                     "deferred": [],
                 },
             )

@@ -178,11 +178,6 @@ export async function installHookRegistration(input: {
   if (inspection.state === "conflict") {
     throw new Error(inspection.detail);
   }
-  if (inspection.state === "mismatch") {
-    throw new Error(
-      "The existing Hook registration differs from this Extension and will not be overwritten.",
-    );
-  }
 
   const hookDirectory = path.dirname(input.hookPath);
   await ensureDirectory(hookDirectory);

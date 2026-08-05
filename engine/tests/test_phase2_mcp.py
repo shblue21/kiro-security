@@ -269,6 +269,14 @@ class PhaseTwoMcpTests(unittest.TestCase):
                 ),
                 {"requestNonce", "scanId", "descriptor", "expectedDigest"},
             )
+            self.assertEqual(
+                set(
+                    tools_by_name["kiro_security_write_scan_artifact"][
+                        "inputSchema"
+                    ]["required"]
+                ),
+                {"requestNonce", "scanId", "descriptor", "contentJson"},
+            )
 
             capabilities = client.call_tool(
                 "kiro_security_get_capabilities"
@@ -343,12 +351,14 @@ class PhaseTwoMcpTests(unittest.TestCase):
                 {
                     "scanId": scan_id,
                     "descriptor": "brief",
-                    "content": {
-                        "scanId": scan_id,
-                        "mode": "standard",
-                        "target": str(self.target),
-                        "scope": ".",
-                    },
+                    "contentJson": json.dumps(
+                        {
+                            "scanId": scan_id,
+                            "mode": "standard",
+                            "target": str(self.target),
+                            "scope": ".",
+                        }
+                    ),
                 },
             )["structuredContent"]
             client.call_tool(
@@ -388,10 +398,12 @@ class PhaseTwoMcpTests(unittest.TestCase):
                 {
                     "scanId": scan_id,
                     "descriptor": "threat-model",
-                    "content": {
-                        "scanId": scan_id,
-                        "summary": "MCP integration threat model.",
-                    },
+                    "contentJson": json.dumps(
+                        {
+                            "scanId": scan_id,
+                            "summary": "MCP integration threat model.",
+                        }
+                    ),
                 },
             )
             progress = client.call_tool(
@@ -419,17 +431,25 @@ class PhaseTwoMcpTests(unittest.TestCase):
                 "kiro_security_update_scan_progress",
                 {"scanId": scan_id, "reviewItemsCompleted": 2},
             )
-            client.call_tool(
+            discovery_write = client.call_tool(
                 "kiro_security_write_scan_artifact",
                 {
                     "scanId": scan_id,
                     "descriptor": "discovery",
-                    "content": {
-                        "scanId": scan_id,
-                        "candidates": [],
-                    },
+                    "contentJson": json.dumps(
+                        {"scanId": scan_id, "candidates": []}
+                    ),
                 },
-            )
+            )["structuredContent"]
+            discovery_read = client.call_tool(
+                "kiro_security_read_scan_artifact",
+                {
+                    "scanId": scan_id,
+                    "descriptor": "discovery",
+                    "expectedDigest": discovery_write["artifact"]["digest"],
+                },
+            )["structuredContent"]
+            self.assertEqual(discovery_read["content"]["candidates"], [])
             later = client.call_tool(
                 "kiro_security_update_scan_progress",
                 {"scanId": scan_id, "phase": "validation"},

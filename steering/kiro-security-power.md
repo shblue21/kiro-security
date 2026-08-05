@@ -99,8 +99,10 @@ For every running scan:
    `kiro_security_read_scan_artifact` and its exact digest from the current
    artifact contract. Do not use the general filesystem reader for scan
    artifacts.
-5. Write artifacts only with `kiro_security_write_scan_artifact`. Replacements
-   require the exact current digest as `expectedDigest`.
+5. Write artifacts only with `kiro_security_write_scan_artifact`. Serialize the
+   exact artifact object into `contentJson`; preserve explicit empty arrays and
+   never replace them with placeholder values. Replacements require the exact
+   current digest as `expectedDigest`.
 6. Re-read the artifact contract after writes or conflicts.
 7. Advance only to a phase listed by `phaseContract.allowedNextPhases`, and only
    after current closure and progress requirements are satisfied.
