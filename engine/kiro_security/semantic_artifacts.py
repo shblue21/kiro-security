@@ -12,6 +12,7 @@ from .errors import WorkbenchError
 from .phase_contracts import build_phase_contract
 from .scan_files import ArtifactContractError, atomic_write, read_regular_file
 from .semantic_contract import (
+    ATTACK_PATH_INSTANCE_DISPOSITIONS,
     BASE_DESCRIPTORS,
     DEEP_CHECKPOINT_RE,
     DEEP_CHECKPOINT_SCHEMA_KEY,
@@ -20,6 +21,7 @@ from .semantic_contract import (
     DEEP_WORKER_SCHEMA_KEY,
     DEEP_WORKERS_PER_ROUND,
     DIGEST_RE,
+    VALIDATION_INSTANCE_DISPOSITIONS,
     canonical_digest as _canonical_digest,
     canonical_findings as _canonical_findings,
     coverage_mode,
@@ -29,6 +31,7 @@ from .semantic_contract import (
     descriptor_schema_key as _descriptor_schema_key,
     descriptor_schemas as _descriptor_schemas,
     has_deep_artifact_after as _has_deep_artifact_after,
+    phase_result_instances as _phase_result_instances,
     record_ids as _record_ids,
     require_descriptor as _require_descriptor,
     string_ids as _string_ids,
@@ -113,9 +116,13 @@ class SemanticArtifactStore:
                 "Semantic artifacts can only be written for a running scan.",
             )
         normalized = _require_descriptor(descriptor, scan["mode"])
-        if normalized == "canonical-result":
-            self.require_candidate_finding_binding(scan, content)
         _validate_content(scan, normalized, content)
+        if normalized == "validation":
+            self._require_validation_binding(scan, content)
+        elif normalized == "attack-path":
+            self._require_attack_path_binding(scan, content)
+        elif normalized == "canonical-result":
+            self.require_candidate_finding_binding(scan, content)
         persisted = None
         present = None
         if scan["mode"] == "deep" and scan["phase"] == "discovery":
@@ -220,6 +227,10 @@ class SemanticArtifactStore:
         elif DEEP_MERGE_RE.fullmatch(normalized):
             round_number = int(DEEP_MERGE_RE.fullmatch(normalized).group(1))
             self._require_deep_merge_binding(scan, round_number, content)
+        elif normalized == "validation":
+            self._require_validation_binding(scan, content)
+        elif normalized == "attack-path":
+            self._require_attack_path_binding(scan, content)
         elif normalized == "canonical-result":
             self.require_candidate_finding_binding(scan, content)
         return {
@@ -639,8 +650,13 @@ class SemanticArtifactStore:
             missing.extend(self._semantic_chain_missing(scan))
         canonical = valid.get("canonical-result")
         if "discovery" in valid and canonical is not None:
-            if self._candidate_finding_mismatch(scan, canonical):
-                missing.append("canonical-findings-require-discovery-candidates")
+            try:
+                if self._candidate_finding_mismatch(scan, canonical):
+                    missing.append(
+                        "canonical-findings-must-match-reportable-attack-path"
+                    )
+            except WorkbenchError:
+                missing.append("canonical-finding-binding.invalid")
         if canonical is not None and "derived-writeup" in valid:
             try:
                 _validate_derived_writeups(
@@ -788,17 +804,86 @@ class SemanticArtifactStore:
             discovery.get("candidates"),
             "discovery.candidates",
         )
-        return not candidates and bool(_canonical_findings(canonical))
+        findings = _canonical_findings(canonical)
+        if not candidates:
+            return bool(findings)
+        attack_instances = _phase_result_instances(
+            self.read(scan, "attack-path").get("results"),
+            "attack-path.results",
+            ATTACK_PATH_INSTANCE_DISPOSITIONS,
+        )
+        expected = {
+            (candidate_id, instance_id)
+            for candidate_id, instances in attack_instances.items()
+            for instance_id, disposition in instances.items()
+            if disposition == "reportable"
+        }
+        actual = {
+            (
+                finding["extensions"]["candidateId"],
+                finding["extensions"]["candidateInstanceId"],
+            )
+            for finding in findings
+        }
+        return actual != expected
 
     def require_candidate_finding_binding(self, scan, canonical=None):
         value = canonical if canonical is not None else self.read(
             scan,
             "canonical-result",
         )
-        if self._candidate_finding_mismatch(scan, value):
+        discovery = self.read(scan, "discovery")
+        candidates = _record_ids(
+            discovery.get("candidates"),
+            "discovery.candidates",
+        )
+        if not candidates and bool(_canonical_findings(value)):
             raise WorkbenchError(
                 "canonical_discovery_mismatch",
                 "A scan without discovery candidates cannot contain canonical findings.",
+            )
+        _validate_content(scan, "canonical-result", value)
+        if self._candidate_finding_mismatch(scan, value):
+            raise WorkbenchError(
+                "canonical_attack_path_mismatch",
+                "Canonical findings must exactly match reportable attack-path instances.",
+            )
+
+    def _require_validation_binding(self, scan, validation):
+        candidates = _record_ids(
+            self.read(scan, "discovery").get("candidates"),
+            "discovery.candidates",
+        )
+        instances = _phase_result_instances(
+            validation.get("results"),
+            "validation.results",
+            VALIDATION_INSTANCE_DISPOSITIONS,
+        )
+        if set(instances) != candidates:
+            raise WorkbenchError(
+                "validation_discovery_mismatch",
+                "Validation results must exactly cover discovery candidate ids.",
+            )
+
+    def _require_attack_path_binding(self, scan, attack_path):
+        validation_instances = _phase_result_instances(
+            self.read(scan, "validation").get("results"),
+            "validation.results",
+            VALIDATION_INSTANCE_DISPOSITIONS,
+        )
+        attack_instances = _phase_result_instances(
+            attack_path.get("results"),
+            "attack-path.results",
+            ATTACK_PATH_INSTANCE_DISPOSITIONS,
+        )
+        if set(attack_instances) != set(validation_instances) or any(
+            set(attack_instances[candidate_id])
+            != set(validation_instances[candidate_id])
+            for candidate_id in validation_instances
+        ):
+            raise WorkbenchError(
+                "attack_path_validation_mismatch",
+                "Attack-path results must exactly cover validated candidate instances.",
             )
 
     def require_phase_exit(self, scan, phase):
@@ -820,6 +905,19 @@ class SemanticArtifactStore:
                 "phase_artifact_missing",
                 "%s must be written before leaving %s." % (descriptor, phase),
             )
+        if phase == "preflight":
+            brief = self.read(scan, "brief")
+            if brief.get("status") != "ready" or (
+                brief.get("capabilities", {}).get("sourceInspection") is not True
+            ):
+                raise WorkbenchError(
+                    "preflight_not_ready",
+                    "Preflight must be ready with target source inspection available.",
+                )
+        elif phase == "validation":
+            self._require_validation_binding(scan, self.read(scan, "validation"))
+        elif phase == "attack_path":
+            self._require_attack_path_binding(scan, self.read(scan, "attack-path"))
         if phase == "discovery" and scan["mode"] == "deep":
             closure = self.closure(scan)
             deep_missing = (closure.get("deep") or {}).get("missing") or []
@@ -887,21 +985,27 @@ class SemanticArtifactStore:
         validation = self.read(scan, "validation")
         attack_path = self.read(scan, "attack-path")
         candidate_ids = _record_ids(discovery.get("candidates"), "discovery.candidates")
-        validation_ids = _record_ids(
+        validation_instances = _phase_result_instances(
             validation.get("results"),
             "validation.results",
-            key="candidateId",
+            VALIDATION_INSTANCE_DISPOSITIONS,
         )
-        attack_ids = _record_ids(
+        attack_instances = _phase_result_instances(
             attack_path.get("results"),
             "attack-path.results",
-            key="candidateId",
+            ATTACK_PATH_INSTANCE_DISPOSITIONS,
         )
         missing = []
-        if candidate_ids != validation_ids:
+        if candidate_ids != set(validation_instances):
             missing.append("validation-results-must-cover-every-candidate")
-        if validation_ids != attack_ids:
+        if set(validation_instances) != set(attack_instances):
             missing.append("attack-path-results-must-cover-every-validation")
+        elif any(
+            set(validation_instances[candidate_id])
+            != set(attack_instances[candidate_id])
+            for candidate_id in validation_instances
+        ):
+            missing.append("attack-path-must-cover-every-validated-instance")
         return missing
 
     def _persisted(self, root, mode):
@@ -1020,19 +1124,7 @@ def _bind_finalizer_inputs(
         "excludePaths": exclude_paths,
         "summary": "Kiro Security %s scan." % scan["mode"],
     }
-    scan_manifest["threatModel"] = {
-        key: value
-        for key, value in threat_model.items()
-        if key
-        in (
-            "summary",
-            "assets",
-            "trustBoundaries",
-            "attackerCapabilities",
-            "securityObjectives",
-            "assumptions",
-        )
-    }
+    scan_manifest["threatModel"] = _project_threat_model(threat_model)
     manifest["documentType"] = "codex-security.scan-manifest"
     manifest["schemaVersion"] = "1.0"
     findings["documentType"] = "codex-security.findings"
@@ -1047,6 +1139,34 @@ def _bind_finalizer_inputs(
             "coverage_mode_mismatch",
             "Coverage mode must match the authoritative scan mode.",
         )
+
+
+def _project_threat_model(threat_model):
+    projected = {"summary": threat_model["summary"].strip()}
+    for key in (
+        "assets",
+        "trustBoundaries",
+        "attackerCapabilities",
+        "securityObjectives",
+        "assumptions",
+    ):
+        if key not in threat_model:
+            continue
+        values = []
+        for item in threat_model[key]:
+            if isinstance(item, str):
+                values.append(item.strip())
+                continue
+            name = item["name"].strip()
+            sensitivity = item.get("sensitivity")
+            description = item.get("description")
+            if sensitivity is not None:
+                name = "%s (%s)" % (name, sensitivity.strip())
+            if description is not None:
+                name = "%s: %s" % (name, description.strip())
+            values.append(name)
+        projected[key] = values
+    return projected
 
 
 def _materialize_coverage_receipts(root, coverage):

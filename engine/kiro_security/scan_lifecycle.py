@@ -363,7 +363,12 @@ class ScanLifecycleService:
                 next_findings = (
                     requested_findings
                     if requested_findings is not None
-                    else progress["reportable_findings_count"]
+                    else (
+                        0
+                        if current_phase_index < PHASES.index("validation")
+                        and next_phase_index >= PHASES.index("validation")
+                        else progress["reportable_findings_count"]
+                    )
                 )
                 if next_completed > next_total:
                     raise WorkbenchError(
@@ -378,12 +383,6 @@ class ScanLifecycleService:
                         "progress_regression",
                         "Review progress must be monotonic within one pass.",
                     )
-                if next_findings < progress["reportable_findings_count"]:
-                    raise WorkbenchError(
-                        "progress_regression",
-                        "Reportable finding count cannot decrease.",
-                    )
-
                 timestamp = utc_now()
                 scan_updated = connection.execute(
                     """
@@ -571,14 +570,10 @@ class ScanLifecycleService:
                     scan,
                     canonical,
                 )
-                if (
-                    not isinstance(canonical_findings, list)
-                    or progress["reportable_findings_count"]
-                    != len(canonical_findings)
-                ):
+                if not isinstance(canonical_findings, list):
                     raise WorkbenchError(
-                        "finding_count_mismatch",
-                        "Progress finding count must match canonical findings.",
+                        "invalid_canonical_result",
+                        "Canonical findings must contain a findings array.",
                     )
                 self._verify_completion_target(scan)
                 sealed_manifest = _has_sealed_manifest(Path(scan["scan_dir"]))
@@ -629,6 +624,26 @@ class ScanLifecycleService:
                         result.findings,
                     )
                     timestamp = result.manifest["scan"]["completedAt"]
+                    canonical_finding_count = len(
+                        result.findings.get("findings", [])
+                    )
+                    progress_updated = connection.execute(
+                        """
+                        UPDATE scan_progress
+                        SET reportable_findings_count = ?, updated_at = ?
+                        WHERE scan_id = ?
+                        """,
+                        (
+                            canonical_finding_count,
+                            timestamp,
+                            scan_uuid,
+                        ),
+                    )
+                    if progress_updated.rowcount != 1:
+                        raise WorkbenchError(
+                            "scan_progress_not_found",
+                            "Kiro Security scan progress was not found.",
+                        )
                     connection.execute(
                         "DELETE FROM scan_artifacts WHERE scan_id = ?",
                         (scan_uuid,),

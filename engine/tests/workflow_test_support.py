@@ -67,16 +67,25 @@ class WorkflowTestCase(unittest.TestCase):
             owner_session_hash=self.owner_a,
         )
 
+    def _ready_brief(self, mode="standard", **extra):
+        brief = {
+            "mode": mode,
+            "target": str(self.target.resolve()),
+            "scope": ".",
+            "status": "ready",
+            "capabilities": {"sourceInspection": True},
+        }
+        brief.update(extra)
+        return brief
+
     def _write_deep_brief(self, scan_id):
         self._write(
             scan_id,
             "brief",
-            {
-                "mode": "deep",
-                "target": str(self.target),
-                "scope": ".",
-                "worklist": [{"id": "app-source", "path": "app.py"}],
-            },
+            self._ready_brief(
+                "deep",
+                worklist=[{"id": "app-source", "path": "app.py"}],
+            ),
         )
         return self.workbench.get_scan_artifact_contract(
             scan_id,
@@ -154,11 +163,7 @@ class WorkflowTestCase(unittest.TestCase):
         self._write(
             scan_id,
             "brief",
-            {
-                "mode": "standard",
-                "target": str(self.target),
-                "scope": ".",
-            },
+            self._ready_brief(),
         )
         self.workbench.update_scan_progress(
             scan_id,
@@ -170,8 +175,19 @@ class WorkflowTestCase(unittest.TestCase):
             "threat-model",
             {
                 "summary": "Untrusted input crosses an execution boundary.",
-                "assets": ["source integrity"],
-                "trustBoundaries": ["call boundary"],
+                "assets": [
+                    {
+                        "name": "source integrity",
+                        "sensitivity": "high",
+                        "description": "Generated code must match reviewed source.",
+                    }
+                ],
+                "trustBoundaries": [
+                    {
+                        "name": "call boundary",
+                        "description": "Untrusted input crosses into execution.",
+                    }
+                ],
             },
         )
         self.workbench.update_scan_progress(
@@ -198,7 +214,19 @@ class WorkflowTestCase(unittest.TestCase):
         self._write(
             scan_id,
             "validation",
-            {"results": [{"candidateId": "candidate-1"}]},
+            {
+                "results": [
+                    {
+                        "candidateId": "candidate-1",
+                        "instances": [
+                            {
+                                "instanceId": "instance-1",
+                                "disposition": "survived",
+                            }
+                        ],
+                    }
+                ]
+            },
         )
         self.workbench.update_scan_progress(
             scan_id,
@@ -208,7 +236,21 @@ class WorkflowTestCase(unittest.TestCase):
         self._write(
             scan_id,
             "attack-path",
-            {"results": [{"candidateId": "candidate-1"}]},
+            {
+                "results": [
+                    {
+                        "candidateId": "candidate-1",
+                        "instances": [
+                            {
+                                "instanceId": "instance-1",
+                                "disposition": (
+                                    "reportable" if with_finding else "ignored"
+                                ),
+                            }
+                        ],
+                    }
+                ]
+            },
         )
         self.workbench.update_scan_progress(
             scan_id,
@@ -286,11 +328,7 @@ class WorkflowTestCase(unittest.TestCase):
         self._write(
             scan_id,
             "brief",
-            {
-                "mode": "standard",
-                "target": str(self.target),
-                "scope": ".",
-            },
+            self._ready_brief(),
         )
         self.workbench.update_scan_progress(
             scan_id,
@@ -402,5 +440,9 @@ class WorkflowTestCase(unittest.TestCase):
             "provenance": {"source": "standard-scan"},
             "writeup": {
                 "reportPath": "findings/untrusted-execution/untrusted-execution.md",
+            },
+            "extensions": {
+                "candidateId": "candidate-1",
+                "candidateInstanceId": "instance-1",
             },
         }

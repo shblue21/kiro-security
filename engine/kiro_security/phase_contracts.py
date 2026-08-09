@@ -16,12 +16,16 @@ PREFLIGHT = {
     "steps": (
         "Use the authoritative target, scope, mode, Diff identity, and user context "
         "from the scan context; never reconstruct them from the live workspace.",
-        "Evaluate actual delegation, usable worker-slot, orchestration-depth, goal, "
-        "runtime, ownership, and semantic-artifact capabilities. Never infer a "
-        "positive capability from an unknown fact.",
+        "Evaluate actual native target source-inspection, delegation, usable worker-"
+        "slot, orchestration-depth, goal, runtime, ownership, and semantic-artifact "
+        "capabilities. Never infer a positive capability from an unknown fact.",
+        "A native read/search channel for the target repository is required for every "
+        "scan mode. Record sourceInspection as true only when that channel is "
+        "available; classify it as incomplete when unknown and blocked when absent.",
         "Standard and Diff may record an explicitly degraded single-agent path. "
         "The brief must record the degradation and coverage cannot be described as "
-        "exhaustive when delegation-dependent work was not performed.",
+        "exhaustive when delegation-dependent work was not performed. Missing source "
+        "inspection is not an allowed degradation.",
         "Deep requires semantic Deep workflow support, delegation, exactly four "
         "usable independent worker slots, and the required orchestration depth. "
         "Never silently downgrade Deep or reduce a round below four workers.",
@@ -126,6 +130,9 @@ STANDARD_DISCOVERY = {
         "Every candidate requires a stable unique id, independent instance key, "
         "labeled entrypoint/root-control/sink locations, source, closest control, "
         "impact, plausibility, evidence, counterevidence, and exact proof gap.",
+        "Discovery candidate totals are not reportable findings. Do not publish the "
+        "candidate total as reportableFindingsCount; that field is provisional UI "
+        "telemetry refined by later reportability gates.",
         "Deduplicate only when one remediation subsumes every upstream candidate. "
         "Preserve separately fixed or independently reachable vulnerable instances.",
         "With delegation, give each isolated worker one worklist row or a tightly "
@@ -185,6 +192,8 @@ DIFF_DISCOVERY = {
         "Apply the Standard candidate identity, proof tuple, instance preservation, "
         "worker isolation, bounded dispatch, full-file receipt, reconciliation, and "
         "remediation-subsumption rules to the Diff-owned worklist.",
+        "Discovery candidate totals are not reportable findings. Do not publish the "
+        "candidate total as reportableFindingsCount.",
         "Stop when the Diff-linked pattern family is exhausted. Do not broaden into a "
         "repository-wide audit or claim unaffected code was exhaustively reviewed.",
         "When delegation is unavailable, record the degraded path and never claim "
@@ -267,6 +276,8 @@ DEEP_DISCOVERY = {
         "must not retroactively filter the canonical discovery inventory.",
         "Do not bypass centralized validation because a candidate recurred across "
         "workers. Recurrence is search evidence, not reportability proof.",
+        "Discovery candidate totals are not reportable findings. Do not publish the "
+        "candidate total as reportableFindingsCount.",
         "Do not expose worker counts, round counts, recurrence, lineage bookkeeping, or "
         "novelty metrics in the final user-facing report unless the user asks.",
     ),
@@ -340,11 +351,17 @@ VALIDATION = {
         "Do not imply dynamic validation occurred when it did not, fabricate missing "
         "product assumptions, or discard uncertain results. Carry exact unresolved "
         "proof gaps into coverage and the next phase.",
+        "Treat reportableFindingsCount only as provisional UI telemetry. It may be "
+        "revised downward as validation and attack-path gates suppress or defer "
+        "instances; persisted semantic artifacts remain authoritative.",
     ),
     "completion": (
         "The validation descriptor covers every canonical discovery candidate id "
         "exactly once and represents every expanded child instance exactly once inside "
         "its owning candidate result.",
+        "Every validation result contains a non-empty instances array. Each instance "
+        "has a stable instanceId and exactly one survived, suppressed, or uncertain "
+        "disposition; instance ids are unique within their candidate.",
         "Each result records candidate identity, instance and labeled locations, "
         "rubric, validation method, tested evidence, strongest counterevidence or exact "
         "proof gap, disposition, confidence, and artifact references when present.",
@@ -412,6 +429,8 @@ ATTACK_PATH = {
         "The attack-path descriptor covers every validation candidate id exactly once "
         "and represents each expanded instance exactly once inside its owning result, "
         "including ignored and deferred rows.",
+        "Attack-path candidate and instanceId sets exactly match validation. Every "
+        "instance has exactly one reportable, ignored, or deferred disposition.",
         "Every result records exact affected locations, attack-path facts, strongest "
         "counterevidence, impact, likelihood, suppression decision, matrix result, "
         "final severity, priority only when reportable, final policy, and exact proof "
@@ -452,6 +471,10 @@ REPORTING = {
         "independent instance, title and summary, final severity and confidence, "
         "taxonomy, target-relative exact locations, source-to-control-to-sink evidence, "
         "root cause, validation receipt, attack path, remediation, and scan provenance.",
+        "Bind every canonical finding to exactly one reportable attack-path instance "
+        "through extensions.candidateId and extensions.candidateInstanceId. Canonical "
+        "bindings must exactly equal the reportable attack-path bindings; ignored or "
+        "deferred instances never become findings.",
         "Do not invent finalizer-owned stable finding or occurrence ids and do not use "
         "title, severity, or line number alone as identity.",
         "For every reportable finding, assign exactly one dedicated writeup worker with "
@@ -495,6 +518,9 @@ REPORTING = {
         "Treat the completion result as authority. On a retryable filesystem or DB "
         "publication failure, re-read context and the artifact contract and retry the "
         "idempotent completion with a fresh nonce; never hand-edit the seal or manifest.",
+        "If completion returns an error, explicitly state that the scan remains "
+        "incomplete. Never present artifact contents as a completed result or offer "
+        "exports until completion returns its verified seal and report path.",
     ),
     "completion": (
         "The current artifact contract reports complete closure.",

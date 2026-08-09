@@ -355,8 +355,10 @@ class PhaseTwoMcpTests(unittest.TestCase):
                         {
                             "scanId": scan_id,
                             "mode": "standard",
-                            "target": str(self.target),
+                            "target": str(self.target.resolve()),
                             "scope": ".",
+                            "status": "ready",
+                            "capabilities": {"sourceInspection": True},
                         }
                     ),
                 },
@@ -662,8 +664,10 @@ class PhaseTwoMcpTests(unittest.TestCase):
             {
                 "scanId": scan_id,
                 "mode": "deep",
-                "target": str(self.target),
+                "target": str(self.target.resolve()),
                 "scope": ".",
+                "status": "ready",
+                "capabilities": {"sourceInspection": True},
                 "worklist": [{"id": "app-source", "path": "app.py"}],
             },
             owner_session_hash=owner_session_hash,

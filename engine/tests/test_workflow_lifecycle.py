@@ -85,6 +85,32 @@ class WorkflowLifecycleTests(WorkflowTestCase):
             self.assertEqual(raised.exception.code, "invalid_canonical_result")
             self.assertEqual(canonical_path.read_bytes(), original)
 
+            unrelated = json.loads(original)
+            extra_finding = json.loads(
+                json.dumps(unrelated["findings"]["findings"][0])
+            )
+            extra_finding["ruleId"] = "python.unvalidated-execution"
+            extra_finding["identity"]["instance"] = "other-value"
+            extra_finding["title"] = "Unvalidated execution path"
+            extra_finding["writeup"]["reportPath"] = (
+                "findings/unvalidated-execution/unvalidated-execution.md"
+            )
+            extra_finding["extensions"]["candidateInstanceId"] = "instance-2"
+            unrelated["findings"]["findings"].append(extra_finding)
+            with self.assertRaises(WorkbenchError) as raised:
+                self.workbench.write_scan_artifact(
+                    scan_id,
+                    "canonical-result",
+                    unrelated,
+                    expected_digest=persisted["canonical-result"]["digest"],
+                    owner_session_hash=self.owner_a,
+                )
+            self.assertEqual(
+                raised.exception.code,
+                "canonical_attack_path_mismatch",
+            )
+            self.assertEqual(canonical_path.read_bytes(), original)
+
             writeup_path = Path(persisted["derived-writeup"]["path"])
             original_writeup = writeup_path.read_bytes()
             invalid_writeup = json.loads(original_writeup)
@@ -110,6 +136,11 @@ class WorkflowLifecycleTests(WorkflowTestCase):
         self.assertEqual(completed["scan"]["status"], "complete")
         self.assertTrue(completed["manifestDigest"].startswith("sha256:"))
         self.assertTrue(Path(completed["reportPath"]).is_file())
+        report = Path(completed["reportPath"]).read_text(encoding="utf-8")
+        self.assertIn(
+            "source integrity (high): Generated code must match reviewed source.",
+            report,
+        )
         scan_dir = Path(completed["scan"]["scanDir"])
         self.assertTrue(
             (
@@ -130,6 +161,103 @@ class WorkflowLifecycleTests(WorkflowTestCase):
         self.assertTrue(Path(csv_result["path"]).is_file())
         retry = self.workbench.complete_scan(scan_id, self.owner_a)
         self.assertTrue(retry["reusedSeal"])
+
+    def test_completion_replaces_stale_progress_finding_count(self):
+        def publish_stale_telemetry(scan_id):
+            state = self.workbench.update_scan_progress(
+                scan_id,
+                reportable_findings_count=10,
+                owner_session_hash=self.owner_a,
+            )
+            self.assertEqual(
+                state["progress"]["reportableFindingsCount"],
+                10,
+            )
+
+        _scan_id, completed = self._complete(
+            before_complete=publish_stale_telemetry,
+        )
+        self.assertEqual(
+            completed["scan"]["progress"]["reportableFindingsCount"],
+            1,
+        )
+
+    def test_reportable_count_resets_after_discovery_and_can_decrease(self):
+        _workspace_id, scan_id = self._start()
+        self._write(scan_id, "brief", self._ready_brief())
+        self.workbench.update_scan_progress(
+            scan_id,
+            phase="threat_model",
+            owner_session_hash=self.owner_a,
+        )
+        self._write(scan_id, "threat-model", {"summary": "Count model."})
+        discovery = self.workbench.update_scan_progress(
+            scan_id,
+            phase="discovery",
+            review_items_total=1,
+            review_items_completed=1,
+            reportable_findings_count=10,
+            owner_session_hash=self.owner_a,
+        )
+        self.assertEqual(
+            discovery["progress"]["reportableFindingsCount"],
+            10,
+        )
+        self._write(
+            scan_id,
+            "discovery",
+            {"candidates": [{"id": "candidate-1"}]},
+        )
+        validation = self.workbench.update_scan_progress(
+            scan_id,
+            phase="validation",
+            owner_session_hash=self.owner_a,
+        )
+        self.assertEqual(
+            validation["progress"]["reportableFindingsCount"],
+            0,
+        )
+        self.workbench.update_scan_progress(
+            scan_id,
+            reportable_findings_count=10,
+            owner_session_hash=self.owner_a,
+        )
+        refined = self.workbench.update_scan_progress(
+            scan_id,
+            reportable_findings_count=6,
+            owner_session_hash=self.owner_a,
+        )
+        self.assertEqual(
+            refined["progress"]["reportableFindingsCount"],
+            6,
+        )
+
+    def test_threat_model_rejects_an_unnamed_object_before_phase_close(self):
+        _workspace_id, scan_id = self._start()
+        self._write(scan_id, "brief", self._ready_brief())
+        self.workbench.update_scan_progress(
+            scan_id,
+            phase="threat_model",
+            owner_session_hash=self.owner_a,
+        )
+        contract = self.workbench.get_scan_artifact_contract(
+            scan_id,
+            self.owner_a,
+        )
+        items = contract["descriptorSchemas"]["threat-model"]["properties"][
+            "assets"
+        ]["items"]
+        self.assertEqual(len(items["oneOf"]), 2)
+        with self.assertRaises(WorkbenchError) as raised:
+            self._write(
+                scan_id,
+                "threat-model",
+                {
+                    "summary": "Invalid model.",
+                    "assets": [{"description": "Missing stable name."}],
+                },
+            )
+        self.assertEqual(raised.exception.code, "invalid_artifact")
 
     def test_semantic_artifacts_reject_symlinked_output_parent(self):
         outside = self.root / "outside"
@@ -238,11 +366,7 @@ class WorkflowLifecycleTests(WorkflowTestCase):
         written = self._write(
             scan_id,
             "brief",
-            {
-                "mode": "standard",
-                "target": str(self.target),
-                "scope": ".",
-            },
+            self._ready_brief(),
         )
         self.workbench.update_scan_progress(
             scan_id,
@@ -255,9 +379,7 @@ class WorkflowLifecycleTests(WorkflowTestCase):
                 "brief",
                 {
                     "scanId": scan_id,
-                    "mode": "standard",
-                    "target": str(self.target),
-                    "scope": ".",
+                    **self._ready_brief(),
                 },
                 expected_digest=written["artifact"]["digest"],
                 owner_session_hash=self.owner_a,
@@ -269,11 +391,7 @@ class WorkflowLifecycleTests(WorkflowTestCase):
         self._write(
             scan_id,
             "brief",
-            {
-                "mode": "standard",
-                "target": str(self.target),
-                "scope": ".",
-            },
+            self._ready_brief(),
         )
         self.workbench.update_scan_progress(
             scan_id,
@@ -407,7 +525,7 @@ class WorkflowLifecycleTests(WorkflowTestCase):
         self._write(
             scan_id,
             "brief",
-            {"mode": "diff", "target": str(self.target), "scope": "."},
+            self._ready_brief("diff"),
         )
         self.workbench.update_scan_progress(
             scan_id,
@@ -503,11 +621,7 @@ class WorkflowLifecycleTests(WorkflowTestCase):
         written = self._write(
             scan_id,
             "brief",
-            {
-                "mode": "standard",
-                "target": str(self.target),
-                "scope": ".",
-            },
+            self._ready_brief(),
         )
         digest = written["artifact"]["digest"]
         with self.assertRaises(WorkbenchError) as raised:
@@ -537,7 +651,7 @@ class WorkflowLifecycleTests(WorkflowTestCase):
         self._write(
             scan_id,
             "brief",
-            {"mode": "standard", "target": str(self.target), "scope": "."},
+            self._ready_brief(),
         )
         with self.assertRaisesRegex(WorkbenchError, "can advance only"):
             self.workbench.update_scan_progress(
@@ -575,6 +689,96 @@ class WorkflowLifecycleTests(WorkflowTestCase):
                 },
             )
 
+    def test_preflight_requires_ready_source_inspection(self):
+        _workspace_id, scan_id = self._start()
+        contract = self.workbench.get_scan_artifact_contract(
+            scan_id,
+            self.owner_a,
+        )
+        schema = contract["descriptorSchemas"]["brief"]
+        self.assertIn("status", schema["required"])
+        self.assertIn("capabilities", schema["required"])
+        self.assertEqual(
+            schema["properties"]["capabilities"]["required"],
+            ["sourceInspection"],
+        )
+        self.assertEqual(schema["properties"]["mode"], {"const": "standard"})
+        self.assertEqual(
+            schema["properties"]["target"],
+            {"const": str(self.target.resolve())},
+        )
+        self.assertEqual(schema["properties"]["scope"], {"const": "."})
+
+        for field, value in (
+            ("mode", "deep"),
+            ("target", str(self.root / "other-target")),
+            ("scope", "src"),
+        ):
+            with self.subTest(mismatched_field=field):
+                with self.assertRaises(WorkbenchError) as raised:
+                    self._write(
+                        scan_id,
+                        "brief",
+                        {**self._ready_brief(), field: value},
+                    )
+                self.assertEqual(raised.exception.code, "brief_scan_mismatch")
+
+        with self.assertRaises(WorkbenchError) as raised:
+            self._write(
+                scan_id,
+                "brief",
+                {
+                    "mode": "standard",
+                    "target": str(self.target.resolve()),
+                    "scope": ".",
+                },
+            )
+        self.assertEqual(raised.exception.code, "invalid_artifact")
+
+        with self.assertRaises(WorkbenchError) as raised:
+            self._write(
+                scan_id,
+                "brief",
+                {
+                    **self._ready_brief(),
+                    "capabilities": {"sourceInspection": False},
+                },
+            )
+        self.assertEqual(raised.exception.code, "invalid_artifact")
+
+        for status in ("blocked", "incomplete"):
+            with self.subTest(status=status):
+                _workspace_id, non_ready_scan = self._start()
+                self._write(
+                    non_ready_scan,
+                    "brief",
+                    {
+                        **self._ready_brief(),
+                        "status": status,
+                        "capabilities": {"sourceInspection": False},
+                    },
+                )
+                with self.assertRaises(WorkbenchError) as raised:
+                    self.workbench.update_scan_progress(
+                        non_ready_scan,
+                        phase="threat_model",
+                        owner_session_hash=self.owner_a,
+                    )
+                self.assertEqual(raised.exception.code, "preflight_not_ready")
+
+        _workspace_id, ready_scan = self._start()
+        self._write(ready_scan, "brief", self._ready_brief())
+        self.workbench.update_scan_progress(
+            ready_scan,
+            phase="threat_model",
+            owner_session_hash=self.owner_a,
+        )
+        context = self.workbench.get_scan_context(
+            ready_scan,
+            owner_session_hash=self.owner_a,
+        )
+        self.assertEqual(context["scan"]["phase"], "threat_model")
+
     def test_artifact_contract_discloses_only_the_current_phase(self):
         _workspace_id, scan_id = self._start()
         first = self.workbench.get_scan_artifact_contract(
@@ -599,7 +803,7 @@ class WorkflowLifecycleTests(WorkflowTestCase):
         self._write(
             scan_id,
             "brief",
-            {"mode": "standard", "target": str(self.target), "scope": "."},
+            self._ready_brief(),
         )
         self.workbench.update_scan_progress(
             scan_id,

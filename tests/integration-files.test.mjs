@@ -31,14 +31,31 @@ test("extension foundation uses one external global workbench boundary", () => {
 test("auto-inclusion steering owns normal-chat orchestration without a Power entry point", () => {
   const steering = readFileSync("steering/kiro-security-power.md", "utf8");
   assert.match(steering, /inclusion: auto/);
+  assert.match(steering, /Use only when the user explicitly invokes Kiro Security/);
   assert.match(steering, /ordinary Kiro\s+Agent chat/);
   assert.match(steering, /The VSIX and direct\s+`kiro_security_\*` MCP tools own workspace/);
   assert.match(steering, /Never create or require `\.kiro\/security-power`/);
+  assert.match(steering, /Use direct `kiro_security_\*` MCP tools only for Kiro Security workspace/);
+  assert.match(steering, /Use Kiro's native read, search, directory, terminal, and context-gathering\s+tools to inspect the target repository/);
+  assert.doesNotMatch(steering, /Use only direct MCP tools whose names begin/);
   assert.match(steering, /exact returned setup revision,\s+digest, and normalized value/);
   assert.match(steering, /fresh UUID-shaped `requestNonce`/);
   assert.match(steering, /`phaseContract\.readAhead` equal to `false`/);
   assert.match(steering, /preflight -> discovery/);
   assert.match(steering, /kiro_security_complete_scan/);
+  assert.ok(
+    steering.indexOf("## Activation gate") < steering.indexOf("## Intent routing"),
+  );
+  assert.match(steering, /Loading this file does not establish that intent/);
+  assert.match(steering, /general code, PR, commit, branch, Diff/);
+  assert.match(steering, /Security terminology introduced by the Agent, a subagent/);
+  assert.match(steering, /do not call any `kiro_security_\*` tool while asking/);
+  assert.match(steering, /Only after the activation gate passes, choose one route/);
+  assert.match(steering, /Security review of a PR, commit, range, branch, patch, or working tree: Diff/);
+  assert.doesNotMatch(
+    steering,
+    /^- PR, commit, range, branch, patch, or working-tree review: Diff\.$/m,
+  );
   assert.doesNotMatch(steering, /^## (Threat-model|Validation|Attack-path) phase/m);
   assert.doesNotMatch(steering, /^## (Standard|Diff|Deep) discovery/m);
   assert.equal(existsSync("powers/kiro-security-power/POWER.md"), false);

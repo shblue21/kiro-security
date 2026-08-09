@@ -54,6 +54,7 @@ class RuntimeContractTests(unittest.TestCase):
         standard = str(contract("discovery"))
         self.assertIn("tightly coupled shard of at most five files", standard)
         self.assertIn("immutable pool plan of at most six slots", standard)
+        self.assertIn("candidate totals are not reportable findings", standard)
         self.assertIn("Never describe that path as exhaustive coverage", standard)
         self.assertNotIn("impact=high", standard)
 
@@ -81,6 +82,8 @@ class RuntimeContractTests(unittest.TestCase):
         )
         self.assertIn("strongest counterevidence", validation)
         self.assertIn("every expanded child instance exactly once inside", validation)
+        self.assertIn("stable instanceId", validation)
+        self.assertIn("provisional UI telemetry", validation)
         self.assertNotIn("critical -> P0", validation)
 
         attack_path = str(contract("attack_path"))
@@ -95,6 +98,7 @@ class RuntimeContractTests(unittest.TestCase):
         )
         self.assertIn("critical -> P0, high -> P1, medium -> P2", attack_path)
         self.assertIn("Never assign priority to ignore", attack_path)
+        self.assertIn("instanceId sets exactly match validation", attack_path)
         self.assertNotIn("new dedicated worker", attack_path)
 
         reporting = str(contract("reporting"))
@@ -104,6 +108,9 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertIn("leave reporting unclosed", reporting)
         self.assertIn("exactly one collection-wide", reporting)
         self.assertIn("report.md exists", reporting)
+        self.assertIn("scan remains incomplete", reporting)
+        self.assertIn("extensions.candidateId", reporting)
+        self.assertIn("extensions.candidateInstanceId", reporting)
         self.assertNotIn("Matrix row impact=unknown", reporting)
 
     def test_lifecycle_lock_and_transaction_order_is_explicit(self):

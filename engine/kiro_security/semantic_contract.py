@@ -43,17 +43,19 @@ DEEP_CHECKPOINT_RE = re.compile(
 )
 DEEP_MERGE_RE = re.compile(r"^discovery-round-(10|[1-9])-merge$")
 DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+VALIDATION_INSTANCE_DISPOSITIONS = frozenset(
+    ("survived", "suppressed", "uncertain")
+)
+ATTACK_PATH_INSTANCE_DISPOSITIONS = frozenset(
+    ("reportable", "ignored", "deferred")
+)
 
 
 def descriptor_schemas(scan):
     mode = scan["mode"]
     common = {
-        "brief": (
-            _deep_brief_schema()
-            if mode == "deep"
-            else _schema(("scanId", "mode", "target", "scope"))
-        ),
-        "threat-model": _schema(("scanId", "summary")),
+        "brief": _brief_schema(scan),
+        "threat-model": _threat_model_schema(),
         "discovery": _schema(
             (
                 "scanId",
@@ -67,11 +69,19 @@ def descriptor_schemas(scan):
         ),
         "validation": _schema(
             ("scanId", "results"),
-            {"results": _record_array_schema("candidateId")},
+            {
+                "results": _phase_result_array_schema(
+                    VALIDATION_INSTANCE_DISPOSITIONS
+                )
+            },
         ),
         "attack-path": _schema(
             ("scanId", "results"),
-            {"results": _record_array_schema("candidateId")},
+            {
+                "results": _phase_result_array_schema(
+                    ATTACK_PATH_INSTANCE_DISPOSITIONS
+                )
+            },
         ),
         "coverage": _coverage_schema(scan),
         "canonical-result": _canonical_schema(),
@@ -103,23 +113,25 @@ def validate_content(scan, descriptor, content):
         )
     if descriptor == "canonical-result":
         _validate_canonical_result(content)
-    if descriptor == "brief" and scan["mode"] == "deep":
-        worklist_ids(content.get("worklist"))
+    if descriptor == "brief":
+        _validate_brief(scan, content)
+    if descriptor == "threat-model":
+        _validate_threat_model(content)
     if descriptor == "coverage":
         _validate_coverage(scan, content)
     if descriptor == "discovery":
         record_ids(content.get("candidates"), "discovery.candidates")
     if descriptor == "validation":
-        record_ids(
+        phase_result_instances(
             content.get("results"),
             "validation.results",
-            key="candidateId",
+            VALIDATION_INSTANCE_DISPOSITIONS,
         )
     if descriptor == "attack-path":
-        record_ids(
+        phase_result_instances(
             content.get("results"),
             "attack-path.results",
-            key="candidateId",
+            ATTACK_PATH_INSTANCE_DISPOSITIONS,
         )
     worker_match = DEEP_WORKER_RE.fullmatch(descriptor)
     if worker_match and (
@@ -239,6 +251,7 @@ def _validate_canonical_result(content):
             "Canonical manifest requires a scan object.",
         )
     seen = set()
+    bindings = set()
     for index, finding in enumerate(canonical_findings(content)):
         context = "findings.findings[%d]" % index
         for key in ("rootCause", "validation", "attackPath", "writeup"):
@@ -261,6 +274,32 @@ def _validate_canonical_result(content):
                     "invalid_canonical_result",
                     "%s.%s must be an object." % (context, key),
                 )
+        extensions = finding.get("extensions")
+        if not isinstance(extensions, dict):
+            raise WorkbenchError(
+                "invalid_canonical_result",
+                "%s.extensions must be an object." % context,
+            )
+        candidate_id = extensions.get("candidateId")
+        instance_id = extensions.get("candidateInstanceId")
+        if (
+            not isinstance(candidate_id, str)
+            or not candidate_id.strip()
+            or not isinstance(instance_id, str)
+            or not instance_id.strip()
+        ):
+            raise WorkbenchError(
+                "invalid_canonical_result",
+                "%s.extensions requires candidateId and candidateInstanceId."
+                % context,
+            )
+        binding = (candidate_id, instance_id)
+        if binding in bindings:
+            raise WorkbenchError(
+                "invalid_canonical_result",
+                "Canonical findings contain duplicate candidate instance bindings.",
+            )
+        bindings.add(binding)
         try:
             identity = validate_finding_authoring(finding, context)
         except ArtifactContractError as exc:
@@ -409,6 +448,58 @@ def _invalid(message):
     raise WorkbenchError("invalid_artifact", message)
 
 
+def _validate_brief(scan, content):
+    if (
+        content.get("mode") != scan["mode"]
+        or content.get("target") != scan["target_path"]
+        or content.get("scope") != scan["scope"]
+    ):
+        raise WorkbenchError(
+            "brief_scan_mismatch",
+            "Brief mode, target, and scope must match the authoritative scan.",
+        )
+    status = content.get("status")
+    if status not in ("ready", "blocked", "incomplete"):
+        _invalid("brief.status must be ready, blocked, or incomplete.")
+    capabilities = content.get("capabilities")
+    if not isinstance(capabilities, dict) or not isinstance(
+        capabilities.get("sourceInspection"),
+        bool,
+    ):
+        _invalid("brief.capabilities.sourceInspection must be a boolean.")
+    if status == "ready" and capabilities["sourceInspection"] is not True:
+        _invalid("A ready brief requires sourceInspection to be true.")
+    if scan["mode"] == "deep":
+        worklist_ids(content.get("worklist"))
+
+
+def _validate_threat_model(content):
+    _nonempty_string(content.get("summary"), "threat-model.summary")
+    for key in (
+        "assets",
+        "trustBoundaries",
+        "attackerCapabilities",
+        "securityObjectives",
+        "assumptions",
+    ):
+        if key not in content:
+            continue
+        value = content[key]
+        if not isinstance(value, list):
+            _invalid("threat-model.%s must be an array." % key)
+        for index, item in enumerate(value):
+            context = "threat-model.%s[%d]" % (key, index)
+            if isinstance(item, str):
+                _nonempty_string(item, context)
+                continue
+            if not isinstance(item, dict):
+                _invalid("%s must be a non-empty string or named object." % context)
+            _nonempty_string(item.get("name"), "%s.name" % context)
+            for field in ("sensitivity", "description"):
+                if field in item:
+                    _nonempty_string(item[field], "%s.%s" % (context, field))
+
+
 def record_ids(value, context, key="id"):
     if not isinstance(value, list):
         raise WorkbenchError(
@@ -433,6 +524,63 @@ def record_ids(value, context, key="id"):
                 "%s contains duplicate %s values." % (context, key),
             )
         result.add(item[key])
+    return result
+
+
+def phase_result_instances(value, context, allowed_dispositions):
+    if not isinstance(value, list):
+        raise WorkbenchError(
+            "invalid_artifact",
+            "%s must be an array." % context,
+        )
+    result = {}
+    for result_index, item in enumerate(value):
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("candidateId"), str)
+            or not item["candidateId"].strip()
+        ):
+            raise WorkbenchError(
+                "invalid_artifact",
+                "%s[%d].candidateId must be a non-empty string."
+                % (context, result_index),
+            )
+        candidate_id = item["candidateId"]
+        if candidate_id in result:
+            raise WorkbenchError(
+                "invalid_artifact",
+                "%s contains duplicate candidateId values." % context,
+            )
+        instances = item.get("instances")
+        if not isinstance(instances, list) or not instances:
+            raise WorkbenchError(
+                "invalid_artifact",
+                "%s[%d].instances must be a non-empty array."
+                % (context, result_index),
+            )
+        instance_map = {}
+        for instance_index, instance in enumerate(instances):
+            if (
+                not isinstance(instance, dict)
+                or not isinstance(instance.get("instanceId"), str)
+                or not instance["instanceId"].strip()
+                or instance.get("disposition") not in allowed_dispositions
+            ):
+                raise WorkbenchError(
+                    "invalid_artifact",
+                    "%s[%d].instances[%d] requires a non-empty instanceId and "
+                    "supported disposition."
+                    % (context, result_index, instance_index),
+                )
+            instance_id = instance["instanceId"]
+            if instance_id in instance_map:
+                raise WorkbenchError(
+                    "invalid_artifact",
+                    "%s[%d].instances contains duplicate instanceId values."
+                    % (context, result_index),
+                )
+            instance_map[instance_id] = instance["disposition"]
+        result[candidate_id] = instance_map
     return result
 
 
@@ -697,11 +845,70 @@ def _record_array_schema(key):
     }
 
 
+def _phase_result_array_schema(allowed_dispositions):
+    text = {"type": "string", "minLength": 1}
+    return {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "required": ["candidateId", "instances"],
+            "properties": {
+                "candidateId": text,
+                "instances": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "required": ["instanceId", "disposition"],
+                        "properties": {
+                            "instanceId": text,
+                            "disposition": {
+                                "enum": sorted(allowed_dispositions)
+                            },
+                        },
+                        "additionalProperties": True,
+                    },
+                },
+            },
+            "additionalProperties": True,
+        },
+    }
+
+
 def _string_array_schema():
     return {
         "type": "array",
         "items": {"type": "string", "minLength": 1},
     }
+
+
+def _threat_model_schema():
+    text = {"type": "string", "minLength": 1}
+    named = {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+            "name": text,
+            "sensitivity": text,
+            "description": text,
+        },
+        "additionalProperties": True,
+    }
+    item_array = {
+        "type": "array",
+        "items": {"oneOf": [text, named]},
+    }
+    return _schema(
+        ("scanId", "summary"),
+        {
+            "summary": text,
+            "assets": item_array,
+            "trustBoundaries": item_array,
+            "attackerCapabilities": item_array,
+            "securityObjectives": item_array,
+            "assumptions": item_array,
+        },
+    )
 
 
 def _coverage_schema(scan):
@@ -811,6 +1018,7 @@ def _canonical_schema():
             "remediation",
             "provenance",
             "writeup",
+            "extensions",
         ],
         "properties": {
             "ruleId": text,
@@ -889,6 +1097,15 @@ def _canonical_schema():
                 },
                 "additionalProperties": True,
             },
+            "extensions": {
+                "type": "object",
+                "required": ["candidateId", "candidateInstanceId"],
+                "properties": {
+                    "candidateId": text,
+                    "candidateInstanceId": text,
+                },
+                "additionalProperties": True,
+            },
         },
         "additionalProperties": True,
     }
@@ -939,10 +1156,31 @@ def _derived_schema(descriptor):
     return _schema(("scanId", "outputs"), {"outputs": outputs})
 
 
-def _deep_brief_schema():
-    schema = _schema(("scanId", "mode", "target", "scope", "worklist"))
-    schema["properties"] = {
-        "worklist": {
+def _brief_schema(scan):
+    deep = scan["mode"] == "deep"
+    required = [
+        "scanId",
+        "mode",
+        "target",
+        "scope",
+        "status",
+        "capabilities",
+    ]
+    properties = {
+        "mode": {"const": scan["mode"]},
+        "target": {"const": scan["target_path"]},
+        "scope": {"const": scan["scope"]},
+        "status": {"enum": ["ready", "blocked", "incomplete"]},
+        "capabilities": {
+            "type": "object",
+            "required": ["sourceInspection"],
+            "properties": {"sourceInspection": {"type": "boolean"}},
+            "additionalProperties": True,
+        },
+    }
+    if deep:
+        required.append("worklist")
+        properties["worklist"] = {
             "type": "array",
             "minItems": 1,
             "items": {
@@ -955,8 +1193,7 @@ def _deep_brief_schema():
                 },
             },
         }
-    }
-    return schema
+    return _schema(required, properties)
 
 
 def _deep_worker_schema():

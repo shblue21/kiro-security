@@ -47,9 +47,7 @@ class RecoveryFollowupWorkflowTests(WorkflowTestCase):
             "brief",
             {
                 "scanId": scan_id,
-                "mode": "standard",
-                "target": str(self.target),
-                "scope": ".",
+                **self._ready_brief(),
             },
             owner_session_hash=self.owner_b,
         )
@@ -96,11 +94,7 @@ class RecoveryFollowupWorkflowTests(WorkflowTestCase):
                 self._write(
                     scan_id,
                     "brief",
-                    {
-                        "mode": "standard",
-                        "target": str(self.target),
-                        "scope": ".",
-                    },
+                    self._ready_brief(),
                 )
             except Exception as exc:  # pragma: no cover - asserted below
                 errors.append(exc)
