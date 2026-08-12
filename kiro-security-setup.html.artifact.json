@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "kind": "html",
+  "title": "Kiro Security 설정",
+  "entry": "kiro-security-setup.html",
+  "renderer": "html",
+  "status": "complete",
+  "exports": [
+    "html",
+    "pdf",
+    "zip"
+  ],
+  "primary": true,
+  "createdAt": "2026-08-10T10:50:56.032Z",
+  "updatedAt": "2026-08-10T10:50:56.036Z",
+  "sourceSkillId": "agent-browser",
+  "metadata": {
+    "identifier": "kiro-security-setup",
+    "artifactType": "text/html",
+    "inferred": false
+  }
+}

@@ -539,12 +539,18 @@ class Workbench:
         expected_version,
         owner_session_hash=None,
     ):
-        return self.followup.get_remediation_context(
+        context = self.followup.get_remediation_context(
             request_id,
             action_token,
             expected_version,
             require_session_hash(owner_session_hash),
         )
+        with self.database.connect() as connection:
+            context["scan"] = self._scan_state(
+                connection,
+                self._require_scan(connection, context["scan"]["id"]),
+            )
+        return context
 
     def set_finding_remediation(
         self,

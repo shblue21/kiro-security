@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "kind": "html",
+  "title": "kiro-security-dashboard.html",
+  "entry": "kiro-security-dashboard.html",
+  "renderer": "html",
+  "status": "complete",
+  "exports": [
+    "html",
+    "pdf",
+    "zip"
+  ],
+  "createdAt": "2026-08-10T11:38:15.688Z",
+  "updatedAt": "2026-08-10T11:38:15.688Z",
+  "metadata": {
+    "inferred": true,
+    "reconciled": true
+  }
+}

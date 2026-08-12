@@ -158,8 +158,16 @@ class WorkflowTestCase(unittest.TestCase):
             for worker_number in range(1, 5)
         ]
 
-    def _complete(self, with_finding=True, before_complete=None):
+    def _complete(
+        self,
+        with_finding=True,
+        before_complete=None,
+        finding_severity="medium",
+        informational_writeup=False,
+        omit_derived_writeup=False,
+    ):
         _workspace_id, scan_id = self._start()
+        reportable = with_finding and finding_severity != "informational"
         self._write(
             scan_id,
             "brief",
@@ -244,7 +252,7 @@ class WorkflowTestCase(unittest.TestCase):
                             {
                                 "instanceId": "instance-1",
                                 "disposition": (
-                                    "reportable" if with_finding else "ignored"
+                                    "reportable" if reportable else "ignored"
                                 ),
                             }
                         ],
@@ -255,7 +263,7 @@ class WorkflowTestCase(unittest.TestCase):
         self.workbench.update_scan_progress(
             scan_id,
             phase="reporting",
-            reportable_findings_count=1 if with_finding else 0,
+            reportable_findings_count=1 if reportable else 0,
             owner_session_hash=self.owner_a,
         )
         self._write(
@@ -273,7 +281,7 @@ class WorkflowTestCase(unittest.TestCase):
                     {
                         "id": "python-source",
                         "label": "Python source",
-                        "disposition": "reported" if with_finding else "no_issue_found",
+                        "disposition": "reported" if reportable else "no_issue_found",
                         "riskArea": "execution",
                         "receipt": {
                             "closed": True,
@@ -286,6 +294,10 @@ class WorkflowTestCase(unittest.TestCase):
             },
         )
         findings = [self._finding()] if with_finding else []
+        if findings:
+            findings[0]["severity"]["level"] = finding_severity
+            if not reportable and not informational_writeup:
+                findings[0].pop("writeup", None)
         self._write(
             scan_id,
             "canonical-result",
@@ -294,7 +306,7 @@ class WorkflowTestCase(unittest.TestCase):
                 "findings": {"findings": findings},
             },
         )
-        if with_finding:
+        if (reportable or informational_writeup) and not omit_derived_writeup:
             self._write(
                 scan_id,
                 "derived-writeup",
@@ -307,6 +319,7 @@ class WorkflowTestCase(unittest.TestCase):
                     ],
                 },
             )
+        if reportable:
             self._write(
                 scan_id,
                 "derived-hardening",

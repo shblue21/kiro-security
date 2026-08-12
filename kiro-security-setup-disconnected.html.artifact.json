@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "kind": "html",
+  "title": "kiro-security-setup-disconnected.html",
+  "entry": "kiro-security-setup-disconnected.html",
+  "renderer": "html",
+  "status": "complete",
+  "exports": [
+    "html",
+    "pdf",
+    "zip"
+  ],
+  "createdAt": "2026-08-10T11:35:11.475Z",
+  "updatedAt": "2026-08-10T11:35:11.475Z",
+  "metadata": {
+    "inferred": true,
+    "reconciled": true
+  }
+}

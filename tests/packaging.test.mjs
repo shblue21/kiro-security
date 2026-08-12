@@ -49,6 +49,12 @@ test("actual VSIX selection contains direct integration assets and no Power entr
   assert.ok(files.includes("engine/kiro_security/phase_contracts.py"));
   assert.ok(files.includes("engine/kiro_security/scan_files.py"));
   assert.ok(files.includes("node_modules/jsonc-parser/lib/umd/main.js"));
+  assert.ok(files.includes("node_modules/graceful-fs/LICENSE"));
+  assert.ok(files.includes("node_modules/proper-lockfile/LICENSE"));
+  assert.ok(files.includes("node_modules/proper-lockfile/index.js"));
+  assert.ok(files.includes("node_modules/retry/License"));
+  assert.ok(files.includes("node_modules/signal-exit/LICENSE.txt"));
+  assert.ok(files.includes("node_modules/yaml/LICENSE"));
   assert.ok(files.includes("node_modules/yaml/dist/index.js"));
   assert.ok(files.includes("out/packages/extension/src/approvalPolicy.js"));
   assert.ok(files.includes("out/packages/extension/src/integrationConfig.js"));

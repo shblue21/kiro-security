@@ -9,7 +9,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .artifacts import ArtifactContractError, finalize_scan, verify_seal
+from .artifacts import (
+    ArtifactContractError,
+    finalize_scan,
+    has_sealed_manifest,
+    verify_seal,
+)
+from .artifact_projections import REPORTABLE_SEVERITIES
 from .attestation import require_session_hash
 from .db import immediate_transaction, utc_now
 from .errors import WorkbenchError
@@ -443,6 +449,11 @@ class ScanLifecycleService:
                         "scan_complete",
                         "A completed scan cannot be marked failed.",
                     )
+                if has_sealed_manifest(Path(scan["scan_dir"])):
+                    raise WorkbenchError(
+                        "scan_sealed",
+                        "A sealed scan must retry completion instead of being marked failed.",
+                    )
                 timestamp = utc_now()
                 updated = connection.execute(
                     """
@@ -491,6 +502,11 @@ class ScanLifecycleService:
                         "scan_not_running",
                         "Only a running scan can be canceled.",
                     )
+                if has_sealed_manifest(Path(scan["scan_dir"])):
+                    raise WorkbenchError(
+                        "scan_sealed",
+                        "A sealed scan must retry completion instead of being canceled.",
+                    )
                 timestamp = utc_now()
                 updated = connection.execute(
                     """
@@ -532,13 +548,26 @@ class ScanLifecycleService:
                     )
                 if scan["status"] == "complete":
                     try:
-                        result = verify_seal(Path(scan["scan_dir"]))
+                        verified = verify_seal(Path(scan["scan_dir"]))
                     except ArtifactContractError as exc:
                         raise WorkbenchError("seal_invalid", str(exc))
-                    if scan["seal_manifest_digest"] != result.manifest_digest:
+                    if scan["seal_manifest_digest"] != verified.manifest_digest:
                         raise WorkbenchError(
                             "seal_invalid",
                             "Database manifest pin does not match the sealed scan.",
+                        )
+                    try:
+                        result = finalize_scan(
+                            Path(scan["scan_dir"]),
+                            source_root=Path(scan["target_path"]),
+                            expected_coverage_mode=coverage_mode(scan),
+                        )
+                    except ArtifactContractError as exc:
+                        raise WorkbenchError("finalization_failed", str(exc))
+                    if scan["seal_manifest_digest"] != result.manifest_digest:
+                        raise WorkbenchError(
+                            "seal_invalid",
+                            "Sealed scan changed while projections were regenerated.",
                         )
                     return self._completion_state(connection, scan, result)
                 if scan["phase"] != "reporting":
@@ -576,12 +605,16 @@ class ScanLifecycleService:
                         "Canonical findings must contain a findings array.",
                     )
                 self._verify_completion_target(scan)
-                sealed_manifest = _has_sealed_manifest(Path(scan["scan_dir"]))
+                sealed_manifest = has_sealed_manifest(Path(scan["scan_dir"]))
                 if sealed_manifest:
                     try:
-                        result = verify_seal(Path(scan["scan_dir"]))
+                        result = finalize_scan(
+                            Path(scan["scan_dir"]),
+                            source_root=Path(scan["target_path"]),
+                            expected_coverage_mode=coverage_mode(scan),
+                        )
                     except ArtifactContractError as exc:
-                        raise WorkbenchError("seal_invalid", str(exc))
+                        raise WorkbenchError("finalization_failed", str(exc))
                 else:
                     completed_at = utc_now()
                     deps.semantic_artifacts.materialize_finalizer_inputs(
@@ -624,8 +657,10 @@ class ScanLifecycleService:
                         result.findings,
                     )
                     timestamp = result.manifest["scan"]["completedAt"]
-                    canonical_finding_count = len(
-                        result.findings.get("findings", [])
+                    reportable_finding_count = sum(
+                        finding.get("severity", {}).get("level")
+                        in REPORTABLE_SEVERITIES
+                        for finding in result.findings.get("findings", [])
                     )
                     progress_updated = connection.execute(
                         """
@@ -634,7 +669,7 @@ class ScanLifecycleService:
                         WHERE scan_id = ?
                         """,
                         (
-                            canonical_finding_count,
+                            reportable_finding_count,
                             timestamp,
                             scan_uuid,
                         ),
@@ -880,19 +915,3 @@ def _safe_segment(value):
 
 def _compact_timestamp():
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-
-
-def _has_sealed_manifest(scan_dir):
-    path = scan_dir / "scan-manifest.json"
-    if not path.is_file() or path.is_symlink():
-        return False
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return False
-    return (
-        isinstance(value, dict)
-        and isinstance(value.get("scan"), dict)
-        and value["scan"].get("sealedAt") is not None
-        and value["scan"].get("artifacts") is not None
-    )

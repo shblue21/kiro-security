@@ -471,10 +471,13 @@ REPORTING = {
         "independent instance, title and summary, final severity and confidence, "
         "taxonomy, target-relative exact locations, source-to-control-to-sink evidence, "
         "root cause, validation receipt, attack path, remediation, and scan provenance.",
-        "Bind every canonical finding to exactly one reportable attack-path instance "
-        "through extensions.candidateId and extensions.candidateInstanceId. Canonical "
-        "bindings must exactly equal the reportable attack-path bindings; ignored or "
-        "deferred instances never become findings.",
+        "Bind every canonical finding to exactly one attack-path instance through "
+        "extensions.candidateId and extensions.candidateInstanceId. Reportable "
+        "canonical bindings must exactly equal the reportable attack-path bindings.",
+        "The canonical schema permits informational findings for ignored or deferred "
+        "instances. Preserve them when present and exclude them from "
+        "reportableFindingsCount and hardening gates. They do not require writeups, "
+        "but an explicit canonical writeup reference requires the exact derived file.",
         "Do not invent finalizer-owned stable finding or occurrence ids and do not use "
         "title, severity, or line number alone as identity.",
         "For every reportable finding, assign exactly one dedicated writeup worker with "
@@ -502,8 +505,9 @@ REPORTING = {
         "set and local_remediation_preferred. Hardening is a design portfolio, not an "
         "applied patch.",
         "When reportable findings exist, write exactly one derived-hardening output at "
-        "hardening/hardening.md. When none exist, omit writeups, hardening outputs, and "
-        "the canonical hardening reference.",
+        "hardening/hardening.md. When none exist, omit hardening outputs and the "
+        "canonical hardening reference; omit writeups unless a canonical finding "
+        "explicitly carries a writeup reference.",
         "Write coverage and canonical-result before derived-writeup and "
         "derived-hardening. Derived documents are unsealed projections and never "
         "replace canonical JSON authority.",

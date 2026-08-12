@@ -26,7 +26,9 @@ test("setup view connects steering, direct MCP, and Hook without Agent or Power 
   assert.match(setupSurface, /showMcpFile/);
   assert.match(setupSurface, /showSteeringFile/);
   assert.doesNotMatch(setupSurface, /showPermissionsFile/);
-  assert.match(setupHtml, /Chat approvals/);
+  assert.match(setupHtml, /채팅 승인 규칙/);
+  assert.match(setupHtml, /data-od-id="kiro-chat-connection"/);
+  assert.match(setupHtml, /var\(--vscode-foreground, var\(--fg\)\)/);
   assert.match(setup, /exact Kiro Trust rules/);
   assert.match(setup, /No custom Agent configuration is installed/);
   assert.doesNotMatch(setupSurface, /preparePowerIntegration/);
@@ -37,12 +39,23 @@ test("setup view connects steering, direct MCP, and Hook without Agent or Power 
   assert.doesNotMatch(setup, /<!doctype html>|function setupStyles/);
   assert.match(extension, /getOrCreateInstallationServerKey/);
   assert.match(extension, /new SecuritySetupView\(/);
+  assert.match(extension, /setupView\.promptForPendingUpdate\(\)/);
+  assert.match(setup, /inspection\.state !== "mismatch" \|\| !connected/);
+  assert.match(setup, /"Update & Reload"/);
+  assert.match(setup, /await this\.integration\.install\(\)/);
+  assert.match(setup, /workbench\.action\.reloadWindow/);
   assert.doesNotMatch(integration, /before\.state === "mismatch"/);
   assert.equal((integration.match(/resolvePythonExecutable\(\)/g) ?? []).length, 1);
   assert.doesNotMatch(chatBinding, /resolvePythonExecutable/);
   assert.doesNotMatch(integration, /WorkbenchAdminClient/);
   assert.match(setup, /new WorkbenchAdminClient\(/);
   assert.match(setupHtml, /input\.integration\.state === "unavailable"[\s\S]*\? "disabled"/);
+  assert.match(setup, /context\.workspaceState\.get<RepositoryScope>/);
+  assert.match(setup, /vscode\.workspace\.workspaceFolders/);
+  assert.match(setup, /dashboard: projectedDashboard/);
+  assert.match(setup, /requireWorkspaceScanForOccurrence/);
+  assert.match(setupHtml, /data-command="selectRepositoryScope"/);
+  assert.doesNotMatch(setupHtml, /data-path=/);
 });
 
 test("integration manager coalesces concurrent Python resolution", async () => {
@@ -147,6 +160,26 @@ test("Dashboard and Findings render exact recovery and follow-up controls", () =
         reportableFindingsCount: 1,
       },
     },
+    {
+      id: "scan-failed",
+      workspaceId: "workspace-failed",
+      status: "failed",
+      phase: "validation",
+      mode: "standard",
+      scope: ".",
+      scanDir: "/global/scans/failed",
+      startedAt: "2026-07-30T00:00:00Z",
+      updatedAt: "2026-07-30T00:03:00Z",
+      target: {
+        path: "/source/failed",
+        revision: "failed-revision",
+      },
+      progress: {
+        reviewItemsTotal: 40,
+        reviewItemsCompleted: 40,
+        reportableFindingsCount: 40,
+      },
+    },
   ];
   const dashboard = {
     scans,
@@ -168,6 +201,18 @@ test("Dashboard and Findings render exact recovery and follow-up controls", () =
             endLine: 5,
           },
         ],
+        triage: { status: "open" },
+      },
+      {
+        occurrenceId: "occurrence-info",
+        findingId: "finding-info",
+        scanId: "scan-two",
+        title: "Informational observation",
+        summary: "Not reportable.",
+        severity: "informational",
+        confidence: "high",
+        remediation: "No action required.",
+        locations: [],
         triage: { status: "open" },
       },
     ],
@@ -223,18 +268,170 @@ test("Dashboard and Findings render exact recovery and follow-up controls", () =
     integration,
     activeTab: "findings",
     dashboard,
+    repositoryScope: "all",
+    workspaceLabel: "현재 워크스페이스: alpha",
+    hasWorkspace: true,
+    globalScanCount: scans.length,
+    sourceActionScanIds: ["scan-one", "scan-two", "scan-failed"],
   });
 
   assert.match(html, /id="scan-filter"/);
   assert.match(html, /data-scan-id="scan-two"/);
   assert.match(html, /\/source\/beta/);
   assert.match(html, /beta-revision/);
-  assert.match(html, /Copy generate prompt again/);
+  assert.match(html, /수정안 생성 프롬프트 다시 복사/);
   assert.match(html, /data-command="copyRemediationPrompt"/);
-  assert.match(html, /Copy resume prompt again/);
+  assert.match(html, /재개 프롬프트 다시 복사/);
   assert.match(html, /data-command="cancelRecovery"/);
   assert.match(html, /data-request-id="recovery-one"/);
   assert.match(html, /data-command="trackFinding"/);
+  assert.match(html, /data-artifact-kind="report"/);
+  assert.match(html, /role="progressbar"/);
+  assert.match(html, /data-od-id="dashboard-overview"/);
+  assert.match(html, /data-od-id="findings-overview"/);
+  assert.match(
+    html,
+    /<span>보고 가능한 발견<\/span><strong>1<\/strong>/,
+  );
+
+  const { projectDashboard } = require(
+    "../out/packages/extension/src/workspaceProjection.js",
+  );
+  const currentHtml = renderSetupHtml({
+    webview: { cspSource: "vscode-webview:" },
+    stateRoot: "/global",
+    integration,
+    activeTab: "dashboard",
+    dashboard: projectDashboard(dashboard, ["/source/alpha"], "current"),
+    repositoryScope: "current",
+    workspaceLabel: "현재 워크스페이스: alpha",
+    hasWorkspace: true,
+    globalScanCount: scans.length,
+    sourceActionScanIds: ["scan-one"],
+  });
+  assert.match(currentHtml, /\/source\/alpha/);
+  assert.doesNotMatch(currentHtml, /\/source\/beta|beta-revision|scan-two/);
+
+  const emptyCurrentHtml = renderSetupHtml({
+    webview: { cspSource: "vscode-webview:" },
+    stateRoot: "/global",
+    integration,
+    activeTab: "dashboard",
+    dashboard: projectDashboard(dashboard, ["/source/gamma"], "current"),
+    repositoryScope: "current",
+    workspaceLabel: "현재 워크스페이스: gamma",
+    hasWorkspace: true,
+    globalScanCount: scans.length,
+    sourceActionScanIds: [],
+  });
+  assert.match(emptyCurrentHtml, /다른 저장소에 3개의 스캔/);
+  assert.match(emptyCurrentHtml, /data-repository-scope="all"/);
+
+  const noWorkspaceHtml = renderSetupHtml({
+    webview: { cspSource: "vscode-webview:" },
+    stateRoot: "/global",
+    integration,
+    activeTab: "dashboard",
+    dashboard: projectDashboard(dashboard, [], "current"),
+    repositoryScope: "current",
+    workspaceLabel: "현재 워크스페이스 (0)",
+    hasWorkspace: false,
+    globalScanCount: scans.length,
+    sourceActionScanIds: [],
+  });
+  assert.match(noWorkspaceHtml, /열린 워크스페이스가 없습니다/);
+
+  const allWithOutsideActionsBlocked = renderSetupHtml({
+    webview: { cspSource: "vscode-webview:" },
+    stateRoot: "/global",
+    integration,
+    activeTab: "findings",
+    dashboard,
+    repositoryScope: "all",
+    workspaceLabel: "현재 워크스페이스: alpha",
+    hasWorkspace: true,
+    globalScanCount: scans.length,
+    sourceActionScanIds: ["scan-one"],
+  });
+  assert.match(allWithOutsideActionsBlocked, /수정 작업을 계속하려면 이 저장소를 여세요/);
+  assert.doesNotMatch(
+    allWithOutsideActionsBlocked,
+    /data-command="copyRemediationPrompt"/,
+  );
+  assert.match(allWithOutsideActionsBlocked, /data-command="trackFinding"/);
+  assert.match(allWithOutsideActionsBlocked, /data-command="exportScan"/);
+});
+
+test("workspace projection excludes unrelated repositories and linked requests", () => {
+  const { projectDashboard, isScanInWorkspace } = require(
+    "../out/packages/extension/src/workspaceProjection.js",
+  );
+  const scan = (id, target, scope = ".") => ({
+    id,
+    workspaceId: `workspace-${id}`,
+    status: "complete",
+    phase: "reporting",
+    mode: "standard",
+    scope,
+    scanDir: `/global/${id}`,
+    startedAt: "2026-08-11T00:00:00Z",
+    updatedAt: "2026-08-11T00:00:00Z",
+    target: { path: target, revision: "revision" },
+    progress: {
+      reviewItemsTotal: 1,
+      reviewItemsCompleted: 1,
+      reportableFindingsCount: 1,
+    },
+  });
+  const alpha = scan("alpha", "/source/alpha");
+  const beta = scan("beta", "/source/beta");
+  const monorepo = scan("nested", "/source/mono", "packages/app");
+  const dashboard = {
+    scans: [alpha, beta, monorepo],
+    findings: [
+      { occurrenceId: "occ-alpha", scanId: "alpha" },
+      { occurrenceId: "occ-beta", scanId: "beta" },
+    ],
+    recoveryRequests: [
+      { id: "recovery-alpha", scanId: "alpha" },
+      { id: "recovery-beta", scanId: "beta" },
+    ],
+    remediationRequests: [
+      { requestId: "remediation-alpha", occurrenceId: "occ-alpha" },
+      { requestId: "remediation-beta", occurrenceId: "occ-beta" },
+    ],
+  };
+
+  const projected = projectDashboard(dashboard, ["/source/alpha"], "current");
+  assert.deepEqual(projected.scans.map((item) => item.id), ["alpha"]);
+  assert.deepEqual(projected.findings.map((item) => item.occurrenceId), [
+    "occ-alpha",
+  ]);
+  assert.deepEqual(projected.recoveryRequests.map((item) => item.id), [
+    "recovery-alpha",
+  ]);
+  assert.deepEqual(
+    projected.remediationRequests.map((item) => item.requestId),
+    ["remediation-alpha"],
+  );
+  assert.equal(
+    isScanInWorkspace(monorepo, ["/source/mono/packages/app"]),
+    true,
+  );
+  assert.equal(
+    isScanInWorkspace(alpha, ["/source/application"]),
+    false,
+  );
+  assert.equal(projectDashboard(dashboard, [], "current").scans.length, 0);
+  assert.equal(projectDashboard(dashboard, [], "all").scans.length, 3);
+  assert.deepEqual(
+    projectDashboard(
+      dashboard,
+      ["/source/alpha", "/source/beta"],
+      "current",
+    ).scans.map((item) => item.id),
+    ["alpha", "beta"],
+  );
 });
 
 test("tracking action creates a durable backend request before copying a prompt", () => {

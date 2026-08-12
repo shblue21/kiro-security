@@ -1,0 +1,639 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Kiro Security 발견</title>
+  <style>
+    :root {
+      --bg: oklch(98% 0.005 250);
+      --surface: oklch(100% 0 0);
+      --fg: oklch(22% 0.02 240);
+      --muted: oklch(50% 0.018 240);
+      --border: oklch(90% 0.008 240);
+      --accent: oklch(58% 0.16 145);
+      --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      --font-mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, Menlo, monospace;
+      color-scheme: light dark;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-width: 0;
+      color: var(--vscode-foreground, var(--fg));
+      background: var(--vscode-sideBar-background, var(--bg));
+      font: 13px/1.5 var(--vscode-font-family, var(--font-body));
+      -webkit-font-smoothing: antialiased;
+    }
+
+    button, summary, select, textarea { font: inherit; }
+
+    button {
+      min-height: 32px;
+      padding: 5px 10px;
+      border: 1px solid var(--vscode-button-border, transparent);
+      border-radius: 4px;
+      color: var(--vscode-button-secondaryForeground, var(--fg));
+      background: var(--vscode-button-secondaryBackground, var(--border));
+      cursor: pointer;
+    }
+
+    button:hover:not(:disabled) {
+      background: var(--vscode-button-secondaryHoverBackground, color-mix(in oklch, var(--border) 72%, var(--fg)));
+    }
+
+    button:focus-visible, summary:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible {
+      outline: 1px solid var(--vscode-focusBorder, var(--accent));
+      outline-offset: 2px;
+    }
+
+    button.primary {
+      color: var(--vscode-button-foreground, var(--surface));
+      background: var(--vscode-button-background, var(--accent));
+      box-shadow: 0 1px 1px color-mix(in oklch, var(--fg) 20%, transparent), 0 2px 8px color-mix(in oklch, var(--fg) 12%, transparent);
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 48px;
+      padding: 8px 10px;
+    }
+
+    .brand-lockup { display: flex; align-items: center; gap: 9px; min-width: 0; }
+
+    .brand-mark {
+      width: 24px;
+      height: 24px;
+      flex: none;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--vscode-panel-border, var(--border));
+      border-radius: 6px;
+      background: var(--vscode-editor-background, var(--surface));
+      font: 700 10px/1 var(--vscode-editor-font-family, var(--font-mono));
+      letter-spacing: .04em;
+    }
+
+    h1 { margin: 0; font-size: 13px; font-weight: 650; }
+    .topbar p { margin: 1px 0 0; color: var(--vscode-descriptionForeground, var(--muted)); font-size: 10px; }
+
+    .icon-button {
+      width: 32px;
+      padding: 3px;
+      border-color: transparent;
+      background: transparent;
+      font-size: 17px;
+    }
+
+    .tabs {
+      display: flex;
+      padding: 0 6px;
+      border-block: 1px solid var(--vscode-panel-border, var(--border));
+    }
+
+    .tab {
+      position: relative;
+      flex: 1;
+      min-height: 36px;
+      padding: 8px 5px;
+      color: var(--vscode-descriptionForeground, var(--muted));
+      text-align: center;
+      text-decoration: none;
+    }
+
+    .tab.active { color: var(--vscode-foreground, var(--fg)); font-weight: 600; }
+
+    .tab.active::after {
+      content: "";
+      position: absolute;
+      inset: auto 7px -1px;
+      height: 2px;
+      background: var(--vscode-focusBorder, var(--accent));
+    }
+
+    main { width: min(100%, 760px); margin-inline: auto; padding: 10px; }
+
+    .feedback {
+      display: none;
+      margin-bottom: 10px;
+      padding: 8px 10px;
+      border: 1px solid var(--vscode-focusBorder, var(--accent));
+      border-radius: 5px;
+      background: var(--vscode-textBlockQuote-background, var(--surface));
+    }
+
+    .feedback.visible { display: block; }
+
+    .section-heading {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 2px 2px 0;
+    }
+
+    .section-heading h2 { margin: 2px 0 0; font-size: 15px; }
+
+    .eyebrow {
+      color: var(--vscode-descriptionForeground, var(--muted));
+      font: 600 10px/1.2 var(--vscode-editor-font-family, var(--font-mono));
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+
+    .fixture-note { color: var(--vscode-descriptionForeground, var(--muted)); font-size: 10px; white-space: nowrap; }
+
+    .scope-switch {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      min-width: 0;
+      margin-bottom: 12px;
+    }
+
+    .scope-label {
+      min-width: 0;
+      overflow: hidden;
+      color: var(--vscode-descriptionForeground, var(--muted));
+      font-size: 11px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .scope-buttons { display: flex; flex: none; gap: 2px; }
+
+    .scope-buttons button {
+      min-height: 28px;
+      padding: 3px 8px;
+      background: transparent;
+    }
+
+    .scope-buttons button.active {
+      border-color: var(--vscode-focusBorder, var(--accent));
+      color: var(--vscode-foreground, var(--fg));
+      background: var(--vscode-list-activeSelectionBackground, var(--border));
+    }
+
+    .metric-strip {
+      display: flex;
+      align-items: center;
+      min-width: 0;
+      margin-top: 9px;
+      padding: 8px 10px;
+      border: 1px solid var(--vscode-panel-border, var(--border));
+      border-radius: 5px;
+      background: var(--vscode-editor-background, var(--surface));
+    }
+
+    .metric-inline {
+      min-width: 0;
+      display: inline-flex;
+      align-items: baseline;
+      gap: 5px;
+      color: var(--vscode-descriptionForeground, var(--muted));
+      font-size: 10px;
+      white-space: nowrap;
+    }
+
+    .metric-inline + .metric-inline {
+      margin-left: 9px;
+      padding-left: 9px;
+      border-left: 1px solid var(--vscode-panel-border, var(--border));
+    }
+
+    .metric-inline strong {
+      color: var(--vscode-foreground, var(--fg));
+      font: 650 13px/1 var(--vscode-editor-font-family, var(--font-mono));
+      font-variant-numeric: tabular-nums;
+    }
+
+    .metric-inline.urgent strong { color: var(--vscode-errorForeground, var(--fg)); }
+    .metric-inline.open strong { color: var(--vscode-editorWarning-foreground, var(--fg)); }
+
+    .card {
+      min-width: 0;
+      margin-top: 10px;
+      padding: 12px;
+      border: 1px solid var(--vscode-panel-border, var(--border));
+      border-radius: 6px;
+      background: var(--vscode-editor-background, var(--surface));
+    }
+
+    .filter-card { padding: 0; overflow: hidden; }
+
+    .filter-card > summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-height: 42px;
+      padding: 9px 12px;
+      list-style-position: inside;
+      cursor: pointer;
+      font-weight: 600;
+    }
+
+    .filter-summary {
+      margin-left: auto;
+      color: var(--vscode-descriptionForeground, var(--muted));
+      font: 500 10px/1.3 var(--vscode-editor-font-family, var(--font-mono));
+      white-space: nowrap;
+    }
+
+    .filters {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+      padding: 10px 12px 12px;
+      border-top: 1px solid var(--vscode-panel-border, var(--border));
+    }
+
+    label { display: grid; gap: 4px; color: var(--vscode-descriptionForeground, var(--muted)); font-size: 11px; }
+
+    select, textarea {
+      width: 100%;
+      min-width: 0;
+      border: 1px solid var(--vscode-dropdown-border, var(--border));
+      border-radius: 3px;
+      color: var(--vscode-dropdown-foreground, var(--fg));
+      background: var(--vscode-dropdown-background, var(--surface));
+    }
+
+    select { min-height: 30px; padding: 4px 7px; }
+    textarea { min-height: 74px; padding: 7px; resize: vertical; }
+
+    .card-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+    .card-title > div { min-width: 0; }
+    .card-title h3 { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+    .card-title p { margin: 2px 0 0; color: var(--vscode-descriptionForeground, var(--muted)); font: 10px/1.4 var(--vscode-editor-font-family, var(--font-mono)); }
+
+    .badge {
+      flex: none;
+      padding: 2px 7px;
+      border: 1px solid currentColor;
+      border-radius: 999px;
+      color: var(--vscode-errorForeground, var(--fg));
+      background: color-mix(in oklch, currentColor 8%, transparent);
+      font: 600 10px/1.45 var(--vscode-editor-font-family, var(--font-mono));
+      white-space: nowrap;
+    }
+
+    .badge-row { display: flex; flex: none; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
+
+    .badge-context {
+      color: var(--vscode-descriptionForeground, var(--muted));
+      background: color-mix(in oklch, currentColor 6%, transparent);
+    }
+
+    .summary { margin: 10px 0 0; }
+
+    .quick-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px 10px;
+      margin-top: 9px;
+      color: var(--vscode-descriptionForeground, var(--muted));
+      font-size: 11px;
+    }
+
+    .quick-meta strong { color: var(--vscode-foreground, var(--fg)); font-weight: 500; }
+
+    dl {
+      display: grid;
+      grid-template-columns: 58px minmax(0, 1fr);
+      gap: 5px 8px;
+      margin: 11px 0 0;
+      font-size: 11px;
+    }
+
+    dt { color: var(--vscode-descriptionForeground, var(--muted)); }
+    dd { margin: 0; overflow-wrap: anywhere; }
+    .mono { font-family: var(--vscode-editor-font-family, var(--font-mono)); font-variant-numeric: tabular-nums; }
+
+    details.inner {
+      margin-top: 10px;
+      padding-top: 8px;
+      border-top: 1px solid var(--vscode-panel-border, var(--border));
+    }
+
+    details.inner summary { border-radius: 3px; cursor: pointer; font-weight: 600; }
+    .details-body { padding-top: 8px; }
+    .details-body p { margin: 0; }
+    .details-body p + p { margin-top: 5px; }
+
+    .actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 11px; }
+
+    .request-state {
+      flex-basis: 100%;
+      color: var(--vscode-descriptionForeground, var(--muted));
+      font-size: 11px;
+    }
+
+    .blocked-action {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 9px;
+      margin-top: 11px;
+      padding: 9px;
+      border-radius: 4px;
+      background: var(--vscode-textBlockQuote-background, var(--bg));
+    }
+
+    .blocked-action .request-state { margin: 0; }
+
+    .blocked-action button {
+      min-height: 30px;
+      color: var(--vscode-descriptionForeground, var(--muted));
+    }
+
+    .repository-empty {
+      min-height: 136px;
+      display: grid;
+      place-content: center;
+      justify-items: center;
+      text-align: center;
+    }
+
+    .repository-empty h2 { margin: 9px 0 0; font-size: 14px; }
+    .repository-empty p { margin: 4px 0 0; color: var(--vscode-descriptionForeground, var(--muted)); }
+    .repository-empty button { margin-top: 11px; }
+    .empty-mark { color: var(--vscode-descriptionForeground, var(--muted)); font: 300 28px/1 var(--vscode-editor-font-family, var(--font-mono)); }
+
+    .empty-filter {
+      display: none;
+      min-height: 140px;
+      place-content: center;
+      text-align: center;
+      color: var(--vscode-descriptionForeground, var(--muted));
+    }
+
+    dialog {
+      width: min(calc(100% - 24px), 390px);
+      padding: 0;
+      border: 1px solid var(--vscode-panel-border, var(--border));
+      border-radius: 7px;
+      color: var(--vscode-foreground, var(--fg));
+      background: var(--vscode-editor-background, var(--surface));
+      box-shadow: 0 16px 44px color-mix(in oklch, var(--fg) 24%, transparent);
+    }
+
+    dialog::backdrop { background: color-mix(in oklch, var(--fg) 38%, transparent); }
+    .dialog-body { padding: 14px; }
+    .dialog-body h2 { margin: 0; font-size: 14px; }
+    .dialog-body > p { margin: 5px 0 11px; color: var(--vscode-descriptionForeground, var(--muted)); }
+    .dialog-actions { display: flex; justify-content: flex-end; gap: 7px; padding: 10px 14px; border-top: 1px solid var(--vscode-panel-border, var(--border)); }
+
+    @media (max-width: 520px) {
+      .filters { grid-template-columns: 1fr; }
+      .section-heading { align-items: flex-end; }
+      .blocked-action { grid-template-columns: 1fr; }
+      .blocked-action button { width: 100%; }
+      .dialog-actions button { flex: 1; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar" data-od-id="findings-topbar">
+    <div class="brand-lockup">
+      <span class="brand-mark" aria-hidden="true">KS</span>
+      <div><h1>Kiro Security Power</h1><p>저장소 보안 워크벤치</p></div>
+    </div>
+    <button class="icon-button" id="refresh" title="발견 목록 새로고침" aria-label="발견 목록 새로고침"><span aria-hidden="true">↻</span></button>
+  </header>
+
+  <nav class="tabs" aria-label="보안 패널" data-od-id="primary-tabs">
+    <a class="tab" href="kiro-security-setup.html">설정</a>
+    <a class="tab" href="kiro-security-dashboard.html">대시보드</a>
+    <a class="tab active" href="kiro-security-findings.html" aria-current="page">발견</a>
+  </nav>
+
+  <main data-od-id="findings-content">
+    <div class="feedback" id="feedback" role="status" aria-live="polite"></div>
+
+    <section class="scope-switch" aria-label="저장소 표시 범위" data-od-id="repository-scope">
+      <span class="scope-label" id="scope-label">현재 워크스페이스: alpha</span>
+      <div class="scope-buttons">
+        <button class="active" data-scope="current" aria-pressed="true">현재</button>
+        <button data-scope="all" aria-pressed="false">모든 저장소</button>
+      </div>
+    </section>
+
+    <section class="card repository-empty" id="repository-empty" data-od-id="repository-empty-state">
+      <span class="empty-mark" aria-hidden="true">—</span>
+      <h2>현재 워크스페이스에는 완료된 발견이 없습니다</h2>
+      <p>다른 저장소의 결과는 모든 저장소 보기에서 확인할 수 있습니다.</p>
+      <button class="primary" id="show-all-findings">모든 저장소 보기</button>
+    </section>
+
+    <section id="findings-overview" data-od-id="findings-overview" hidden>
+      <div class="section-heading">
+        <div><span class="eyebrow">검증 결과</span><h2>보안 발견</h2></div>
+        <span class="fixture-note">최종화된 스캔만 포함</span>
+      </div>
+      <div class="metric-strip" aria-label="발견 요약">
+        <span class="metric-inline">전체 <strong>1</strong></span>
+        <span class="metric-inline urgent">높음 이상 <strong>1</strong></span>
+        <span class="metric-inline open">열림 <strong id="open-count">1</strong></span>
+      </div>
+    </section>
+
+    <details class="card filter-card" id="finding-filters" data-od-id="finding-filters" hidden>
+      <summary><span>필터</span><span class="filter-summary" id="filter-summary">전체 조건</span></summary>
+      <div class="filters">
+        <label>스캔
+          <select id="scan-filter"><option value="">모든 스캔</option><option value="scan-two">/source/beta · beta-revision</option></select>
+        </label>
+        <label>심각도
+          <select id="severity-filter"><option value="">전체</option><option value="critical">치명적</option><option value="high">높음</option><option value="medium">중간</option><option value="low">낮음</option></select>
+        </label>
+        <label>상태
+          <select id="triage-filter"><option value="">전체</option><option value="open">열림</option><option value="closed">닫힘</option></select>
+        </label>
+      </div>
+    </details>
+
+    <section class="card" id="finding-card" data-od-id="finding-occurrence-one" data-scan="scan-two" data-severity="high" data-triage="open" data-scope-membership="outside" hidden>
+      <div class="card-title">
+        <div><h3>예시 발견</h3></div>
+        <div class="badge-row">
+          <span class="badge badge-context">외부 저장소</span>
+          <span class="badge">높음</span>
+        </div>
+      </div>
+      <p class="summary">프로젝트 테스트 픽스처의 검증된 발견 요약입니다.</p>
+      <div class="quick-meta">
+        <span>상태 <strong id="triage-state">열림</strong></span>
+        <span>위치 <strong class="mono">src/example.ts:4-5</strong></span>
+      </div>
+
+      <details class="inner">
+        <summary>세부 정보</summary>
+        <div class="details-body">
+          <dl>
+            <dt>신뢰도</dt><dd>높음</dd>
+            <dt>대상</dt><dd class="mono">/source/beta</dd>
+            <dt>리비전</dt><dd class="mono">beta-revision</dd>
+            <dt>Finding ID</dt><dd class="mono">finding-one</dd>
+          </dl>
+        </div>
+      </details>
+
+      <details class="inner">
+        <summary>권장 수정 방법</summary>
+        <div class="details-body">
+          <p>검토된 수정안을 적용하세요.</p>
+          <p class="mono">evidence: validated</p>
+        </div>
+      </details>
+
+      <div class="actions">
+        <button id="triage-action">닫기</button>
+      </div>
+
+      <div class="blocked-action">
+        <span class="request-state">수정 작업을 계속하려면 이 저장소를 현재 워크스페이스에서 여세요.</span>
+        <button disabled aria-describedby="blocked-action-reason">수정안 생성</button>
+        <span id="blocked-action-reason" hidden>현재 워크스페이스 외부의 저장소입니다.</span>
+      </div>
+
+      <details class="inner">
+        <summary>추가 작업</summary>
+        <div class="actions">
+          <button id="track-action">추적 워크플로</button>
+          <button id="json-action">JSON 내보내기</button>
+        </div>
+      </details>
+    </section>
+
+    <section class="card empty-filter" id="empty-filter" data-od-id="filter-empty-state">
+      <div><strong>조건에 맞는 발견이 없습니다</strong><p>필터를 변경해 다시 확인하세요.</p></div>
+    </section>
+  </main>
+
+  <dialog id="close-dialog" aria-labelledby="close-title">
+    <div class="dialog-body">
+      <h2 id="close-title">이 발견을 닫을까요?</h2>
+      <p>닫는 이유는 분류 기록에 저장됩니다.</p>
+      <label>닫는 이유
+        <select id="close-reason">
+          <option value="already_fixed">이미 수정됨</option>
+          <option value="wont_fix">수정하지 않음</option>
+          <option value="false_positive">오탐</option>
+        </select>
+      </label>
+      <label id="note-label" hidden>메모
+        <textarea id="close-note" placeholder="수정하지 않는 이유를 입력하세요"></textarea>
+      </label>
+    </div>
+    <div class="dialog-actions">
+      <button id="cancel-close">취소</button>
+      <button class="primary" id="confirm-close">닫기</button>
+    </div>
+  </dialog>
+
+  <script>
+    const feedback = document.getElementById("feedback");
+    const card = document.getElementById("finding-card");
+    const empty = document.getElementById("empty-filter");
+    const dialog = document.getElementById("close-dialog");
+    const scopeButtons = [...document.querySelectorAll("[data-scope]")];
+    let repositoryScope = "current";
+
+    function announce(message) {
+      feedback.textContent = message;
+      feedback.classList.add("visible");
+    }
+
+    function applyFilters() {
+      if (repositoryScope === "current") {
+        return;
+      }
+      const scan = document.getElementById("scan-filter").value;
+      const severity = document.getElementById("severity-filter").value;
+      const triage = document.getElementById("triage-filter").value;
+      const visible = (!scan || card.dataset.scan === scan) && (!severity || card.dataset.severity === severity) && (!triage || card.dataset.triage === triage);
+      card.hidden = !visible;
+      empty.style.display = visible ? "none" : "grid";
+      const activeLabels = [
+        scan ? "beta" : "",
+        severity ? document.getElementById("severity-filter").selectedOptions[0].textContent : "",
+        triage ? document.getElementById("triage-filter").selectedOptions[0].textContent : "",
+      ].filter(Boolean);
+      document.getElementById("filter-summary").textContent = activeLabels.length
+        ? activeLabels.join(" · ")
+        : "전체 조건";
+    }
+
+    function selectScope(scope) {
+      repositoryScope = scope;
+      const all = scope === "all";
+      scopeButtons.forEach((button) => {
+        const active = button.dataset.scope === scope;
+        button.classList.toggle("active", active);
+        button.setAttribute("aria-pressed", String(active));
+      });
+      document.getElementById("scope-label").textContent = all
+        ? "이 기기의 모든 저장소"
+        : "현재 워크스페이스: alpha";
+      document.getElementById("repository-empty").hidden = all;
+      document.getElementById("findings-overview").hidden = !all;
+      document.getElementById("finding-filters").hidden = !all;
+      card.hidden = !all;
+      empty.style.display = "none";
+      if (all) applyFilters();
+    }
+
+    document.querySelectorAll(".filters select").forEach((select) => select.addEventListener("change", applyFilters));
+    document.getElementById("refresh").addEventListener("click", () => announce("발견 목록을 새로 확인했습니다."));
+    scopeButtons.forEach((button) => button.addEventListener("click", () => selectScope(button.dataset.scope)));
+    document.getElementById("show-all-findings").addEventListener("click", () => selectScope("all"));
+
+    document.getElementById("triage-action").addEventListener("click", (event) => {
+      if (card.dataset.triage === "closed") {
+        card.dataset.triage = "open";
+        document.getElementById("triage-state").textContent = "열림";
+        document.getElementById("open-count").textContent = "1";
+        event.currentTarget.textContent = "닫기";
+        announce("발견을 다시 열었습니다.");
+        applyFilters();
+        return;
+      }
+      dialog.showModal();
+    });
+
+    document.getElementById("close-reason").addEventListener("change", (event) => {
+      document.getElementById("note-label").hidden = event.target.value !== "wont_fix";
+    });
+
+    document.getElementById("cancel-close").addEventListener("click", () => dialog.close());
+    document.getElementById("confirm-close").addEventListener("click", () => {
+      const reason = document.getElementById("close-reason").value;
+      const note = document.getElementById("close-note").value.trim();
+      if (reason === "wont_fix" && !note) {
+        announce("수정하지 않음을 선택한 경우 메모가 필요합니다.");
+        return;
+      }
+      dialog.close();
+      card.dataset.triage = "closed";
+      document.getElementById("triage-state").textContent = "닫힘";
+      document.getElementById("open-count").textContent = "0";
+      document.getElementById("triage-action").textContent = "다시 열기";
+      announce("발견을 닫았습니다.");
+      applyFilters();
+    });
+
+    document.getElementById("track-action").addEventListener("click", () => announce("추적 워크플로 프롬프트를 복사했습니다."));
+    document.getElementById("json-action").addEventListener("click", () => announce("JSON 내보내기 요청을 보냈습니다."));
+  </script>
+</body>
+</html>

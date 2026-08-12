@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Kiro Security 연결 전 설정</title>
+  <style>
+    :root {
+      --bg: oklch(98% 0.005 250);
+      --surface: oklch(100% 0 0);
+      --fg: oklch(22% 0.02 240);
+      --muted: oklch(50% 0.018 240);
+      --border: oklch(90% 0.008 240);
+      --accent: oklch(58% 0.16 145);
+      --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      --font-mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, Menlo, monospace;
+      color-scheme: light dark;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-width: 0;
+      color: var(--vscode-foreground, var(--fg));
+      background: var(--vscode-sideBar-background, var(--bg));
+      font: 13px/1.5 var(--vscode-font-family, var(--font-body));
+      -webkit-font-smoothing: antialiased;
+    }
+
+    button, summary { font: inherit; }
+
+    button {
+      min-height: 32px;
+      padding: 5px 10px;
+      border: 1px solid var(--vscode-button-border, transparent);
+      border-radius: 4px;
+      color: var(--vscode-button-secondaryForeground, var(--fg));
+      background: var(--vscode-button-secondaryBackground, var(--border));
+      cursor: pointer;
+    }
+
+    button:hover:not(:disabled) {
+      background: var(--vscode-button-secondaryHoverBackground, color-mix(in oklch, var(--border) 72%, var(--fg)));
+    }
+
+    button:focus-visible, summary:focus-visible {
+      outline: 1px solid var(--vscode-focusBorder, var(--accent));
+      outline-offset: 2px;
+    }
+
+    button:disabled { opacity: .5; cursor: not-allowed; }
+
+    button.primary {
+      color: var(--vscode-button-foreground, var(--surface));
+      background: var(--vscode-button-background, var(--accent));
+      box-shadow:
+        0 1px 1px color-mix(in oklch, var(--fg) 20%, transparent),
+        0 2px 8px color-mix(in oklch, var(--fg) 12%, transparent);
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 48px;
+      padding: 8px 10px;
+    }
+
+    .brand-lockup { display: flex; align-items: center; gap: 9px; min-width: 0; }
+
+    .brand-mark {
+      width: 24px;
+      height: 24px;
+      flex: none;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--vscode-panel-border, var(--border));
+      border-radius: 6px;
+      background: var(--vscode-editor-background, var(--surface));
+      font: 700 10px/1 var(--vscode-editor-font-family, var(--font-mono));
+      letter-spacing: .04em;
+    }
+
+    h1 { margin: 0; font-size: 13px; font-weight: 650; }
+
+    .topbar p {
+      margin: 1px 0 0;
+      color: var(--vscode-descriptionForeground, var(--muted));
+      font-size: 10px;
+    }
+
+    .icon-button {
+      width: 32px;
+      padding: 3px;
+      border-color: transparent;
+      background: transparent;
+      font-size: 17px;
+    }
+
+    .tabs {
+      display: flex;
+      padding: 0 6px;
+      border-block: 1px solid var(--vscode-panel-border, var(--border));
+    }
+
+    .tab {
+      position: relative;
+      flex: 1;
+      min-height: 36px;
+      padding: 7px 5px;
+      border: 0;
+      border-radius: 0;
+      color: var(--vscode-descriptionForeground, var(--muted));
+      background: transparent;
+    }
+
+    .tab.active { color: var(--vscode-foreground, var(--fg)); font-weight: 600; }
+
+    .tab.active::after {
+      content: "";
+      position: absolute;
+      inset: auto 7px -1px;
+      height: 2px;
+      background: var(--vscode-focusBorder, var(--accent));
+    }
+
+    main { width: min(100%, 760px); margin-inline: auto; padding: 10px; }
+    .page { display: none; gap: 12px; }
+    .page.active { display: grid; }
+
+    .card {
+      min-width: 0;
+      padding: 12px;
+      border: 1px solid var(--vscode-panel-border, var(--border));
+      border-radius: 6px;
+      background: var(--vscode-editor-background, var(--surface));
+    }
+
+    .status-hero { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+    .status-hero > div { min-width: 0; }
+    h2 { margin: 0; font-size: 14px; line-height: 1.3; }
+    p { margin: 4px 0 0; }
+
+    .muted { color: var(--vscode-descriptionForeground, var(--muted)); overflow-wrap: anywhere; }
+
+    .badge {
+      flex: none;
+      padding: 2px 7px;
+      border: 1px solid currentColor;
+      border-radius: 999px;
+      color: var(--vscode-editorWarning-foreground, var(--muted));
+      background: color-mix(in oklch, currentColor 8%, transparent);
+      font: 600 10px/1.45 var(--vscode-editor-font-family, var(--font-mono));
+      white-space: nowrap;
+    }
+
+    .badge.ready { color: var(--vscode-testing-iconPassed, var(--accent)); }
+
+    .context-list {
+      display: grid;
+      gap: 6px;
+      margin-top: 11px;
+      padding-top: 10px;
+      border-top: 1px solid var(--vscode-panel-border, var(--border));
+    }
+
+    .context-row {
+      display: grid;
+      grid-template-columns: 42px minmax(0, 1fr);
+      gap: 8px;
+      align-items: start;
+    }
+
+    .context-row > span { color: var(--vscode-descriptionForeground, var(--muted)); font-size: 11px; }
+    .context-row > strong { min-width: 0; font-size: 12px; font-weight: 500; overflow-wrap: anywhere; }
+
+    .connect-action { width: 100%; margin-top: 12px; }
+
+    .action-note {
+      margin-top: 7px;
+      color: var(--vscode-descriptionForeground, var(--muted));
+      font-size: 11px;
+      text-align: center;
+    }
+
+    details { margin-top: 12px; padding-top: 9px; border-top: 1px solid var(--vscode-panel-border, var(--border)); }
+    summary { border-radius: 3px; cursor: pointer; font-weight: 600; }
+
+    .diagnostic-card { padding: 0; overflow: hidden; }
+
+    .diagnostic-card > summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-height: 42px;
+      padding: 9px 12px;
+      list-style-position: inside;
+    }
+
+    .summary-status {
+      margin-left: auto;
+      color: var(--vscode-editorWarning-foreground, var(--muted));
+      font: 600 10px/1.3 var(--vscode-editor-font-family, var(--font-mono));
+      white-space: nowrap;
+    }
+
+    .summary-status.ready { color: var(--vscode-testing-iconPassed, var(--accent)); }
+
+    .details-body {
+      padding: 10px 12px 12px;
+      border-top: 1px solid var(--vscode-panel-border, var(--border));
+    }
+
+    .compact-checks { display: grid; gap: 8px; }
+
+    .compact-check {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .compact-check > div { min-width: 0; }
+    .compact-check strong { display: block; font-size: 12px; }
+    .compact-check .muted { display: block; margin-top: 1px; font-size: 11px; }
+
+    .check-state {
+      color: var(--vscode-editorWarning-foreground, var(--muted));
+      font: 700 11px/1 var(--vscode-editor-font-family, var(--font-mono));
+    }
+
+    .check-state.ready { color: var(--vscode-testing-iconPassed, var(--accent)); }
+
+    .nested-details { margin-top: 10px; }
+    .nested-details .details-body { padding-inline: 0; border-top: 0; }
+
+    dl {
+      display: grid;
+      grid-template-columns: minmax(72px, auto) minmax(0, 1fr);
+      gap: 6px 10px;
+      margin: 0;
+    }
+
+    dt { color: var(--vscode-descriptionForeground, var(--muted)); }
+    dd { margin: 0; overflow-wrap: anywhere; }
+    code, .mono { font-family: var(--vscode-editor-font-family, var(--font-mono)); font-variant-numeric: tabular-nums; }
+
+    .empty-state {
+      min-height: 210px;
+      display: grid;
+      place-content: center;
+      justify-items: center;
+      text-align: center;
+    }
+
+    .empty-mark {
+      color: var(--vscode-descriptionForeground, var(--muted));
+      font: 300 28px/1 var(--vscode-editor-font-family, var(--font-mono));
+    }
+
+    .empty-state h2 { margin-top: 10px; }
+
+    .text-button {
+      margin-top: 10px;
+      border-color: transparent;
+      background: transparent;
+      color: var(--vscode-textLink-foreground, var(--accent));
+    }
+
+    .feedback {
+      display: none;
+      margin-bottom: 12px;
+      padding: 8px 10px;
+      border: 1px solid var(--vscode-focusBorder, var(--accent));
+      border-radius: 5px;
+      background: var(--vscode-textBlockQuote-background, var(--surface));
+    }
+
+    .feedback.visible { display: block; }
+
+    dialog {
+      width: min(calc(100% - 24px), 420px);
+      max-height: calc(100% - 24px);
+      overflow: auto;
+      padding: 0;
+      border: 1px solid var(--vscode-panel-border, var(--border));
+      border-radius: 7px;
+      color: var(--vscode-foreground, var(--fg));
+      background: var(--vscode-editor-background, var(--surface));
+      box-shadow: 0 16px 44px color-mix(in oklch, var(--fg) 24%, transparent);
+    }
+
+    dialog::backdrop { background: color-mix(in oklch, var(--fg) 38%, transparent); }
+    .dialog-body { padding: 14px; }
+    .dialog-body h2 { padding-right: 24px; }
+    .dialog-body > p { margin-top: 6px; }
+
+    .install-list {
+      display: grid;
+      gap: 7px;
+      margin: 12px 0 0;
+      padding: 10px;
+      border-radius: 4px;
+      background: var(--vscode-textBlockQuote-background, var(--bg));
+    }
+
+    .install-item { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 7px; }
+    .install-item span:first-child { font-family: var(--vscode-editor-font-family, var(--font-mono)); }
+
+    .policy-note {
+      margin-top: 10px;
+      color: var(--vscode-descriptionForeground, var(--muted));
+      font-size: 11px;
+    }
+
+    .dialog-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 7px;
+      padding: 10px 14px;
+      border-top: 1px solid var(--vscode-panel-border, var(--border));
+    }
+
+    @media (max-width: 520px) {
+      dl { grid-template-columns: 1fr; gap: 2px; }
+      dd + dt { margin-top: 6px; }
+      .dialog-actions button { flex: 1; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar" data-od-id="setup-topbar">
+    <div class="brand-lockup">
+      <span class="brand-mark" aria-hidden="true">KS</span>
+      <div>
+        <h1>Kiro Security Power</h1>
+        <p>저장소 보안 워크벤치</p>
+      </div>
+    </div>
+    <button class="icon-button" id="refresh" title="상태 새로고침" aria-label="상태 새로고침"><span aria-hidden="true">↻</span></button>
+  </header>
+
+  <nav class="tabs" aria-label="보안 패널" role="tablist" data-od-id="primary-tabs">
+    <button class="tab active" role="tab" aria-selected="true" data-tab="setup">설정</button>
+    <button class="tab" role="tab" aria-selected="false" data-tab="dashboard">대시보드</button>
+    <button class="tab" role="tab" aria-selected="false" data-tab="findings">발견</button>
+  </nav>
+
+  <main data-od-id="setup-content">
+    <div class="feedback" id="feedback" role="status" aria-live="polite"></div>
+
+    <div class="page active" id="setup" role="tabpanel">
+      <section class="card" data-od-id="kiro-chat-connection">
+        <div class="status-hero">
+          <div>
+            <h2 id="connection-heading" data-od-id="connection-heading">Kiro Security가 연결되어 있지 않습니다</h2>
+            <p class="muted" id="connection-description">일반 Kiro Chat에서 사용하려면 연결이 필요합니다.</p>
+          </div>
+          <span class="badge" id="connection-badge">연결 필요</span>
+        </div>
+
+        <div class="context-list" aria-label="연결 요약">
+          <div class="context-row">
+            <span>범위</span>
+            <strong>현재 사용자 · 모든 Kiro Chat</strong>
+          </div>
+          <div class="context-row">
+            <span>설치</span>
+            <strong>MCP · steering · Hook · 승인 규칙</strong>
+          </div>
+        </div>
+
+        <button class="primary connect-action" id="open-connect" data-od-id="connect-kiro-chat">Kiro Chat 연결</button>
+        <p class="action-note">기존 설정은 유지하고 Kiro Security 관리 항목만 추가합니다.</p>
+      </section>
+
+      <details class="card diagnostic-card" data-od-id="connection-preview">
+        <summary>
+          <span>연결 전 확인</span>
+          <span class="summary-status" id="summary-status">4개 항목 미설치</span>
+        </summary>
+        <div class="details-body">
+          <div class="compact-checks" aria-label="설치 예정 항목">
+            <div class="compact-check">
+              <div><strong>직접 MCP 런타임</strong><span class="muted">확장 전역 저장소에 관리</span></div>
+              <span class="check-state" aria-label="미설치">—</span>
+            </div>
+            <div class="compact-check">
+              <div><strong>전역 steering</strong><span class="muted">일반 채팅에 워크플로 자동 포함</span></div>
+              <span class="check-state" aria-label="미설치">—</span>
+            </div>
+            <div class="compact-check">
+              <div><strong>채팅 식별 Hook</strong><span class="muted">요청을 Kiro 세션과 결합</span></div>
+              <span class="check-state" aria-label="미설치">—</span>
+            </div>
+            <div class="compact-check">
+              <div><strong>채팅 승인 규칙</strong><span class="muted">Start와 Cancel은 명시적 승인 유지</span></div>
+              <span class="check-state" aria-label="미설치">—</span>
+            </div>
+          </div>
+
+          <details class="nested-details">
+            <summary>관리 파일 위치</summary>
+            <div class="details-body">
+              <dl>
+                <dt>MCP</dt><dd class="mono">~/.kiro/settings/mcp.json</dd>
+                <dt>Steering</dt><dd class="mono">~/.kiro/steering/kiro-security-power.md</dd>
+                <dt>Hook</dt><dd class="mono">~/.kiro/hooks/kiro-security-power.json</dd>
+              </dl>
+            </div>
+          </details>
+        </div>
+      </details>
+    </div>
+
+    <div class="page" id="dashboard" role="tabpanel">
+      <section class="card empty-state" data-od-id="dashboard-locked-state">
+        <span class="empty-mark" aria-hidden="true">—</span>
+        <h2>연결 후 대시보드를 사용할 수 있습니다</h2>
+        <p class="muted">먼저 Kiro Chat 연결을 완료하세요.</p>
+        <button class="text-button go-setup">설정으로 이동</button>
+      </section>
+    </div>
+
+    <div class="page" id="findings" role="tabpanel">
+      <section class="card empty-state" data-od-id="findings-locked-state">
+        <span class="empty-mark" aria-hidden="true">—</span>
+        <h2>아직 확인할 발견이 없습니다</h2>
+        <p class="muted">연결 후 Kiro Chat에서 스캔을 시작하세요.</p>
+        <button class="text-button go-setup">설정으로 이동</button>
+      </section>
+    </div>
+  </main>
+
+  <dialog id="connect-dialog" aria-labelledby="dialog-title">
+    <div class="dialog-body">
+      <h2 id="dialog-title">Kiro Chat을 연결할까요?</h2>
+      <p class="muted">현재 사용자의 모든 Kiro Chat에 보안 워크플로를 연결합니다.</p>
+
+      <div class="install-list" aria-label="설치 변경 사항">
+        <div class="install-item"><span aria-hidden="true">01</span><span>관리되는 직접 MCP 런타임 등록</span></div>
+        <div class="install-item"><span aria-hidden="true">02</span><span>자동 포함 steering 파일 생성</span></div>
+        <div class="install-item"><span aria-hidden="true">03</span><span>채팅 식별 Hook 파일 생성</span></div>
+        <div class="install-item"><span aria-hidden="true">04</span><span>Kiro Trust 승인 규칙 추가</span></div>
+      </div>
+
+      <p class="policy-note">Start와 Cancel 도구는 항상 Kiro의 명시적 승인을 요구합니다. 사용자 정의 Agent 설정은 설치하지 않습니다.</p>
+    </div>
+    <div class="dialog-actions">
+      <button id="cancel-connect">취소</button>
+      <button class="primary" id="confirm-connect">연결</button>
+    </div>
+  </dialog>
+
+  <script>
+    const tabs = [...document.querySelectorAll(".tab")];
+    const pages = [...document.querySelectorAll(".page")];
+    const feedback = document.getElementById("feedback");
+    const dialog = document.getElementById("connect-dialog");
+    const connectButton = document.getElementById("open-connect");
+    const confirmButton = document.getElementById("confirm-connect");
+
+    function selectTab(name) {
+      tabs.forEach((tab) => {
+        const active = tab.dataset.tab === name;
+        tab.classList.toggle("active", active);
+        tab.setAttribute("aria-selected", String(active));
+      });
+      pages.forEach((page) => page.classList.toggle("active", page.id === name));
+      feedback.classList.remove("visible");
+    }
+
+    tabs.forEach((tab) => tab.addEventListener("click", () => selectTab(tab.dataset.tab)));
+    document.querySelectorAll(".go-setup").forEach((button) => button.addEventListener("click", () => selectTab("setup")));
+
+    document.getElementById("refresh").addEventListener("click", () => {
+      feedback.textContent = "연결 상태를 새로 확인했습니다.";
+      feedback.classList.add("visible");
+    });
+
+    connectButton.addEventListener("click", () => dialog.showModal());
+    document.getElementById("cancel-connect").addEventListener("click", () => dialog.close());
+
+    confirmButton.addEventListener("click", () => {
+      confirmButton.disabled = true;
+      confirmButton.textContent = "연결 중…";
+
+      window.setTimeout(() => {
+        dialog.close();
+        document.getElementById("connection-heading").textContent = "Kiro Security가 연결되어 있습니다";
+        document.getElementById("connection-description").textContent = "일반 Kiro Chat에 보안 워크플로가 자동 적용됩니다.";
+        const badge = document.getElementById("connection-badge");
+        badge.textContent = "연결됨";
+        badge.classList.add("ready");
+        connectButton.textContent = "연결 완료";
+        connectButton.disabled = true;
+        const summary = document.getElementById("summary-status");
+        summary.textContent = "4/4 정상";
+        summary.classList.add("ready");
+        document.querySelectorAll(".check-state").forEach((state) => {
+          state.textContent = "✓";
+          state.classList.add("ready");
+          state.setAttribute("aria-label", "정상");
+        });
+        feedback.textContent = "Kiro Security 연결이 완료되었습니다.";
+        feedback.classList.add("visible");
+        confirmButton.disabled = false;
+        confirmButton.textContent = "연결";
+      }, 800);
+    });
+  </script>
+</body>
+</html>

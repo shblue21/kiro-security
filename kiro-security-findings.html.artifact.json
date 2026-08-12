@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "kind": "html",
+  "title": "kiro-security-findings.html",
+  "entry": "kiro-security-findings.html",
+  "renderer": "html",
+  "status": "complete",
+  "exports": [
+    "html",
+    "pdf",
+    "zip"
+  ],
+  "createdAt": "2026-08-10T11:40:10.424Z",
+  "updatedAt": "2026-08-10T11:40:10.424Z",
+  "metadata": {
+    "inferred": true,
+    "reconciled": true
+  }
+}

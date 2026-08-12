@@ -167,8 +167,11 @@ class RecoveryFollowupWorkflowTests(WorkflowTestCase):
             claimed["version"],
             self.owner_b,
         )
+        self.assertNotIn("owner_session_hash", context["scan"])
+        self.assertNotIn("seal_manifest_digest", context["scan"])
+        self.assertNotIn("created_at", context["scan"])
         patch = (
-            Path(context["scan"]["scan_dir"])
+            Path(context["scan"]["scanDir"])
             / "remediation"
             / "generated.patch"
         )

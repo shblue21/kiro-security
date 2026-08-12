@@ -20,6 +20,7 @@ import {
   requireMcpServerKey,
 } from "./integrationConfig";
 import { findDuplicateJsonObjectKey } from "./jsonSafety";
+import { withSharedFileLock } from "./sharedFileLock";
 
 const MAX_POLICY_BYTES = 1024 * 1024;
 const STEERING_NAME = "kiro-security";
@@ -42,6 +43,15 @@ export interface KiroPermissionRule {
   readonly capability: string;
   readonly match: readonly string[];
   readonly effect: "allow" | "ask";
+}
+
+type PolicyEffect = "allow" | "ask" | "deny";
+
+interface ParsedPermissionRule {
+  readonly capability: string;
+  readonly effect: PolicyEffect;
+  readonly match?: readonly string[];
+  readonly exclude?: readonly string[];
 }
 
 export function buildApprovalPolicyRules(
@@ -91,14 +101,23 @@ export async function inspectApprovalPolicy(input: {
       path: policyPath,
     };
   }
+  const required = buildApprovalPolicyRules(input.serverKey);
+  const conflict = approvalPolicyConflict(snapshot.rules, required);
+  if (conflict) {
+    return {
+      state: "conflict",
+      detail: conflict,
+      path: policyPath,
+    };
+  }
   const missing = missingRules(
     snapshot.rules,
-    buildApprovalPolicyRules(input.serverKey),
+    required,
   );
   if (missing.length === 0) {
     return {
       state: "installed",
-      detail: "Only Kiro Security Start and Cancel require approval.",
+      detail: "The Kiro Security user approval rules are installed without conflicts.",
       path: policyPath,
     };
   }
@@ -114,12 +133,27 @@ export async function installApprovalPolicy(input: {
   readonly homeDirectory?: string;
 }): Promise<{ readonly changed: boolean }> {
   const policyPath = await resolveUserPolicyPath(input.homeDirectory);
+  return withSharedFileLock(
+    policyPath,
+    "The Kiro user permission file",
+    () => installApprovalPolicyLocked(input.serverKey, policyPath),
+  );
+}
+
+async function installApprovalPolicyLocked(
+  serverKey: string,
+  policyPath: string,
+): Promise<{ readonly changed: boolean }> {
   const snapshot = await readPolicy(policyPath);
   if (snapshot.kind === "unsafe") {
     throw new Error(snapshot.detail);
   }
-  const required = buildApprovalPolicyRules(input.serverKey);
+  const required = buildApprovalPolicyRules(serverKey);
   const existingRules = snapshot.kind === "file" ? snapshot.rules : [];
+  const conflict = approvalPolicyConflict(existingRules, required);
+  if (conflict) {
+    throw new Error(conflict);
+  }
   const missing = missingRules(existingRules, required);
   if (missing.length === 0) {
     return { changed: false };
@@ -156,7 +190,8 @@ export async function installApprovalPolicy(input: {
       : document.toString();
   const verified = parsePolicyContents(updated, format);
   if (
-    missingRules(verified, required).length > 0
+    missingRules(verified, required).length > 0 ||
+    approvalPolicyConflict(verified, required)
   ) {
     throw new Error("The Kiro Security approval policy failed verification.");
   }
@@ -345,6 +380,91 @@ function missingRules(
     }
   }
   return missing;
+}
+
+function approvalPolicyConflict(
+  existing: readonly unknown[],
+  required: readonly KiroPermissionRule[],
+): string | undefined {
+  for (const requirement of required) {
+    for (const resource of requirement.match) {
+      for (const rule of existing as readonly ParsedPermissionRule[]) {
+        if (
+          policyRuleApplies(rule, requirement.capability, resource) &&
+          ((requirement.effect === "allow" && rule.effect !== "allow") ||
+            (requirement.effect === "ask" && rule.effect === "deny"))
+        ) {
+          return `The existing Kiro user permission rules apply ${rule.effect} to ${resource}, but Kiro Security requires ${requirement.effect}. The existing rules were not modified.`;
+        }
+      }
+    }
+  }
+  return undefined;
+}
+
+function policyRuleApplies(
+  rule: ParsedPermissionRule,
+  capability: string,
+  resource: string,
+): boolean {
+  if (!policyCapabilityCovers(rule.capability, capability)) {
+    return false;
+  }
+  const included =
+    rule.match === undefined ||
+    rule.match.length === 0 ||
+    rule.match.some((pattern) => kiroPatternMatches(pattern, resource));
+  return (
+    included &&
+    !rule.exclude?.some((pattern) => kiroPatternMatches(pattern, resource))
+  );
+}
+
+function policyCapabilityCovers(
+  ruleCapability: string,
+  capability: string,
+): boolean {
+  if (ruleCapability === capability || ruleCapability === "all") {
+    return true;
+  }
+  return capability === "skill" && ruleCapability === "builtin";
+}
+
+function kiroPatternMatches(pattern: string, resource: string): boolean {
+  const normalized = pattern.replace(/\*\*/g, "*");
+  let patternIndex = 0;
+  let resourceIndex = 0;
+  let wildcardIndex = -1;
+  let wildcardResourceIndex = 0;
+  while (resourceIndex < resource.length) {
+    if (
+      patternIndex < normalized.length &&
+      normalized[patternIndex] === resource[resourceIndex]
+    ) {
+      patternIndex += 1;
+      resourceIndex += 1;
+    } else if (
+      patternIndex < normalized.length &&
+      normalized[patternIndex] === "*"
+    ) {
+      wildcardIndex = patternIndex;
+      patternIndex += 1;
+      wildcardResourceIndex = resourceIndex;
+    } else if (wildcardIndex >= 0) {
+      patternIndex = wildcardIndex + 1;
+      wildcardResourceIndex += 1;
+      resourceIndex = wildcardResourceIndex;
+    } else {
+      return false;
+    }
+  }
+  while (
+    patternIndex < normalized.length &&
+    normalized[patternIndex] === "*"
+  ) {
+    patternIndex += 1;
+  }
+  return patternIndex === normalized.length;
 }
 
 async function writePolicy(

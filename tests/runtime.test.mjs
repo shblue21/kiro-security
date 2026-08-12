@@ -1,15 +1,18 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 
 import {
   pythonExecutable,
   require,
 } from "./support.mjs";
+
+const executeFile = promisify(execFile);
 
 test("direct runtime is materialized in global storage and launches the MCP server", async () => {
   const { WorkbenchAdminClient } = require(
@@ -67,6 +70,52 @@ test("direct runtime is materialized in global storage and launches the MCP serv
     assert.deepEqual(dashboard.scans, []);
     assert.deepEqual(dashboard.findings, []);
     assert.equal(existsSync(join(stateRoot, "runtime", "direct-mcp", "engine", "kiro_security", "__pycache__")), false);
+  } finally {
+    await rm(temporary, { force: true, recursive: true });
+  }
+});
+
+test("direct runtime materialization is serialized across extension hosts", async () => {
+  const temporary = await mkdtemp(join(tmpdir(), "kiro-runtime-lock-test-"));
+  try {
+    const stateRoot = join(temporary, "global-state");
+    const modulePath = resolve(
+      "out/packages/extension/src/integrationFiles.js",
+    );
+    const program = `
+      const { materializeDirectRuntime } = require(process.env.RUNTIME_MODULE);
+      materializeDirectRuntime({
+        extensionRoot: process.env.EXTENSION_ROOT,
+        stateRoot: process.env.STATE_ROOT,
+      }).then(
+        (result) => process.stdout.write(JSON.stringify(result)),
+        (error) => { console.error(error); process.exitCode = 1; },
+      );
+    `;
+    const run = () =>
+      executeFile(process.execPath, ["-e", program], {
+        cwd: resolve("."),
+        env: {
+          ...process.env,
+          EXTENSION_ROOT: resolve("."),
+          RUNTIME_MODULE: modulePath,
+          STATE_ROOT: stateRoot,
+        },
+      });
+
+    const results = await Promise.all([run(), run()]);
+    const changed = results
+      .map(({ stdout }) => JSON.parse(stdout).changed)
+      .sort();
+    assert.deepEqual(changed, [false, true]);
+    const { inspectDirectRuntime } = require(modulePath);
+    assert.equal(
+      (await inspectDirectRuntime({ extensionRoot: resolve("."), stateRoot })).ready,
+      true,
+    );
+
+    const runtimeEntries = await readdir(join(stateRoot, "runtime"));
+    assert.deepEqual(runtimeEntries.sort(), ["direct-mcp"]);
   } finally {
     await rm(temporary, { force: true, recursive: true });
   }

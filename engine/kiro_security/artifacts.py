@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 
 from .artifact_projections import (
     CLOSE_REASONS,
+    REPORTABLE_SEVERITIES,
     SARIF_LEVELS,
     SARIF_SCHEMA,
     SEVERITY_ORDER,
@@ -299,6 +300,21 @@ def verify_seal(scan_dir: Path) -> FinalizationResult:
         if (root / "exports" / "results.sarif").is_file()
         else None,
         reused_seal=True,
+    )
+
+
+def has_sealed_manifest(scan_dir: Path) -> bool:
+    """Return whether finalization has crossed the immutable seal boundary."""
+
+    try:
+        manifest = _read_json(require_scan_directory(scan_dir), "scan-manifest.json")
+    except ArtifactContractError:
+        return False
+    scan = manifest.get("scan")
+    return (
+        isinstance(scan, dict)
+        and scan.get("sealedAt") is not None
+        and scan.get("artifacts") is not None
     )
 
 
@@ -1103,6 +1119,7 @@ __all__ = [
     "canonical_json_bytes",
     "derive_finding_identity",
     "finalize_scan",
+    "has_sealed_manifest",
     "verify_seal",
     "write_csv_projection",
     "write_sarif_projection",

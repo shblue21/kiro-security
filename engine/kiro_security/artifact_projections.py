@@ -23,6 +23,7 @@ SEVERITY_ORDER = {
     "low": 3,
     "informational": 4,
 }
+REPORTABLE_SEVERITIES = frozenset(("critical", "high", "medium", "low"))
 SARIF_LEVELS = {
     "critical": "error",
     "high": "error",
@@ -130,7 +131,7 @@ def build_report_markdown(
         (
             finding
             for finding in findings_document["findings"]
-            if finding["severity"]["level"] != "informational"
+            if finding["severity"]["level"] in REPORTABLE_SEVERITIES
         ),
         key=lambda finding: (
             SEVERITY_ORDER[finding["severity"]["level"]],

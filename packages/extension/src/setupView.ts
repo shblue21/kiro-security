@@ -1,4 +1,5 @@
-import { lstat } from "node:fs/promises";
+import { lstat, realpath } from "node:fs/promises";
+import * as path from "node:path";
 
 import * as vscode from "vscode";
 
@@ -11,15 +12,23 @@ import { renderSetupHtml, type ViewTab } from "./setupViewHtml";
 import {
   WorkbenchAdminClient,
   type DashboardProjection,
+  type ScanProjection,
 } from "./workbenchClient";
+import {
+  isScanInWorkspace,
+  projectDashboard,
+  type RepositoryScope,
+} from "./workspaceProjection";
 
 export { renderSetupHtml } from "./setupViewHtml";
 
 const VIEW_ID = "kiroSecurity.setup";
+const REPOSITORY_SCOPE_KEY = "kiroSecurity.repositoryScope.v1";
 
 type SetupCommand =
   | "refresh"
   | "selectTab"
+  | "selectRepositoryScope"
   | "connectIntegration"
   | "showHookFile"
   | "showMcpFile"
@@ -37,13 +46,14 @@ type SetupCommand =
 interface SetupMessage {
   readonly command: SetupCommand;
   readonly tab?: ViewTab;
+  readonly repositoryScope?: RepositoryScope;
   readonly scanId?: string;
   readonly occurrenceId?: string;
   readonly requestId?: string;
   readonly action?: "generate" | "apply" | "verify";
   readonly version?: string;
   readonly format?: "json" | "sarif" | "csv";
-  readonly path?: string;
+  readonly artifactKind?: "report" | "manifest" | "coverage";
 }
 
 export class SecuritySetupView implements vscode.WebviewViewProvider {
@@ -52,7 +62,9 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
   private busy = false;
   private feedback: string | undefined;
   private activeTab: ViewTab = "setup";
+  private repositoryScope: RepositoryScope;
   private dashboard: DashboardProjection | undefined;
+  private readonly workspaceState: vscode.Memento;
 
   constructor(
     context: vscode.ExtensionContext,
@@ -61,6 +73,50 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
     serverKey: string,
   ) {
     this.integration = new KiroIntegrationManager(context, paths, serverKey);
+    this.repositoryScope =
+      context.workspaceState.get<RepositoryScope>(REPOSITORY_SCOPE_KEY) ??
+      "current";
+    this.workspaceState = context.workspaceState;
+  }
+
+  async promptForPendingUpdate(): Promise<void> {
+    let inspection: KiroIntegrationInspection;
+    try {
+      inspection = await this.integration.inspect();
+    } catch (error) {
+      this.output.appendLine(
+        `Unable to check for a Kiro Security integration update: ${errorMessage(error)}`,
+      );
+      return;
+    }
+    const connected =
+      inspection.mcp.state === "installed" || inspection.mcp.state === "mismatch";
+    if (inspection.state !== "mismatch" || !connected) {
+      return;
+    }
+    const approved = await vscode.window.showWarningMessage(
+      "A Kiro Security integration update is ready.",
+      {
+        modal: true,
+        detail:
+          "Update the managed runtime, steering, Hook, MCP entry, and approval rules, then reload Kiro. Reloading stops active chats and tool processes.",
+      },
+      "Update & Reload",
+    );
+    if (approved !== "Update & Reload") {
+      return;
+    }
+    try {
+      await this.integration.install();
+      this.output.appendLine("Kiro Security integration updated. Reloading Kiro.");
+      await vscode.commands.executeCommand("workbench.action.reloadWindow");
+    } catch (error) {
+      const detail = errorMessage(error);
+      this.output.appendLine(`Kiro Security integration update failed: ${detail}`);
+      await vscode.window.showErrorMessage(
+        `Kiro Security integration update failed: ${detail}`,
+      );
+    }
   }
 
   resolveWebviewView(view: vscode.WebviewView): void {
@@ -68,7 +124,13 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
     const messageSubscription = view.webview.onDidReceiveMessage(
       async (message: unknown) => this.handleMessage(view, message),
     );
-    view.onDidDispose(() => messageSubscription.dispose());
+    const workspaceSubscription = vscode.workspace.onDidChangeWorkspaceFolders(
+      () => void this.refresh(view),
+    );
+    view.onDidDispose(() => {
+      messageSubscription.dispose();
+      workspaceSubscription.dispose();
+    });
     void this.refresh(view);
   }
 
@@ -89,6 +151,15 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
           if (message.tab) {
             this.activeTab = message.tab;
           }
+          break;
+        case "selectRepositoryScope":
+          this.repositoryScope = requiredRepositoryScope(
+            message.repositoryScope,
+          );
+          await this.workspaceState.update(
+            REPOSITORY_SCOPE_KEY,
+            this.repositoryScope,
+          );
           break;
         case "connectIntegration":
           await this.connectIntegration();
@@ -112,15 +183,18 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
           );
           break;
         case "createRecovery":
+          await this.requireWorkspaceScanById(message.scanId);
           await this.createRecovery(message.scanId);
           break;
         case "cancelRecovery":
+          await this.requireWorkspaceScanForRecovery(message.requestId);
           await this.callWorkbench("cancelRecovery", {
             requestId: requiredValue(message.requestId, "requestId"),
           });
           this.feedback = "Recovery request canceled.";
           break;
         case "openTriage":
+          await this.requireVisibleScanForOccurrence(message.occurrenceId);
           await this.callWorkbench("setTriage", {
             occurrenceId: requiredValue(message.occurrenceId, "occurrenceId"),
             status: "open",
@@ -128,12 +202,15 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
           this.feedback = "Finding reopened.";
           break;
         case "closeTriage":
+          await this.requireVisibleScanForOccurrence(message.occurrenceId);
           await this.closeTriage(message.occurrenceId);
           break;
         case "requestRemediation":
+          await this.requireWorkspaceScanForOccurrence(message.occurrenceId);
           await this.requestRemediation(message);
           break;
         case "copyRemediationPrompt":
+          await this.requireWorkspaceScanForRemediation(message.requestId);
           await this.copyRemediationPrompt(
             requiredValue(message.requestId, "requestId"),
             requiredVersion(message.version),
@@ -141,15 +218,14 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
           );
           break;
         case "exportScan":
+          await this.requireVisibleScanById(message.scanId);
           await this.exportScan(message);
           break;
         case "openArtifact":
-          await this.showFile(
-            requiredValue(message.path, "artifact path"),
-            "The selected scan artifact does not exist.",
-          );
+          await this.openArtifact(message);
           break;
         case "trackFinding":
+          await this.requireVisibleScanForOccurrence(message.occurrenceId);
           await this.createTracking(message.occurrenceId);
           break;
       }
@@ -196,6 +272,139 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
     ].join("\n");
     await vscode.env.clipboard.writeText(prompt);
     this.feedback = "Recovery prompt copied. Paste it into the Kiro chat that should resume the scan.";
+  }
+
+  private async openArtifact(message: SetupMessage): Promise<void> {
+    const scan = await this.requireVisibleScanById(message.scanId);
+    if (scan.status !== "complete") {
+      throw new Error("Only completed scan artifacts can be opened.");
+    }
+    const names = {
+      report: "report.md",
+      manifest: "scan-manifest.json",
+      coverage: "coverage.json",
+    } as const;
+    const kind = requiredArtifactKind(message.artifactKind);
+    await this.showFile(
+      path.join(scan.scanDir, names[kind]),
+      "The selected scan artifact does not exist.",
+    );
+  }
+
+  private scanById(scanId: string): ScanProjection {
+    const scan = this.dashboard?.scans.find((candidate) => candidate.id === scanId);
+    if (!scan) {
+      throw new Error("The selected scan is no longer available.");
+    }
+    return scan;
+  }
+
+  private async requireWorkspaceScanById(
+    scanId: string | undefined,
+  ): Promise<ScanProjection> {
+    const scan = this.scanById(requiredValue(scanId, "scanId"));
+    const workspace = await this.currentWorkspace();
+    if (!isScanInWorkspace(scan, workspace.roots)) {
+      throw new Error("Open this scan's repository in the current workspace to continue.");
+    }
+    return scan;
+  }
+
+  private async requireVisibleScanById(
+    scanId: string | undefined,
+  ): Promise<ScanProjection> {
+    const scan = this.scanById(requiredValue(scanId, "scanId"));
+    if (this.repositoryScope === "all") {
+      return scan;
+    }
+    const workspace = await this.currentWorkspace();
+    if (!isScanInWorkspace(scan, workspace.roots)) {
+      throw new Error("The selected item is outside the current workspace view.");
+    }
+    return scan;
+  }
+
+  private requireOccurrenceScanId(occurrenceId: string): string {
+    const finding = this.dashboard?.findings.find(
+      (candidate) => candidate.occurrenceId === occurrenceId,
+    );
+    if (!finding) {
+      throw new Error("The selected finding is no longer available.");
+    }
+    return finding.scanId;
+  }
+
+  private async requireWorkspaceScanForOccurrence(
+    occurrenceId: string | undefined,
+  ): Promise<void> {
+    const exactOccurrence = requiredValue(occurrenceId, "occurrenceId");
+    await this.requireWorkspaceScanById(
+      this.requireOccurrenceScanId(exactOccurrence),
+    );
+  }
+
+  private async requireVisibleScanForOccurrence(
+    occurrenceId: string | undefined,
+  ): Promise<void> {
+    const exactOccurrence = requiredValue(occurrenceId, "occurrenceId");
+    await this.requireVisibleScanById(
+      this.requireOccurrenceScanId(exactOccurrence),
+    );
+  }
+
+  private async requireWorkspaceScanForRecovery(
+    requestId: string | undefined,
+  ): Promise<void> {
+    const exactRequest = requiredValue(requestId, "requestId");
+    const request = this.dashboard?.recoveryRequests.find(
+      (candidate) => candidate.id === exactRequest,
+    );
+    if (!request) {
+      throw new Error("The selected recovery request is no longer available.");
+    }
+    await this.requireWorkspaceScanById(request.scanId);
+  }
+
+  private async requireWorkspaceScanForRemediation(
+    requestId: string | undefined,
+  ): Promise<void> {
+    const exactRequest = requiredValue(requestId, "requestId");
+    const request = this.dashboard?.remediationRequests.find(
+      (candidate) => candidate.requestId === exactRequest,
+    );
+    if (!request) {
+      throw new Error("The selected remediation request is no longer available.");
+    }
+    await this.requireWorkspaceScanForOccurrence(request.occurrenceId);
+  }
+
+  private async currentWorkspace(): Promise<{
+    readonly roots: readonly string[];
+    readonly label: string;
+  }> {
+    const folders = (vscode.workspace.workspaceFolders ?? []).filter(
+      (folder) => folder.uri.scheme === "file",
+    );
+    const entries = (
+      await Promise.all(
+        folders.map(async (folder) => {
+          try {
+            return { name: folder.name, root: await realpath(folder.uri.fsPath) };
+          } catch {
+            return undefined;
+          }
+        }),
+      )
+    ).filter(
+      (entry): entry is { readonly name: string; readonly root: string } =>
+        entry !== undefined,
+    );
+    const roots = entries.map((entry) => entry.root);
+    const label =
+      entries.length === 1
+        ? `현재 워크스페이스: ${entries[0].name}`
+        : `현재 워크스페이스 (${entries.length})`;
+    return { roots, label };
   }
 
   private async closeTriage(
@@ -379,12 +588,26 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
     } else {
       this.dashboard = undefined;
     }
+    const workspace = await this.currentWorkspace();
+    const projectedDashboard = this.dashboard
+      ? projectDashboard(this.dashboard, workspace.roots, this.repositoryScope)
+      : undefined;
+    const sourceActionScanIds = this.dashboard
+      ? this.dashboard.scans
+          .filter((scan) => isScanInWorkspace(scan, workspace.roots))
+          .map((scan) => scan.id)
+      : [];
     view.webview.html = renderSetupHtml({
       webview: view.webview,
       stateRoot: this.paths.stateRoot.fsPath,
       integration,
       activeTab: this.activeTab,
-      dashboard: this.dashboard,
+      dashboard: projectedDashboard,
+      repositoryScope: this.repositoryScope,
+      workspaceLabel: workspace.label,
+      hasWorkspace: workspace.roots.length > 0,
+      globalScanCount: this.dashboard?.scans.length ?? 0,
+      sourceActionScanIds,
       feedback: this.feedback,
     });
   }
@@ -402,6 +625,7 @@ function isSetupMessage(value: unknown): value is SetupMessage {
   return new Set<SetupCommand>([
     "refresh",
     "selectTab",
+    "selectRepositoryScope",
     "connectIntegration",
     "showHookFile",
     "showMcpFile",
@@ -438,6 +662,24 @@ function requiredRemediationAction(
 ): "generate" | "apply" | "verify" {
   if (value !== "generate" && value !== "apply" && value !== "verify") {
     throw new Error("Invalid remediation action.");
+  }
+  return value;
+}
+
+function requiredRepositoryScope(
+  value: RepositoryScope | undefined,
+): RepositoryScope {
+  if (value !== "current" && value !== "all") {
+    throw new Error("Invalid repository scope.");
+  }
+  return value;
+}
+
+function requiredArtifactKind(
+  value: SetupMessage["artifactKind"],
+): "report" | "manifest" | "coverage" {
+  if (value !== "report" && value !== "manifest" && value !== "coverage") {
+    throw new Error("Invalid artifact kind.");
   }
   return value;
 }

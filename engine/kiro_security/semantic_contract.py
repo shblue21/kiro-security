@@ -8,6 +8,7 @@ from .artifacts import (
     CONFIDENCES,
     DISPOSITIONS,
     INVENTORY_STRATEGIES,
+    REPORTABLE_SEVERITIES,
     SCHEMA_VERSION,
     SEVERITY_ORDER,
     ArtifactContractError,
@@ -254,7 +255,10 @@ def _validate_canonical_result(content):
     bindings = set()
     for index, finding in enumerate(canonical_findings(content)):
         context = "findings.findings[%d]" % index
-        for key in ("rootCause", "validation", "attackPath", "writeup"):
+        required_sections = ["rootCause", "validation", "attackPath"]
+        if finding.get("severity", {}).get("level") in REPORTABLE_SEVERITIES:
+            required_sections.append("writeup")
+        for key in required_sections:
             if key not in finding:
                 raise WorkbenchError(
                     "invalid_canonical_result",
@@ -268,12 +272,17 @@ def _validate_canonical_result(content):
                 "invalid_canonical_result",
                 "%s.rootCause must be a non-empty string or object." % context,
             )
-        for key in ("validation", "attackPath", "writeup"):
+        for key in ("validation", "attackPath"):
             if not isinstance(finding[key], dict):
                 raise WorkbenchError(
                     "invalid_canonical_result",
                     "%s.%s must be an object." % (context, key),
                 )
+        if "writeup" in finding and not isinstance(finding["writeup"], dict):
+            raise WorkbenchError(
+                "invalid_canonical_result",
+                "%s.writeup must be an object." % context,
+            )
         extensions = finding.get("extensions")
         if not isinstance(extensions, dict):
             raise WorkbenchError(
@@ -1017,7 +1026,6 @@ def _canonical_schema():
             "attackPath",
             "remediation",
             "provenance",
-            "writeup",
             "extensions",
         ],
         "properties": {

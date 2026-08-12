@@ -31,7 +31,7 @@ test("extension foundation uses one external global workbench boundary", () => {
 test("auto-inclusion steering owns normal-chat orchestration without a Power entry point", () => {
   const steering = readFileSync("steering/kiro-security-power.md", "utf8");
   assert.match(steering, /inclusion: auto/);
-  assert.match(steering, /Use only when the user explicitly invokes Kiro Security/);
+  assert.match(steering, /Activate only when the current user asks to execute/);
   assert.match(steering, /ordinary Kiro\s+Agent chat/);
   assert.match(steering, /The VSIX and direct\s+`kiro_security_\*` MCP tools own workspace/);
   assert.match(steering, /Never create or require `\.kiro\/security-power`/);
@@ -44,14 +44,50 @@ test("auto-inclusion steering owns normal-chat orchestration without a Power ent
   assert.match(steering, /preflight -> discovery/);
   assert.match(steering, /kiro_security_complete_scan/);
   assert.ok(
-    steering.indexOf("## Activation gate") < steering.indexOf("## Intent routing"),
+    steering.indexOf("## Activation gate") <
+      steering.indexOf("## Non-negotiable boundaries"),
   );
-  assert.match(steering, /Loading this file does not establish that intent/);
-  assert.match(steering, /general code, PR, commit, branch, Diff/);
-  assert.match(steering, /Security terminology introduced by the Agent, a subagent/);
-  assert.match(steering, /do not call any `kiro_security_\*` tool while asking/);
-  assert.match(steering, /Only after the activation gate passes, choose one route/);
-  assert.match(steering, /Security review of a PR, commit, range, branch, patch, or working tree: Diff/);
+  assert.ok(
+    steering.indexOf("## Activation gate") <
+      steering.indexOf("## Intent routing"),
+  );
+  assert.match(
+    steering,
+    /Loading this file does not establish\s+Kiro Security intent/,
+  );
+  assert.match(steering, /`authoritative_running_control`/);
+  assert.match(steering, /`authorized_followup`/);
+  assert.match(steering, /`standalone_native_workflow`/);
+  assert.match(steering, /`new_scan`/);
+  assert.match(steering, /A scan ID alone is\s+not authority/);
+  assert.match(
+    steering,
+    /inspect status or progress, continue,[\s\S]*Status inspection must not create a workspace or start a scan/,
+  );
+  assert.match(
+    steering,
+    /Only the current\s+user's own request or an established/,
+  );
+  assert.match(
+    steering,
+    /A direct request not to run or use Kiro Security always selects `none`/,
+  );
+  assert.doesNotMatch(steering, /`explicit_entry`|\/kiro-security/);
+  assert.match(steering, /Only `new_scan` enters mode selection/);
+  assert.match(
+    steering,
+    /A supplied finding does not select `standalone_native_workflow`[\s\S]*Route that request to `new_scan`[\s\S]*scan context for prioritized validation/,
+  );
+  assert.match(
+    steering,
+    /A file, function, or snippet alone is not a supported scan scope/,
+  );
+  assert.match(steering, /Never silently widen it/);
+  assert.match(steering, /use Kiro's native tools\. They do not use a Kiro Security workspace/);
+  assert.match(
+    steering,
+    /There is no\s+arbitrary completed-scan lookup or ownership transfer/,
+  );
   assert.doesNotMatch(
     steering,
     /^- PR, commit, range, branch, patch, or working-tree review: Diff\.$/m,
@@ -154,6 +190,52 @@ test("MCP registration install preserves unrelated JSONC entries", async () => {
       assert.equal((await stat(join(temporary, ".kiro", "settings"))).mode & 0o777, 0o755);
       assert.equal((await stat(mcpPath)).mode & 0o777, 0o600);
     }
+  } finally {
+    await rm(temporary, { force: true, recursive: true });
+  }
+});
+
+test("concurrent MCP registration installs preserve every server entry", async () => {
+  const { buildDirectMcpServerConfiguration } = require(
+    "../out/packages/extension/src/integrationConfig.js",
+  );
+  const { installMcpRegistration } = require(
+    "../out/packages/extension/src/integrationFiles.js",
+  );
+  const temporary = await mkdtemp(join(tmpdir(), "kiro-mcp-lock-test-"));
+  try {
+    const mcpPath = join(temporary, ".kiro", "settings", "mcp.json");
+    await mkdir(join(temporary, ".kiro", "settings"), { recursive: true });
+    await writeFile(
+      mcpPath,
+      '{\n  "mcpServers": { "user-server": { "command": "user" } }\n}\n',
+      "utf8",
+    );
+    const serverKeys = [
+      "ksp_aaaaaaaaaaaaaaaaaaaa",
+      "ksp_bbbbbbbbbbbbbbbbbbbb",
+    ];
+    await Promise.all(
+      serverKeys.map((serverKey) =>
+        installMcpRegistration({
+          mcpPath,
+          serverKey,
+          expected: buildDirectMcpServerConfiguration({
+            serverKey,
+            pythonExecutable: "/runtime/python3",
+            launcherPath: "/global/runtime/launcher.py",
+            stateRoot: "/global/state",
+            scanRoot: "/global/state/scans",
+          }),
+        }),
+      ),
+    );
+    const installed = readFileSync(mcpPath, "utf8");
+    assert.match(installed, /"user-server"/);
+    for (const serverKey of serverKeys) {
+      assert.match(installed, new RegExp(`"${serverKey}"`));
+    }
+    assert.equal(existsSync(`${mcpPath}.lock`), false);
   } finally {
     await rm(temporary, { force: true, recursive: true });
   }

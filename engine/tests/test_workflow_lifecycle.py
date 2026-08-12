@@ -159,8 +159,97 @@ class WorkflowLifecycleTests(WorkflowTestCase):
         self.assertEqual(finding["locations"][0]["path"], "app.py")
         csv_result = self.workbench.export_scan(scan_id, "csv", self.owner_a)
         self.assertTrue(Path(csv_result["path"]).is_file())
+        manifest_path = scan_dir / "scan-manifest.json"
+        manifest_bytes = manifest_path.read_bytes()
+        report_path = Path(completed["reportPath"])
+        sarif_path = Path(completed["sarifPath"])
+        report_path.unlink()
+        sarif_path.unlink()
         retry = self.workbench.complete_scan(scan_id, self.owner_a)
         self.assertTrue(retry["reusedSeal"])
+        self.assertTrue(report_path.is_file())
+        self.assertTrue(sarif_path.is_file())
+        self.assertEqual(manifest_path.read_bytes(), manifest_bytes)
+        self.assertEqual(retry["manifestDigest"], completed["manifestDigest"])
+
+    def test_filesystem_seal_blocks_semantic_writes_before_db_publish(self):
+        scan_id, completed = self._complete()
+        scan_dir = Path(completed["scan"]["scanDir"])
+        canonical_path = scan_dir / "artifacts" / "semantic" / "canonical-result.json"
+        original = canonical_path.read_bytes()
+
+        with self.workbench.database.connect() as connection:
+            connection.execute(
+                """
+                UPDATE scans
+                SET status = 'running', completed_at = NULL,
+                    seal_manifest_digest = NULL
+                WHERE id = ?
+                """,
+                (scan_id,),
+            )
+
+        contract = self.workbench.get_scan_artifact_contract(
+            scan_id,
+            self.owner_a,
+        )
+        self.assertEqual(contract["descriptorSchemas"], {})
+        canonical = json.loads(original)
+        canonical["findings"]["findings"][0]["severity"]["level"] = "low"
+        persisted = {
+            item["descriptor"]: item
+            for item in contract["persisted"]
+        }
+        with self.assertRaises(WorkbenchError) as raised:
+            self.workbench.write_scan_artifact(
+                scan_id,
+                "canonical-result",
+                canonical,
+                expected_digest=persisted["canonical-result"]["digest"],
+                owner_session_hash=self.owner_a,
+            )
+        self.assertEqual(raised.exception.code, "scan_sealed")
+        self.assertEqual(canonical_path.read_bytes(), original)
+
+        report_path = Path(completed["reportPath"])
+        sarif_path = Path(completed["sarifPath"])
+        report_path.unlink()
+        sarif_path.unlink()
+        retry = self.workbench.complete_scan(scan_id, self.owner_a)
+        self.assertTrue(retry["reusedSeal"])
+        self.assertEqual(retry["scan"]["status"], "complete")
+        self.assertTrue(report_path.is_file())
+        self.assertTrue(sarif_path.is_file())
+
+    def test_filesystem_seal_blocks_failure_and_cancel_before_db_publish(self):
+        for action in ("fail", "cancel"):
+            with self.subTest(action=action):
+                scan_id, _completed = self._complete()
+                with self.workbench.database.connect() as connection:
+                    connection.execute(
+                        """
+                        UPDATE scans
+                        SET status = 'running', completed_at = NULL,
+                            seal_manifest_digest = NULL
+                        WHERE id = ?
+                        """,
+                        (scan_id,),
+                    )
+
+                with self.assertRaises(WorkbenchError) as raised:
+                    if action == "fail":
+                        self.workbench.fail_scan(
+                            scan_id,
+                            "late failure",
+                            self.owner_a,
+                        )
+                    else:
+                        self.workbench.cancel_scan(scan_id, self.owner_a)
+                self.assertEqual(raised.exception.code, "scan_sealed")
+
+                retried = self.workbench.complete_scan(scan_id, self.owner_a)
+                self.assertEqual(retried["scan"]["status"], "complete")
+                self.assertTrue(retried["reusedSeal"])
 
     def test_completion_replaces_stale_progress_finding_count(self):
         def publish_stale_telemetry(scan_id):
@@ -181,6 +270,54 @@ class WorkflowLifecycleTests(WorkflowTestCase):
             completed["scan"]["progress"]["reportableFindingsCount"],
             1,
         )
+
+    def test_informational_finding_is_canonical_but_not_reportable(self):
+        _scan_id, completed = self._complete(finding_severity="informational")
+        self.assertEqual(completed["scan"]["status"], "complete")
+        self.assertEqual(
+            completed["scan"]["progress"]["reportableFindingsCount"],
+            0,
+        )
+        findings = json.loads(Path(completed["findingsPath"]).read_text("utf-8"))
+        self.assertEqual(findings["findings"][0]["severity"]["level"], "informational")
+        manifest = json.loads(Path(completed["manifestPath"]).read_text("utf-8"))
+        self.assertEqual(manifest["totalFindings"], 1)
+        self.assertEqual(manifest["severityCounts"], {"informational": 1})
+        report = Path(completed["reportPath"]).read_text("utf-8")
+        self.assertIn("| Reportable findings | 0 |", report)
+        self.assertFalse(
+            (Path(completed["scan"]["scanDir"]) / "hardening").exists()
+        )
+
+    def test_informational_finding_supports_an_optional_writeup(self):
+        _scan_id, completed = self._complete(
+            finding_severity="informational",
+            informational_writeup=True,
+        )
+        scan_dir = Path(completed["scan"]["scanDir"])
+        self.assertTrue(
+            (
+                scan_dir
+                / "findings"
+                / "untrusted-execution"
+                / "untrusted-execution.md"
+            ).is_file()
+        )
+        self.assertFalse((scan_dir / "hardening").exists())
+        self.assertEqual(
+            completed["scan"]["progress"]["reportableFindingsCount"],
+            0,
+        )
+
+    def test_informational_writeup_reference_requires_derived_output(self):
+        with self.assertRaises(WorkbenchError) as raised:
+            self._complete(
+                finding_severity="informational",
+                informational_writeup=True,
+                omit_derived_writeup=True,
+            )
+        self.assertEqual(raised.exception.code, "artifact_closure_incomplete")
+        self.assertIn("derived-writeup", str(raised.exception))
 
     def test_reportable_count_resets_after_discovery_and_can_decrease(self):
         _workspace_id, scan_id = self._start()

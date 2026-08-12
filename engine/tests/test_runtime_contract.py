@@ -183,7 +183,7 @@ class RuntimeContractTests(unittest.TestCase):
 
         completion = function(ScanLifecycleService.complete_scan)
         completion_lock = with_context(completion, "owned_scan_lock")
-        seals = calls(completion_lock, "_has_sealed_manifest")
+        seals = calls(completion_lock, "has_sealed_manifest")
         publish_transactions = [
             node
             for node in ast.walk(completion_lock)

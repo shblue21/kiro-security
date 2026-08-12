@@ -1,10 +1,20 @@
-Kiro Security Power — Internal Evaluation License Notice
+Kiro Security Power — Proprietary Distribution License
 
 Copyright (c) 2026. All rights reserved.
 
-This repository is not licensed for public redistribution, Marketplace publication,
-or Open VSX publication. Use, modification, and distribution require explicit
-authorization from the rights holder. See LICENSE-NOTICE.md.
+Permission is granted to obtain, install, and use unmodified copies of the
+official Kiro Security Power VSIX distributed by the rights holder through its
+authorized channels, including public extension marketplaces.
 
-This notice does not alter the license of the authorized Codex Security reference
-implementation used as migration input.
+No permission is granted to redistribute, sublicense, sell, or publish modified
+copies of the VSIX or this source repository. Source use, modification, and
+distribution require separate authorization from the rights holder.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE COPYRIGHT
+HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM, OUT OF,
+OR IN CONNECTION WITH THE SOFTWARE OR ITS USE.
+
+Third-party components remain subject to their respective licenses. See
+LICENSE-NOTICE.md and the notices packaged with those components.

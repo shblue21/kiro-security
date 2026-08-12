@@ -32,6 +32,7 @@ import {
   type DirectMcpServerConfiguration,
 } from "./integrationConfig";
 import { findDuplicateJsonObjectKey } from "./jsonSafety";
+import { withSharedFileLock } from "./sharedFileLock";
 
 const executeFile = promisify(execFile);
 const MAX_CONFIG_BYTES = 1024 * 1024;
@@ -186,6 +187,18 @@ export async function materializeDirectRuntime(input: {
   readonly extensionRoot: string;
   readonly stateRoot: string;
 }): Promise<IntegrationMutation> {
+  const runtimeRoot = getDirectRuntimeRoot(input.stateRoot);
+  return withSharedFileLock(
+    runtimeRoot,
+    "The Kiro Security runtime",
+    () => materializeDirectRuntimeLocked(input),
+  );
+}
+
+async function materializeDirectRuntimeLocked(input: {
+  readonly extensionRoot: string;
+  readonly stateRoot: string;
+}): Promise<IntegrationMutation> {
   if ((await inspectDirectRuntime(input)).ready) {
     return { changed: false };
   }
@@ -332,6 +345,18 @@ export async function inspectMcpRegistration(input: {
 }
 
 export async function installMcpRegistration(input: {
+  readonly mcpPath: string;
+  readonly serverKey: string;
+  readonly expected: DirectMcpServerConfiguration;
+}): Promise<IntegrationMutation> {
+  return withSharedFileLock(
+    input.mcpPath,
+    "The Kiro user MCP configuration",
+    () => installMcpRegistrationLocked(input),
+  );
+}
+
+async function installMcpRegistrationLocked(input: {
   readonly mcpPath: string;
   readonly serverKey: string;
   readonly expected: DirectMcpServerConfiguration;
