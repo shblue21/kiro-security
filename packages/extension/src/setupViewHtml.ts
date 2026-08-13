@@ -34,8 +34,18 @@ export function renderSetupHtml(input: {
     `script-src 'nonce-${nonce}'`,
   ].join("; ");
   const presentation = integrationPresentation(input.integration);
+  const checks = [
+    { name: "Global storage", detail: input.stateRoot, ready: true },
+    { name: "Direct MCP runtime", detail: input.integration.runtime.detail, ready: input.integration.runtime.ready },
+    { name: "Global steering", detail: input.integration.steering.detail, ready: input.integration.steering.state === "installed" },
+    { name: "Direct MCP registration", detail: input.integration.mcp.detail, ready: input.integration.mcp.state === "installed" },
+    { name: "Chat identity Hook", detail: input.integration.hook.detail, ready: input.integration.hook.state === "ready" },
+    { name: "Chat approval rules", detail: input.integration.approval.detail, ready: input.integration.approval.state === "installed" },
+  ];
+  const readyCheckCount = checks.filter((check) => check.ready).length;
+  const allChecksReady = readyCheckCount === checks.length;
   return `<!doctype html>
-<html lang="ko">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -46,19 +56,15 @@ export function renderSetupHtml(input: {
 <body>
   <header class="topbar" data-od-id="setup-topbar">
     <div class="brand-lockup">
-      <span class="brand-mark" aria-hidden="true">KS</span>
-      <div>
       <h1>Kiro Security Power</h1>
-        <p>저장소 보안 워크벤치</p>
-      </div>
     </div>
-    <button class="icon-button" data-command="refresh" title="상태 새로고침" aria-label="상태 새로고침"><span aria-hidden="true">↻</span></button>
+    <button class="icon-button" data-command="refresh" title="Refresh status" aria-label="Refresh status"><span aria-hidden="true">↻</span></button>
   </header>
 
-  <nav class="tabs" aria-label="보안 패널" role="tablist" data-od-id="primary-tabs">
-    ${tabButton("setup", "설정", input.activeTab)}
-    ${tabButton("dashboard", "대시보드", input.activeTab)}
-    ${tabButton("findings", "발견", input.activeTab)}
+  <nav class="tabs" aria-label="Security panel" role="tablist" data-od-id="primary-tabs">
+    ${tabButton("setup", "Setup", input.activeTab)}
+    ${tabButton("dashboard", "Dashboard", input.activeTab)}
+    ${tabButton("findings", "Findings", input.activeTab)}
   </nav>
 
   <main class="content" data-od-id="setup-content">
@@ -68,47 +74,69 @@ export function renderSetupHtml(input: {
         : ""
     }
 
-    <div class="page ${input.activeTab === "setup" ? "active" : ""}" role="tabpanel">
-    <section class="card connection-card" data-od-id="kiro-chat-connection">
+    <div class="page setup-page ${input.activeTab === "setup" ? "active" : ""}" id="panel-setup" data-tab-page="setup" role="tabpanel" aria-labelledby="tab-setup" ${input.activeTab === "setup" ? "" : "hidden"}>
+    <section class="panel-section connection-panel" data-od-id="kiro-chat-connection">
       <div class="status-hero">
         <div>
-          <span class="eyebrow">Kiro Chat 연결</span>
           <h2 data-od-id="connection-heading">${escapeHtml(
             presentation.heading,
           )}</h2>
-          <p class="muted">${escapeHtml(input.integration.detail)}</p>
+          <p class="muted">${escapeHtml(presentation.summary)}</p>
         </div>
         <span class="badge ${presentation.badgeClass}">${escapeHtml(
           presentation.badge,
         )}</span>
       </div>
 
-      <div class="workflow-summary">
-        <div>
-          <h3>일반 채팅에서 바로 보안 작업 시작</h3>
-          <p>별도 Agent 선택이나 Power 가져오기 없이 현재 Kiro Chat에 보안 워크플로를 연결합니다.</p>
+      <div class="context-list" aria-label="Connection summary">
+        <div class="context-row">
+          <span>Scope</span>
+          <strong>Current user, every Kiro Chat</strong>
         </div>
-        <button class="primary" data-command="connectIntegration" ${
-          input.integration.state === "ready" ||
-          input.integration.state === "conflict" ||
-          input.integration.state === "unavailable"
-            ? "disabled"
-            : ""
-        } data-od-id="connect-kiro-chat">Kiro Chat 연결</button>
+        <div class="context-row">
+          <span>Mode</span>
+          <strong>Automatically available. No Agent or Power selection.</strong>
+        </div>
       </div>
 
-      <div class="scope-note">
-        <strong>연결 방식</strong>
-        <p>자동 포함 steering이 워크플로를 제공하고, 직접 도구 Hook이 각 요청 nonce를 Kiro <code>session_id</code>에 결합합니다. MCP는 이를 한 번만 소비해 채팅이 소유한 워크스페이스를 보호합니다.</p>
-      </div>
+      ${
+        input.integration.state === "absent" || input.integration.state === "mismatch"
+          ? `<div class="button-row">
+        <button class="primary" data-command="connectIntegration" data-od-id="connect-kiro-chat">Connect Kiro Chat</button>
+      </div>`
+          : ""
+      }
+    </section>
 
-      <details class="setup-options">
-        <summary>설치 범위와 파일 위치</summary>
-        <div class="setup-options-body">
+      ${
+        input.integration.state === "ready"
+          ? `<section class="panel-section quick-start" data-od-id="run-security-scan">
+        <h2>Run a security scan</h2>
+        <p class="muted">Copy this prompt and paste it into Kiro Chat.</p>
+        <div class="prompt-row">
+          <code>Scan this repository for security vulnerabilities.</code>
+          <button class="copy-button" data-command="copyScanPrompt" data-od-id="copy-scan-prompt">Copy</button>
+        </div>
+        <p class="muted result-note">Results appear in Dashboard and Findings.</p>
+      </section>`
+          : ""
+      }
+
+      <details class="panel-section diagnostic-panel" data-od-id="system-checks">
+        <summary>
+          <span>Connection details</span>
+          <span class="summary-status ${allChecksReady ? "ready" : "pending"}">${readyCheckCount}/${checks.length} ${allChecksReady ? "ready" : "needs attention"}</span>
+        </summary>
+        <div class="details-body">
+          <div class="compact-checks" aria-label="System checks">
+            ${checks.map((check) => compactCheckRow(check.name, check.detail, check.ready)).join("")}
+          </div>
+
+          <details class="nested-details">
+            <summary>Managed files</summary>
+            <div class="details-body">
           <dl>
-            <dt>설치 범위</dt>
-            <dd>현재 사용자 · 모든 Kiro Chat</dd>
-            <dt>MCP 항목</dt>
+            <dt>MCP entry</dt>
             <dd class="mono">${escapeHtml(input.integration.serverKey)} in ${escapeHtml(
               input.integration.mcpPath,
             )}</dd>
@@ -116,80 +144,76 @@ export function renderSetupHtml(input: {
             <dd class="mono">${escapeHtml(input.integration.steeringPath)}</dd>
             <dt>Hook</dt>
             <dd class="mono">${escapeHtml(input.integration.hookPath)}</dd>
-            <dt>런타임</dt>
+            <dt>Runtime</dt>
             <dd class="mono">${escapeHtml(input.integration.runtimeRoot)}</dd>
           </dl>
-        </div>
-      </details>
-
-      <details class="setup-options">
-        <summary>고급 설정 및 문제 해결</summary>
-        <div class="setup-options-body">
           <div class="button-row">
             <button data-command="showHookFile" ${
               input.integration.hook.registrationState === "absent"
                 ? "disabled"
                 : ""
-            }>Hook 열기</button>
+            }>Open Hook</button>
             <button data-command="showMcpFile" ${
               input.integration.mcp.state === "absent" ? "disabled" : ""
-            }>MCP 설정 열기</button>
+            }>Open MCP config</button>
             <button data-command="showSteeringFile" ${
               input.integration.steering.state === "absent" ? "disabled" : ""
-            }>Steering 열기</button>
+            }>Open Steering</button>
           </div>
+            </div>
+          </details>
         </div>
       </details>
-    </section>
-
-    <details class="card setup-disclosure" open data-od-id="system-checks">
-      <summary>
-        <span>
-          <strong>시스템 점검</strong>
-          <small>저장소와 통합 경계의 현재 상태</small>
-        </span>
-      </summary>
-      <div class="checks">
-        ${checkRow("전역 저장소", input.stateRoot, true)}
-        ${checkRow(
-          "직접 MCP 런타임",
-          input.integration.runtime.detail,
-          input.integration.runtime.ready,
-        )}
-        ${checkRow(
-          "전역 steering",
-          input.integration.steering.detail,
-          input.integration.steering.state === "installed",
-        )}
-        ${checkRow(
-          "직접 MCP 등록",
-          input.integration.mcp.detail,
-          input.integration.mcp.state === "installed",
-        )}
-        ${checkRow(
-          "채팅 식별 Hook",
-          input.integration.hook.detail,
-          input.integration.hook.state === "ready",
-        )}
-        ${checkRow(
-          "채팅 승인 규칙",
-          input.integration.approval.detail,
-          input.integration.approval.state === "installed",
-        )}
-      </div>
-    </details>
     </div>
-    <div class="page ${input.activeTab === "dashboard" ? "active" : ""}" role="tabpanel">
+    <div class="page ${input.activeTab === "dashboard" ? "active" : ""}" id="panel-dashboard" data-tab-page="dashboard" role="tabpanel" aria-labelledby="tab-dashboard" ${input.activeTab === "dashboard" ? "" : "hidden"}>
       ${renderRepositoryScope(input)}
       ${renderDashboardPage(input)}
     </div>
-    <div class="page ${input.activeTab === "findings" ? "active" : ""}" role="tabpanel">
+    <div class="page ${input.activeTab === "findings" ? "active" : ""}" id="panel-findings" data-tab-page="findings" role="tabpanel" aria-labelledby="tab-findings" ${input.activeTab === "findings" ? "" : "hidden"}>
       ${renderRepositoryScope(input)}
       ${renderFindingsPage(input)}
     </div>
   </main>
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
+    const tabNames = ['setup', 'dashboard', 'findings'];
+    const serverActiveTab = '${input.activeTab}';
+    const isTabName = (value) => tabNames.includes(value);
+    const activateTab = (name, notifyHost = true) => {
+      if (!isTabName(name)) return;
+      for (const candidate of tabNames) {
+        const selected = candidate === name;
+        const tab = document.getElementById('tab-' + candidate);
+        const panel = document.getElementById('panel-' + candidate);
+        tab?.classList.toggle('active', selected);
+        tab?.setAttribute('aria-selected', String(selected));
+        tab?.setAttribute('tabindex', selected ? '0' : '-1');
+        panel?.classList.toggle('active', selected);
+        if (panel) panel.hidden = !selected;
+      }
+      vscode.setState({ activeTab: name });
+      if (notifyHost) vscode.postMessage({ command: 'selectTab', tab: name });
+    };
+    for (const tab of document.querySelectorAll('[role="tab"][data-tab]')) {
+      tab.addEventListener('click', () => activateTab(tab.dataset.tab));
+      tab.addEventListener('keydown', (event) => {
+        const current = tabNames.indexOf(tab.dataset.tab || '');
+        if (current < 0) return;
+        let next;
+        if (event.key === 'ArrowRight') next = (current + 1) % tabNames.length;
+        if (event.key === 'ArrowLeft') next = (current - 1 + tabNames.length) % tabNames.length;
+        if (event.key === 'Home') next = 0;
+        if (event.key === 'End') next = tabNames.length - 1;
+        if (next === undefined) return;
+        event.preventDefault();
+        const name = tabNames[next];
+        activateTab(name);
+        document.getElementById('tab-' + name)?.focus();
+      });
+    }
+    const savedTab = vscode.getState()?.activeTab;
+    const initialTab = isTabName(savedTab) ? savedTab : serverActiveTab;
+    activateTab(initialTab, initialTab !== serverActiveTab);
     for (const button of document.querySelectorAll('[data-command]')) {
       button.addEventListener('click', () => {
         if (!button.disabled) {
@@ -212,11 +236,24 @@ export function renderSetupHtml(input: {
       const scan = document.getElementById('scan-filter')?.value || '';
       const severity = document.getElementById('severity-filter')?.value || '';
       const triage = document.getElementById('triage-filter')?.value || '';
+      let visibleCount = 0;
       for (const card of document.querySelectorAll('.finding-card')) {
         card.hidden =
           (scan && card.dataset.scanId !== scan) ||
           (severity && card.dataset.severity !== severity) ||
           (triage && card.dataset.triage !== triage);
+        if (!card.hidden) visibleCount += 1;
+      }
+      const labels = [
+        scan ? document.getElementById('scan-filter')?.selectedOptions[0]?.textContent : '',
+        severity ? document.getElementById('severity-filter')?.selectedOptions[0]?.textContent : '',
+        triage ? document.getElementById('triage-filter')?.selectedOptions[0]?.textContent : ''
+      ].filter(Boolean);
+      const summary = document.getElementById('finding-filter-summary');
+      if (summary) {
+        summary.textContent = labels.length
+          ? labels.join(' · ') + ' · ' + visibleCount
+          : 'All findings · ' + visibleCount;
       }
     };
     document.getElementById('scan-filter')?.addEventListener('change', applyFindingFilters);
@@ -233,9 +270,7 @@ function tabButton(
   activeTab: ViewTab,
 ): string {
   const active = tab === activeTab;
-  return `<button class="tab ${active ? "active" : ""}" role="tab" data-command="selectTab" data-tab="${tab}" aria-selected="${active}" ${
-    active ? 'aria-current="page"' : ""
-  }>${label}</button>`;
+  return `<button class="tab ${active ? "active" : ""}" id="tab-${tab}" role="tab" data-tab="${tab}" aria-controls="panel-${tab}" aria-selected="${active}" tabindex="${active ? "0" : "-1"}">${label}</button>`;
 }
 
 type RepositoryViewInput = {
@@ -248,15 +283,15 @@ type RepositoryViewInput = {
 };
 
 function renderRepositoryScope(input: RepositoryViewInput): string {
-  return `<section class="scope-switch" aria-label="저장소 표시 범위">
+  return `<section class="scope-switch" aria-label="Repository scope">
     <span class="scope-label">${escapeHtml(
       input.repositoryScope === "current"
         ? input.workspaceLabel
-        : "이 기기의 모든 저장소",
+        : "All repositories on this device",
     )}</span>
     <div class="scope-buttons">
-      <button class="${input.repositoryScope === "current" ? "active" : ""}" data-command="selectRepositoryScope" data-repository-scope="current" aria-pressed="${input.repositoryScope === "current"}">현재</button>
-      <button class="${input.repositoryScope === "all" ? "active" : ""}" data-command="selectRepositoryScope" data-repository-scope="all" aria-pressed="${input.repositoryScope === "all"}">모든 저장소</button>
+      <button class="${input.repositoryScope === "current" ? "active" : ""}" data-command="selectRepositoryScope" data-repository-scope="current" aria-pressed="${input.repositoryScope === "current"}">Current</button>
+      <button class="${input.repositoryScope === "all" ? "active" : ""}" data-command="selectRepositoryScope" data-repository-scope="all" aria-pressed="${input.repositoryScope === "all"}">All</button>
     </div>
   </section>`;
 }
@@ -267,30 +302,30 @@ function renderDashboardPage(
   const dashboard = input.dashboard;
   if (!dashboard) {
     return emptyState(
-      "대시보드를 불러올 수 없습니다",
-      "확장 전역 워크벤치를 초기화하려면 Kiro Security Chat을 연결하세요.",
+      "Dashboard unavailable",
+      "Connect Kiro Security Chat to initialize the global workbench.",
     );
   }
   if (dashboard.scans.length === 0) {
     if (input.repositoryScope === "current" && !input.hasWorkspace) {
       return emptyState(
-        "열린 워크스페이스가 없습니다",
-        "저장소를 열거나 모든 저장소를 선택해 이전 스캔을 확인하세요.",
+        "No workspace is open",
+        "Open a repository or select All to view previous scans.",
         input.globalScanCount > 0,
       );
     }
     if (input.repositoryScope === "current") {
       return emptyState(
-        "현재 워크스페이스에는 스캔이 없습니다",
+        "No scans in the current workspace",
         input.globalScanCount > 0
-          ? `다른 저장소에 ${input.globalScanCount}개의 스캔이 있습니다.`
-          : "일반 Kiro Chat에서 Kiro Security 스캔을 시작하세요. 확장 자체는 스캔을 시작하지 않습니다.",
+          ? `${input.globalScanCount} scans are available in other repositories.`
+          : "Start a security scan in Kiro Chat. This extension displays the results.",
         input.globalScanCount > 0,
       );
     }
     return emptyState(
-      "아직 실행한 스캔이 없습니다",
-      "일반 Kiro Chat에서 Kiro Security 스캔을 시작하세요. 확장 자체는 스캔을 시작하지 않습니다.",
+      "No scans yet",
+      "Start a security scan in Kiro Chat. This extension displays the results.",
     );
   }
   const running = dashboard.scans.filter((scan) => scan.status === "running").length;
@@ -301,16 +336,16 @@ function renderDashboardPage(
   const overview = `<section class="overview" data-od-id="dashboard-overview">
     <div class="section-heading">
       <div>
-        <span class="eyebrow">워크벤치 현황</span>
-        <h2>보안 스캔</h2>
+        <span class="eyebrow">Workbench</span>
+        <h2>Security scans</h2>
       </div>
-      <span class="muted">최근 업데이트 기준</span>
+      <span class="muted">Latest state</span>
     </div>
     <div class="metric-grid">
-      ${metricCard("전체", dashboard.scans.length)}
-      ${metricCard("실행 중", running, "metric-warning")}
-      ${metricCard("완료", complete, "metric-success")}
-      ${metricCard("보고 가능한 발견", findings, findings > 0 ? "metric-danger" : "")}
+      ${metricCard("Total", dashboard.scans.length)}
+      ${metricCard("Running", running, "metric-warning")}
+      ${metricCard("Complete", complete, "metric-success")}
+      ${metricCard("Reportable findings", findings, findings > 0 ? "metric-danger" : "")}
     </div>
   </section>`;
   const scans = dashboard.scans
@@ -324,7 +359,7 @@ function renderDashboardPage(
       ),
     )
     .join("");
-  return `${overview}<div class="section-divider"><span>스캔 기록</span></div>${scans}`;
+  return `${overview}<div class="section-divider"><span>Scan history</span></div>${scans}`;
 }
 
 function renderScanCard(
@@ -340,19 +375,19 @@ function renderScanCard(
       ? `
         <button data-command="openArtifact" data-scan-id="${escapeHtml(
           scan.id,
-        )}" data-artifact-kind="report">보고서</button>
+        )}" data-artifact-kind="report">Report</button>
         <button data-command="openArtifact" data-scan-id="${escapeHtml(
           scan.id,
-        )}" data-artifact-kind="manifest">매니페스트</button>
+        )}" data-artifact-kind="manifest">Manifest</button>
         <button data-command="openArtifact" data-scan-id="${escapeHtml(
           scan.id,
-        )}" data-artifact-kind="coverage">커버리지</button>
+        )}" data-artifact-kind="coverage">Coverage</button>
         <button data-command="exportScan" data-scan-id="${escapeHtml(
           scan.id,
-        )}" data-format="sarif">SARIF 내보내기</button>
+        )}" data-format="sarif">Export SARIF</button>
         <button data-command="exportScan" data-scan-id="${escapeHtml(
           scan.id,
-        )}" data-format="csv">CSV 내보내기</button>`
+        )}" data-format="csv">Export CSV</button>`
       : "";
   const recovery =
     scan.status === "running"
@@ -362,21 +397,21 @@ function renderScanCard(
     <div class="card-title">
       <div>
         <h2>${escapeHtml(scan.target.path)}</h2>
-        <p>${escapeHtml(scan.mode)} · 범위 ${escapeHtml(scan.scope)}</p>
+        <p>${escapeHtml(scan.mode)} · Scope ${escapeHtml(scan.scope)}</p>
       </div>
       <span class="badge ${statusBadge(scan.status)}">${scanStatusLabel(scan.status)}</span>
     </div>
-    <div class="progress-track" role="progressbar" aria-label="스캔 진행률" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}">
+    <div class="progress-track" role="progressbar" aria-label="Scan progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}">
       <span style="width: ${percent}%"></span>
     </div>
     <dl class="scan-facts">
-      <dt>단계</dt><dd>${escapeHtml(scan.phase)}</dd>
-      <dt>리비전</dt><dd class="mono">${escapeHtml(
+      <dt>Phase</dt><dd>${escapeHtml(scan.phase)}</dd>
+      <dt>Revision</dt><dd class="mono">${escapeHtml(
         scan.target.revision,
       )}</dd>
-      <dt>진행률</dt><dd class="tabular">${complete}/${total} (${percent}%)</dd>
-      <dt>발견</dt><dd class="tabular">${scan.progress.reportableFindingsCount}</dd>
-      <dt>업데이트</dt><dd>${escapeHtml(scan.updatedAt)}</dd>
+      <dt>Progress</dt><dd class="tabular">${complete}/${total} (${percent}%)</dd>
+      <dt>Findings</dt><dd class="tabular">${scan.progress.reportableFindingsCount}</dd>
+      <dt>Updated</dt><dd>${escapeHtml(scan.updatedAt)}</dd>
     </dl>
     ${
       scan.failureMessage
@@ -393,30 +428,30 @@ function renderRecoveryControls(
   sourceActionReady: boolean,
 ): string {
   if (!sourceActionReady) {
-    return '<span class="request-state">이 저장소를 현재 워크스페이스에서 열어 채팅으로 재개하세요.</span>';
+    return '<span class="request-state">Open this repository in the current workspace to resume in chat.</span>';
   }
   if (!request) {
     return `<button class="primary" data-command="createRecovery" data-scan-id="${escapeHtml(
       scanId,
-    )}">채팅에서 재개</button>`;
+    )}">Resume in chat</button>`;
   }
   if (request.status === "delivered" || request.status === "canceled") {
-    return `<span class="request-state">최근 재개 요청 ${escapeHtml(
+    return `<span class="request-state">Latest resume request ${escapeHtml(
       requestStateLabel(request.status),
     )} · v${request.version}</span>
       <button class="primary" data-command="createRecovery" data-scan-id="${escapeHtml(
         scanId,
-      )}">채팅에서 재개</button>`;
+      )}">Resume in chat</button>`;
   }
-  return `<span class="request-state">재개 요청 ${escapeHtml(
+  return `<span class="request-state">Resume request ${escapeHtml(
     requestStateLabel(request.status),
   )} · v${request.version}</span>
     <button class="primary" data-command="createRecovery" data-scan-id="${escapeHtml(
       scanId,
-    )}">재개 프롬프트 다시 복사</button>
+    )}">Copy resume prompt again</button>
     <button data-command="cancelRecovery" data-request-id="${escapeHtml(
       request.id,
-    )}">재개 취소</button>`;
+    )}">Cancel resume</button>`;
 }
 
 function renderFindingsPage(
@@ -425,26 +460,26 @@ function renderFindingsPage(
   const dashboard = input.dashboard;
   if (!dashboard) {
     return emptyState(
-      "발견 목록을 불러올 수 없습니다",
-      "확장 전역 워크벤치를 초기화하려면 Kiro Security Chat을 연결하세요.",
+      "Findings unavailable",
+      "Connect Kiro Security Chat to initialize the global workbench.",
     );
   }
   if (dashboard.findings.length === 0) {
     if (input.repositoryScope === "current" && !input.hasWorkspace) {
       return emptyState(
-        "열린 워크스페이스가 없습니다",
-        "저장소를 열거나 모든 저장소를 선택해 이전 발견을 확인하세요.",
+        "No workspace is open",
+        "Open a repository or select All to view previous findings.",
         input.globalScanCount > dashboard.scans.length,
       );
     }
     return emptyState(
       input.repositoryScope === "current"
-        ? "현재 워크스페이스에는 완료된 발견이 없습니다"
-        : "완료된 발견이 없습니다",
+        ? "No completed findings in the current workspace"
+        : "No completed findings",
       input.repositoryScope === "current" &&
         input.globalScanCount > dashboard.scans.length
-        ? "다른 저장소의 결과는 모든 저장소 보기에서 확인할 수 있습니다."
-        : "표준 스캔 최종화에 성공한 뒤 검증된 발견이 이곳에 표시됩니다.",
+        ? "Select All to view results from other repositories."
+        : "Validated findings appear here after a scan is finalized.",
       input.repositoryScope === "current" &&
         input.globalScanCount > dashboard.scans.length,
     );
@@ -459,49 +494,52 @@ function renderFindingsPage(
   const overview = `<section class="overview" data-od-id="findings-overview">
     <div class="section-heading">
       <div>
-        <span class="eyebrow">검증 결과</span>
-        <h2>보안 발견</h2>
+        <span class="eyebrow">Validated results</span>
+        <h2>Security findings</h2>
       </div>
-      <span class="muted">최종화된 스캔만 포함</span>
+      <span class="muted">Finalized scans only</span>
     </div>
-    <div class="metric-grid metric-grid-compact">
-      ${metricCard("전체", dashboard.findings.length)}
-      ${metricCard("높음 이상", urgent, urgent > 0 ? "metric-danger" : "")}
-      ${metricCard("열림", open, open > 0 ? "metric-warning" : "")}
+    <div class="metric-strip" aria-label="Finding summary">
+      ${findingMetric("Total", dashboard.findings.length)}
+      ${findingMetric("High+", urgent, urgent > 0 ? "metric-danger" : "")}
+      ${findingMetric("Open", open, open > 0 ? "metric-warning" : "")}
     </div>
   </section>`;
   const filters = `
-    <section class="card finding-toolbar" data-od-id="finding-filters">
-      <label>스캔
-        <select id="scan-filter">
-          <option value="">모든 스캔</option>
-          ${findingScans
-            .map(
-              (scan) =>
-                `<option value="${escapeHtml(scan.id)}">${escapeHtml(
-                  `${scan.target.path} · ${scan.target.revision}`,
-                )}</option>`,
-            )
-            .join("")}
-        </select>
-      </label>
-      <label>심각도
-        <select id="severity-filter">
-          <option value="">전체</option>
-          <option value="critical">치명적</option>
-          <option value="high">높음</option>
-          <option value="medium">중간</option>
-          <option value="low">낮음</option>
-        </select>
-      </label>
-      <label>상태
-        <select id="triage-filter">
-          <option value="">전체</option>
-          <option value="open">열림</option>
-          <option value="closed">닫힘</option>
-        </select>
-      </label>
-    </section>`;
+    <details class="card finding-filter" data-od-id="finding-filters">
+      <summary><span>Filters</span><span class="filter-summary" id="finding-filter-summary">All findings · ${dashboard.findings.length}</span></summary>
+      <div class="finding-toolbar">
+        <label>Scan
+          <select id="scan-filter">
+            <option value="">All scans</option>
+            ${findingScans
+              .map(
+                (scan) =>
+                  `<option value="${escapeHtml(scan.id)}">${escapeHtml(
+                    `${scan.target.path} · ${scan.target.revision}`,
+                  )}</option>`,
+              )
+              .join("")}
+          </select>
+        </label>
+        <label>Severity
+          <select id="severity-filter">
+            <option value="">All</option>
+            <option value="critical">Critical</option>
+            <option value="high">High</option>
+            <option value="medium">Medium</option>
+            <option value="low">Low</option>
+          </select>
+        </label>
+        <label>Status
+          <select id="triage-filter">
+            <option value="">All</option>
+            <option value="open">Open</option>
+            <option value="closed">Closed</option>
+          </select>
+        </label>
+      </div>
+    </details>`;
   return `${overview}${filters}${dashboard.findings
     .map((finding) =>
       renderFindingCard(
@@ -529,7 +567,10 @@ function renderFindingCard(
     )[0];
   let remediationButton = "";
   if (!sourceActionReady) {
-    remediationButton = '<span class="request-state">수정 작업을 계속하려면 이 저장소를 여세요.</span>';
+    remediationButton = `<div class="blocked-action">
+      <span class="request-state">Open this repository in the current workspace to continue remediation.</span>
+      <button disabled aria-label="Remediation cannot be generated outside the current workspace">Generate fix</button>
+    </div>`;
   } else if (latest?.pendingAction) {
     remediationButton = remediationPromptButtonHtml(latest);
   } else if (
@@ -554,10 +595,10 @@ function renderFindingCard(
     finding.triage.status === "open"
       ? `<button data-command="closeTriage" data-occurrence-id="${escapeHtml(
           finding.occurrenceId,
-        )}">닫기</button>`
+        )}">Close</button>`
       : `<button data-command="openTriage" data-occurrence-id="${escapeHtml(
           finding.occurrenceId,
-        )}">다시 열기</button>`;
+        )}">Reopen</button>`;
   const locations = finding.locations
     .map(
       (location) =>
@@ -568,6 +609,13 @@ function renderFindingCard(
         }${location.role ? ` · ${escapeHtml(location.role)}` : ""}`,
     )
     .join("<br>");
+  const primaryLocation = finding.locations[0]
+    ? `${finding.locations[0].path}:${finding.locations[0].startLine}${
+        finding.locations[0].endLine !== finding.locations[0].startLine
+          ? `-${finding.locations[0].endLine}`
+          : ""
+      }`
+    : "No location";
   return `<section class="card finding-card" data-od-id="finding-${escapeHtml(
     finding.occurrenceId,
   )}" data-scan-id="${escapeHtml(
@@ -578,43 +626,64 @@ function renderFindingCard(
     <div class="card-title">
       <div>
         <h2>${escapeHtml(finding.title)}</h2>
-        <p>${escapeHtml(finding.findingId)}</p>
       </div>
-      <span class="badge ${severityBadge(finding.severity)}">${severityLabel(finding.severity)}</span>
+      <div class="badge-row">
+        ${
+          sourceActionReady
+            ? ""
+            : '<span class="badge badge-neutral">External repository</span>'
+        }
+        <span class="badge ${severityBadge(finding.severity)}">${severityLabel(finding.severity)}</span>
+      </div>
     </div>
-    <p>${escapeHtml(finding.summary)}</p>
-    <dl class="scan-facts">
-      <dt>신뢰도</dt><dd>${escapeHtml(finding.confidence)}</dd>
-      <dt>대상</dt><dd class="mono">${escapeHtml(
-        scan?.target.path ?? "알 수 없는 대상",
-      )}</dd>
-      <dt>리비전</dt><dd class="mono">${escapeHtml(
-        scan?.target.revision ?? "알 수 없는 리비전",
-      )}</dd>
-      <dt>분류 상태</dt><dd>${triageLabel(finding.triage.status)}${
+    <p class="finding-summary">${escapeHtml(finding.summary)}</p>
+    <div class="quick-meta">
+      <span>Status <strong>${triageLabel(finding.triage.status)}${
         finding.triage.closeReason
           ? ` · ${escapeHtml(finding.triage.closeReason)}`
           : ""
-      }</dd>
-      <dt>위치</dt><dd class="mono">${locations}</dd>
-    </dl>
-    <details class="setup-options">
-      <summary>권장 수정 방법</summary>
+      }</strong></span>
+      <span>Location <strong class="mono">${escapeHtml(primaryLocation)}</strong></span>
+    </div>
+    <details class="setup-options finding-details">
+      <summary>Details</summary>
+      <div class="setup-options-body">
+        <dl class="scan-facts">
+          <dt>Confidence</dt><dd>${escapeHtml(finding.confidence)}</dd>
+          <dt>Target</dt><dd class="mono">${escapeHtml(
+            scan?.target.path ?? "Unknown target",
+          )}</dd>
+          <dt>Revision</dt><dd class="mono">${escapeHtml(
+            scan?.target.revision ?? "Unknown revision",
+          )}</dd>
+          <dt>Finding ID</dt><dd class="mono">${escapeHtml(finding.findingId)}</dd>
+          <dt>All locations</dt><dd class="mono">${locations}</dd>
+        </dl>
+      </div>
+    </details>
+    <details class="setup-options finding-details">
+      <summary>Recommended fix</summary>
       <div class="setup-options-body">
         <p>${escapeHtml(finding.remediation)}</p>
-        <p class="muted">전체 증거, 검증 결과와 공격 경로는 봉인된 JSON 내보내기에서 확인할 수 있습니다.</p>
+        <p class="muted">Full evidence, validation, and attack paths are available in the sealed JSON export.</p>
       </div>
     </details>
     <div class="button-row">
       ${triageButton}
-      ${remediationButton}
-      <button data-command="trackFinding" data-occurrence-id="${escapeHtml(
-        finding.occurrenceId,
-      )}">추적</button>
-      <button data-command="exportScan" data-scan-id="${escapeHtml(
-        finding.scanId,
-      )}" data-format="json">JSON 내보내기</button>
+      ${sourceActionReady ? remediationButton : ""}
     </div>
+    ${sourceActionReady ? "" : remediationButton}
+    <details class="setup-options finding-details">
+      <summary>More actions</summary>
+      <div class="button-row setup-options-body">
+        <button data-command="trackFinding" data-occurrence-id="${escapeHtml(
+          finding.occurrenceId,
+        )}">Track</button>
+        <button data-command="exportScan" data-scan-id="${escapeHtml(
+          finding.scanId,
+        )}" data-format="json">Export JSON</button>
+      </div>
+    </details>
   </section>`;
 }
 
@@ -629,7 +698,7 @@ function remediationPromptButtonHtml(
     request.requestId,
   )}" data-action="${escapeHtml(action)}" data-version="${
     request.version
-  }">${remediationActionLabel(action)} 프롬프트 다시 복사</button>`;
+  }">Copy ${remediationActionLabel(action).toLowerCase()} prompt again</button>`;
 }
 
 function remediationButtonHtml(
@@ -648,49 +717,53 @@ function metricCard(label: string, value: number, tone = ""): string {
   return `<div class="metric ${tone}"><span>${escapeHtml(label)}</span><strong>${value}</strong></div>`;
 }
 
+function findingMetric(label: string, value: number, tone = ""): string {
+  return `<span class="metric-inline ${tone}">${escapeHtml(label)} <strong>${value}</strong></span>`;
+}
+
 function remediationActionLabel(action: "generate" | "apply" | "verify"): string {
   switch (action) {
     case "generate":
-      return "수정안 생성";
+      return "Generate fix";
     case "apply":
-      return "수정 적용";
+      return "Apply fix";
     case "verify":
-      return "수정 검증";
+      return "Verify fix";
   }
 }
 
 function scanStatusLabel(status: string): string {
   const labels: Readonly<Record<string, string>> = {
-    running: "실행 중",
-    complete: "완료",
-    failed: "실패",
-    canceled: "취소됨",
+    running: "Running",
+    complete: "Complete",
+    failed: "Failed",
+    canceled: "Canceled",
   };
   return escapeHtml(labels[status] ?? status);
 }
 
 function requestStateLabel(status: string): string {
   const labels: Readonly<Record<string, string>> = {
-    pending: "대기 중",
-    claimed: "처리 중",
-    delivered: "전달됨",
-    canceled: "취소됨",
+    pending: "Pending",
+    claimed: "In progress",
+    delivered: "Delivered",
+    canceled: "Canceled",
   };
   return labels[status] ?? status;
 }
 
 function severityLabel(severity: string): string {
   const labels: Readonly<Record<string, string>> = {
-    critical: "치명적",
-    high: "높음",
-    medium: "중간",
-    low: "낮음",
+    critical: "Critical",
+    high: "High",
+    medium: "Medium",
+    low: "Low",
   };
   return escapeHtml(labels[severity] ?? severity);
 }
 
 function triageLabel(status: string): string {
-  return status === "open" ? "열림" : status === "closed" ? "닫힘" : escapeHtml(status);
+  return status === "open" ? "Open" : status === "closed" ? "Closed" : escapeHtml(status);
 }
 
 function emptyState(
@@ -698,11 +771,11 @@ function emptyState(
   detail: string,
   showAllRepositories = false,
 ): string {
-  return `<section class="card empty-state" data-od-id="empty-state"><span class="empty-mark" aria-hidden="true">—</span><h2>${escapeHtml(
+  return `<section class="empty-state" data-od-id="empty-state"><h2>${escapeHtml(
     title,
   )}</h2><p class="muted">${escapeHtml(detail)}</p>${
     showAllRepositories
-      ? '<button class="primary" data-command="selectRepositoryScope" data-repository-scope="all">모든 저장소 보기</button>'
+      ? '<button class="primary" data-command="selectRepositoryScope" data-repository-scope="all">View all repositories</button>'
       : ""
   }</section>`;
 }
@@ -729,37 +802,43 @@ function integrationPresentation(integration: KiroIntegrationInspection): {
   readonly badge: string;
   readonly badgeClass: string;
   readonly heading: string;
+  readonly summary: string;
 } {
   switch (integration.state) {
     case "ready":
       return {
-        badge: "연결됨",
+        badge: "Connected",
         badgeClass: "badge-ready",
-        heading: "Kiro Security가 연결되어 있습니다",
+        heading: "Kiro Security is connected",
+        summary: "The security workflow is available in every Kiro Chat for this user.",
       };
     case "mismatch":
       return {
-        badge: "설정 확인 필요",
+        badge: "Review setup",
         badgeClass: "badge-warning",
-        heading: "설정이 완전하지 않거나 현재 확장과 다릅니다",
+        heading: "The integration needs an update",
+        summary: "Reconnect to align the installed files with this extension version.",
       };
     case "conflict":
       return {
-        badge: "충돌",
+        badge: "Conflict",
         badgeClass: "badge-error",
-        heading: "Kiro 통합 경로 또는 MCP 키가 충돌합니다",
+        heading: "The Kiro integration has a conflict",
+        summary: "A managed path or MCP key is already owned by another configuration.",
       };
     case "unavailable":
       return {
-        badge: "사용 불가",
+        badge: "Unavailable",
         badgeClass: "badge-error",
-        heading: "Kiro Security를 구성할 수 없습니다",
+        heading: "Kiro Security cannot be configured",
+        summary: "Resolve the reported runtime issue, then refresh this view.",
       };
     case "absent":
       return {
-        badge: "연결 안 됨",
+        badge: "Not connected",
         badgeClass: "badge-neutral",
-        heading: "Kiro Security가 아직 연결되지 않았습니다",
+        heading: "Connect Kiro Security",
+        summary: "Install the workflow once to make it available in every Kiro Chat.",
       };
   }
 }
@@ -798,6 +877,7 @@ function setupStyles(): string {
       color: var(--vscode-button-secondaryForeground, var(--fg));
       background: var(--vscode-button-secondaryBackground, var(--border));
       cursor: pointer;
+      letter-spacing: .02em;
       transition: background-color 120ms ease, border-color 120ms ease, transform 120ms ease;
     }
     button:hover:not(:disabled) { background: var(--vscode-button-secondaryHoverBackground, color-mix(in oklch, var(--border) 72%, var(--fg))); }
@@ -810,7 +890,6 @@ function setupStyles(): string {
     button.primary {
       color: var(--vscode-button-foreground, var(--surface));
       background: var(--vscode-button-background, var(--accent));
-      box-shadow: 0 1px 1px color-mix(in oklch, var(--fg) 20%, transparent), 0 2px 8px color-mix(in oklch, var(--fg) 12%, transparent);
     }
     button.primary:hover:not(:disabled) { background: var(--vscode-button-hoverBackground, color-mix(in oklch, var(--accent) 82%, var(--fg))); }
     code, .mono, .tabular { font-family: var(--vscode-editor-font-family, var(--font-mono)); font-variant-numeric: tabular-nums; }
@@ -819,42 +898,28 @@ function setupStyles(): string {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      min-height: 60px;
-      padding: 12px 14px 10px;
+      min-height: 42px;
+      padding: 7px 10px;
       background: var(--vscode-sideBar-background, var(--bg));
     }
-    .brand-lockup { display: flex; align-items: center; gap: 9px; min-width: 0; }
-    .brand-mark {
-      width: 28px;
-      height: 28px;
-      flex: none;
-      display: inline-grid;
-      place-items: center;
-      border: 1px solid var(--vscode-panel-border, var(--border));
-      border-radius: 6px;
-      color: var(--vscode-foreground, var(--fg));
-      background: var(--vscode-editor-background, var(--surface));
-      font: 700 10px/1 var(--vscode-editor-font-family, var(--font-mono));
-      letter-spacing: .04em;
-    }
+    .brand-lockup { min-width: 0; }
     .topbar h1 { margin: 0; overflow: hidden; font-size: 13px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
-    .topbar p, .card p { margin: 2px 0 0; }
-    .topbar p { color: var(--vscode-descriptionForeground, var(--muted)); font-size: 11px; }
+    .card p { margin: 2px 0 0; }
     .icon-button { width: 32px; border-color: transparent; background: transparent; font-size: 17px; padding: 3px; }
     .tabs {
       display: flex;
-      gap: 2px;
       border-block: 1px solid var(--vscode-panel-border, var(--border));
-      padding: 0 9px;
+      padding: 0 6px;
       background: var(--vscode-sideBar-background, var(--bg));
     }
-    .tab { position: relative; min-height: 36px; border: 0; border-radius: 0; background: transparent; padding: 7px 9px; color: var(--vscode-descriptionForeground, var(--muted)); }
+    .tab { position: relative; flex: 1; min-height: 36px; border: 0; border-radius: 0; background: transparent; padding: 7px 5px; color: var(--vscode-descriptionForeground, var(--muted)); }
     .tab:hover:not(:disabled) { color: var(--vscode-foreground, var(--fg)); background: var(--vscode-list-hoverBackground, color-mix(in oklch, var(--border) 65%, transparent)); }
     .tab.active { color: var(--vscode-foreground, var(--fg)); font-weight: 600; }
     .tab.active::after { content: ""; position: absolute; inset: auto 7px -1px; height: 2px; background: var(--vscode-focusBorder, var(--accent)); }
-    .content { width: min(100%, 760px); margin-inline: auto; padding: 14px; display: grid; gap: 12px; }
+    .content { width: min(100%, 760px); margin-inline: auto; padding: 12px 10px 16px; display: grid; gap: 12px; }
     .page { min-width: 0; display: none; gap: 12px; }
     .page.active { display: grid; }
+    .setup-page.active { display: block; }
     .feedback {
       border: 1px solid var(--vscode-focusBorder, var(--accent));
       border-radius: 5px;
@@ -869,15 +934,21 @@ function setupStyles(): string {
       padding: 14px;
       background: var(--vscode-editor-background, var(--surface));
     }
+    .panel-section {
+      min-width: 0;
+      padding: 2px 2px 14px;
+      border-bottom: 1px solid var(--vscode-panel-border, var(--border));
+    }
     .status-hero, .card-title, .section-heading {
       display: flex;
-      align-items: flex-start;
       justify-content: space-between;
       gap: 12px;
     }
+    .status-hero { align-items: center; }
+    .card-title, .section-heading { align-items: flex-start; }
     .status-hero > div, .card-title > div, .section-heading > div { min-width: 0; }
-    .status-hero h2 { margin: 4px 0 0; font-size: 17px; line-height: 1.3; letter-spacing: -.012em; }
-    .status-hero p { margin-top: 5px; }
+    .status-hero h2 { margin: 0; font-size: 14px; line-height: 1.3; }
+    .status-hero p { margin-top: 4px; }
     .card-title h2, .section-heading h2 { margin: 0; font-size: 14px; line-height: 1.35; overflow-wrap: anywhere; }
     .section-heading h2 { margin-top: 3px; font-size: 16px; }
     .card-title p { color: var(--vscode-descriptionForeground, var(--muted)); overflow-wrap: anywhere; }
@@ -894,39 +965,68 @@ function setupStyles(): string {
     .badge-ready { color: var(--vscode-testing-iconPassed, var(--accent)); background: color-mix(in oklch, currentColor 8%, transparent); }
     .badge-warning { color: var(--vscode-editorWarning-foreground, var(--muted)); background: color-mix(in oklch, currentColor 8%, transparent); }
     .badge-error { color: var(--vscode-errorForeground, var(--fg)); background: color-mix(in oklch, currentColor 8%, transparent); }
-    .workflow-summary {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      align-items: center;
-      gap: 14px;
-      margin-top: 14px;
-      padding-block: 13px;
-      border-block: 1px solid var(--vscode-panel-border, var(--border));
+    .connection-panel .badge {
+      border: 0;
+      border-radius: 0;
+      padding: 0;
+      background: transparent;
+      font: 600 11px/1.45 var(--vscode-font-family, var(--font-body));
     }
-    .workflow-summary h3 { margin: 0; font-size: 13px; }
-    .workflow-summary p { color: var(--vscode-descriptionForeground, var(--muted)); }
-    .scope-note { margin-top: 12px; padding: 10px; border-radius: 4px; color: var(--vscode-descriptionForeground, var(--muted)); background: var(--vscode-textBlockQuote-background, var(--bg)); }
-    .scope-note strong { color: var(--vscode-foreground, var(--fg)); font-size: 12px; }
-    .scope-note p { margin-top: 4px; }
+    .connection-panel .badge-ready::before { content: "✓"; margin-right: 4px; }
+    .context-list {
+      display: grid;
+      gap: 6px;
+      margin-top: 11px;
+      padding-top: 10px;
+      border-top: 1px solid var(--vscode-panel-border, var(--border));
+    }
+    .context-row { display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 8px; align-items: start; }
+    .context-row > span { color: var(--vscode-descriptionForeground, var(--muted)); font-size: 11px; }
+    .context-row > strong { min-width: 0; font-size: 12px; font-weight: 500; overflow-wrap: anywhere; }
+    .quick-start { padding-top: 12px; }
+    .quick-start > p { max-width: 46ch; }
+    .prompt-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: stretch; margin-top: 6px; }
+    .prompt-row code {
+      min-width: 0;
+      padding: 7px 8px;
+      border: 1px solid var(--vscode-input-border, var(--border));
+      border-radius: 3px;
+      color: var(--vscode-input-foreground, var(--fg));
+      background: var(--vscode-input-background, var(--surface));
+      font-size: 11px;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+    .copy-button { min-height: 0; padding-inline: 9px; }
+    .result-note { margin-top: 7px; font-size: 11px; }
+    .diagnostic-panel { padding: 0; }
+    .diagnostic-panel > summary { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 8px 2px; color: var(--vscode-descriptionForeground, var(--muted)); }
+    .summary-status { margin-left: auto; font: 600 10px/1.3 var(--vscode-editor-font-family, var(--font-mono)); white-space: nowrap; }
+    .summary-status.ready { color: var(--vscode-testing-iconPassed, var(--accent)); }
+    .summary-status.pending { color: var(--vscode-editorWarning-foreground, var(--muted)); }
+    .details-body { padding: 10px 12px 12px; border-top: 1px solid var(--vscode-panel-border, var(--border)); }
+    .diagnostic-panel > .details-body { padding: 2px 2px 14px; border-top: 0; }
+    .compact-checks { display: grid; gap: 9px; }
+    .compact-check { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; min-width: 0; }
+    .compact-check > div { min-width: 0; }
+    .compact-check strong { display: block; font-size: 12px; }
+    .compact-check .muted { display: block; margin-top: 1px; font-size: 11px; }
+    .compact-check > span:last-child { color: var(--vscode-testing-iconPassed, var(--accent)); font: 700 10px/1 var(--vscode-editor-font-family, var(--font-mono)); }
+    .compact-check > span.pending { color: var(--vscode-editorWarning-foreground, var(--muted)); }
+    .nested-details { margin-top: 10px; border-top: 1px solid var(--vscode-panel-border, var(--border)); padding-top: 9px; }
+    .nested-details .details-body { padding-inline: 0; border-top: 0; }
     .muted { color: var(--vscode-descriptionForeground, var(--muted)); overflow-wrap: anywhere; }
     .mono { font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
     .button-row { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-top: 12px; }
     .request-state { color: var(--vscode-descriptionForeground, var(--muted)); }
     .setup-options { margin-top: 12px; border-top: 1px solid var(--vscode-panel-border, var(--border)); padding-top: 9px; }
-    .setup-options summary, .setup-disclosure summary { border-radius: 3px; cursor: pointer; font-weight: 600; }
+    .setup-options summary { border-radius: 3px; cursor: pointer; font-weight: 600; }
     .setup-options summary { color: var(--vscode-descriptionForeground, var(--muted)); }
     .setup-options-body { padding: 10px 0 2px; }
     dl { margin: 0; display: grid; grid-template-columns: minmax(90px, auto) minmax(0, 1fr); gap: 6px 10px; }
     dt { color: var(--vscode-descriptionForeground, var(--muted)); }
     dd { margin: 0; overflow-wrap: anywhere; }
-    .checks { margin-top: 12px; display: grid; gap: 10px; }
-    .check { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 9px; align-items: start; }
-    .check-icon { width: 18px; height: 18px; border-radius: 50%; display: inline-grid; place-items: center; border: 1px solid var(--vscode-panel-border, var(--border)); font: 700 10px/1 var(--vscode-editor-font-family, var(--font-mono)); }
-    .check-icon.ok { color: var(--vscode-testing-iconPassed, var(--accent)); border-color: currentColor; }
-    .check-icon.pending { color: var(--vscode-editorWarning-foreground, var(--muted)); border-color: currentColor; }
-    .check strong, .check span:last-child { display: block; }
     summary > span { display: inline-flex; flex-direction: column; }
-    summary small { color: var(--vscode-descriptionForeground, var(--muted)); font-weight: normal; }
     .overview { min-width: 0; padding: 3px 2px 2px; }
     .scope-switch { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; }
     .scope-label { min-width: 0; color: var(--vscode-descriptionForeground, var(--muted)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -934,34 +1034,48 @@ function setupStyles(): string {
     .scope-buttons button { min-height: 28px; padding: 3px 8px; background: transparent; }
     .scope-buttons button.active { border-color: var(--vscode-focusBorder, var(--accent)); color: var(--vscode-foreground, var(--fg)); background: var(--vscode-list-activeSelectionBackground, var(--border)); }
     .metric-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; margin-top: 11px; }
-    .metric-grid-compact { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     .metric { min-width: 0; border: 1px solid var(--vscode-panel-border, var(--border)); border-radius: 5px; padding: 9px; background: var(--vscode-editor-background, var(--surface)); }
     .metric span { display: block; min-height: 2.8em; color: var(--vscode-descriptionForeground, var(--muted)); font-size: 11px; line-height: 1.35; }
     .metric strong { display: block; margin-top: 2px; font: 650 18px/1.2 var(--vscode-editor-font-family, var(--font-mono)); font-variant-numeric: tabular-nums; }
     .metric-success strong { color: var(--vscode-testing-iconPassed, var(--fg)); }
     .metric-warning strong { color: var(--vscode-editorWarning-foreground, var(--fg)); }
     .metric-danger strong { color: var(--vscode-errorForeground, var(--fg)); }
+    .metric-strip { display: flex; align-items: center; min-width: 0; margin-top: 9px; padding: 8px 10px; border: 1px solid var(--vscode-panel-border, var(--border)); border-radius: 5px; background: var(--vscode-editor-background, var(--surface)); }
+    .metric-inline { min-width: 0; display: inline-flex; align-items: baseline; gap: 5px; color: var(--vscode-descriptionForeground, var(--muted)); font-size: 10px; white-space: nowrap; }
+    .metric-inline + .metric-inline { margin-left: 9px; padding-left: 9px; border-left: 1px solid var(--vscode-panel-border, var(--border)); }
+    .metric-inline strong { color: var(--vscode-foreground, var(--fg)); font: 650 13px/1 var(--vscode-editor-font-family, var(--font-mono)); font-variant-numeric: tabular-nums; }
+    .metric-inline.metric-warning strong { color: var(--vscode-editorWarning-foreground, var(--fg)); }
+    .metric-inline.metric-danger strong { color: var(--vscode-errorForeground, var(--fg)); }
     .section-divider { display: flex; align-items: center; gap: 8px; color: var(--vscode-descriptionForeground, var(--muted)); font: 600 10px/1 var(--vscode-editor-font-family, var(--font-mono)); letter-spacing: .05em; text-transform: uppercase; }
     .section-divider::after { content: ""; height: 1px; flex: 1; background: var(--vscode-panel-border, var(--border)); }
     .scan-facts { margin-top: 12px; }
     .progress-track { height: 4px; margin-top: 12px; overflow: hidden; border-radius: 999px; background: var(--vscode-progressBar-background, var(--border)); }
     .progress-track span { display: block; height: 100%; border-radius: inherit; background: var(--vscode-focusBorder, var(--accent)); }
-    .finding-toolbar { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; }
+    .finding-filter { padding: 0; overflow: hidden; }
+    .finding-filter > summary { min-height: 42px; display: flex; align-items: center; gap: 8px; padding: 9px 12px; list-style-position: inside; }
+    .filter-summary { margin-left: auto; color: var(--vscode-descriptionForeground, var(--muted)); font: 500 10px/1.3 var(--vscode-editor-font-family, var(--font-mono)); white-space: nowrap; }
+    .finding-toolbar { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; padding: 10px 12px 12px; border-top: 1px solid var(--vscode-panel-border, var(--border)); }
     .finding-toolbar label { display: grid; gap: 4px; color: var(--vscode-descriptionForeground, var(--muted)); font-size: 11px; }
+    .badge-row { display: flex; flex: none; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
+    .finding-summary { margin-top: 10px !important; }
+    .quick-meta { display: flex; flex-wrap: wrap; gap: 5px 10px; margin-top: 9px; color: var(--vscode-descriptionForeground, var(--muted)); font-size: 11px; }
+    .quick-meta strong { color: var(--vscode-foreground, var(--fg)); font-weight: 500; }
+    .finding-details { margin-top: 10px; padding-top: 8px; }
+    .blocked-action { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 9px; margin-top: 11px; padding: 9px; border-radius: 4px; background: var(--vscode-textBlockQuote-background, var(--bg)); }
+    .blocked-action button { min-height: 30px; color: var(--vscode-descriptionForeground, var(--muted)); }
     select { width: 100%; min-width: 0; min-height: 30px; border: 1px solid var(--vscode-dropdown-border, var(--border)); border-radius: 3px; padding: 4px 7px; color: var(--vscode-dropdown-foreground, var(--fg)); background: var(--vscode-dropdown-background, var(--surface)); }
     pre { max-height: 280px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 8px; background: var(--vscode-textCodeBlock-background, var(--bg)); font: 11px/1.4 var(--vscode-editor-font-family, var(--font-mono)); }
     .error-text { color: var(--vscode-errorForeground, var(--fg)); }
-    .empty-state { min-height: 180px; display: grid; place-content: center; justify-items: center; text-align: center; }
-    .empty-mark { color: var(--vscode-descriptionForeground, var(--muted)); font: 300 28px/1 var(--vscode-editor-font-family, var(--font-mono)); }
-    .empty-state h2 { margin: 10px 0 4px; font-size: 14px; }
+    .empty-state { min-height: 160px; padding: 22px 2px; }
+    .empty-state h2 { margin: 0; font-size: 14px; }
+    .empty-state p { max-width: 42ch; }
     .empty-state button { margin-top: 10px; }
-    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
     @media (max-width: 520px) {
       .content { padding: 11px; }
-      .workflow-summary { grid-template-columns: 1fr; }
-      .workflow-summary .primary { width: 100%; }
-      .metric-grid, .metric-grid-compact { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .finding-toolbar { grid-template-columns: 1fr; }
+      .blocked-action { grid-template-columns: 1fr; }
+      .blocked-action button { width: 100%; }
       dl { grid-template-columns: 1fr; gap: 2px; }
       dd + dt { margin-top: 6px; }
     }
@@ -971,12 +1085,14 @@ function setupStyles(): string {
   `;
 }
 
-function checkRow(name: string, value: string, ready: boolean): string {
-  return `<div class="check"><span class="check-icon ${
-    ready ? "ok" : "pending"
-  }" aria-hidden="true">${ready ? "✓" : "!"}</span><div><strong>${escapeHtml(
+function compactCheckRow(name: string, value: string, ready: boolean): string {
+  return `<div class="compact-check"><div><strong>${escapeHtml(
     name,
-  )}</strong><span class="muted">${escapeHtml(value)}</span></div></div>`;
+  )}</strong><span class="muted">${escapeHtml(value)}</span></div><span class="${
+    ready ? "" : "pending"
+  }" aria-label="${ready ? "Ready" : "Needs attention"}">${
+    ready ? "✓" : "!"
+  }</span></div>`;
 }
 
 function escapeHtml(value: unknown): string {

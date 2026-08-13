@@ -22,15 +22,15 @@ test("setup view connects steering, direct MCP, and Hook without Agent or Power 
     "utf8",
   );
   assert.match(setup, /enableScripts: true/);
+  assert.doesNotMatch(setup, /localResourceRoots|asWebviewUri/);
   assert.match(setupSurface, /connectIntegration/);
+  assert.match(setupSurface, /copyScanPrompt/);
   assert.match(setupSurface, /showMcpFile/);
   assert.match(setupSurface, /showSteeringFile/);
   assert.doesNotMatch(setupSurface, /showPermissionsFile/);
-  assert.match(setupHtml, /채팅 승인 규칙/);
   assert.match(setupHtml, /data-od-id="kiro-chat-connection"/);
   assert.match(setupHtml, /var\(--vscode-foreground, var\(--fg\)\)/);
-  assert.match(setup, /exact Kiro Trust rules/);
-  assert.match(setup, /No custom Agent configuration is installed/);
+  assert.match(setup, /scoped Trust rules/);
   assert.doesNotMatch(setupSurface, /preparePowerIntegration/);
   assert.doesNotMatch(setupSurface, /verifyIntegration|Verify again/);
   assert.match(setupHtml, /<style>\$\{setupStyles\(\)\}<\/style>/);
@@ -39,23 +39,33 @@ test("setup view connects steering, direct MCP, and Hook without Agent or Power 
   assert.doesNotMatch(setup, /<!doctype html>|function setupStyles/);
   assert.match(extension, /getOrCreateInstallationServerKey/);
   assert.match(extension, /new SecuritySetupView\(/);
-  assert.match(extension, /setupView\.promptForPendingUpdate\(\)/);
-  assert.match(setup, /inspection\.state !== "mismatch" \|\| !connected/);
-  assert.match(setup, /"Update & Reload"/);
+  assert.doesNotMatch(extension, /promptForPendingUpdate/);
   assert.match(setup, /await this\.integration\.install\(\)/);
-  assert.match(setup, /workbench\.action\.reloadWindow/);
   assert.doesNotMatch(integration, /before\.state === "mismatch"/);
   assert.equal((integration.match(/resolvePythonExecutable\(\)/g) ?? []).length, 1);
   assert.doesNotMatch(chatBinding, /resolvePythonExecutable/);
   assert.doesNotMatch(integration, /WorkbenchAdminClient/);
   assert.match(setup, /new WorkbenchAdminClient\(/);
-  assert.match(setupHtml, /input\.integration\.state === "unavailable"[\s\S]*\? "disabled"/);
+  assert.match(
+    setupHtml,
+    /input\.integration\.state === "absent" \|\| input\.integration\.state === "mismatch"/,
+  );
   assert.match(setup, /context\.workspaceState\.get<RepositoryScope>/);
   assert.match(setup, /vscode\.workspace\.workspaceFolders/);
   assert.match(setup, /dashboard: projectedDashboard/);
   assert.match(setup, /requireWorkspaceScanForOccurrence/);
   assert.match(setupHtml, /data-command="selectRepositoryScope"/);
   assert.doesNotMatch(setupHtml, /data-path=/);
+  assert.doesNotMatch(setupHtml, /data-command="selectTab"/);
+  assert.match(setupHtml, /vscode\.setState\(\{ activeTab: name \}\)/);
+  assert.match(setupHtml, /vscode\.getState\(\)\?\.activeTab/);
+  for (const key of ["ArrowRight", "ArrowLeft", "Home", "End"]) {
+    assert.match(setupHtml, new RegExp(`event\\.key === '${key}'`));
+  }
+  assert.match(
+    setup,
+    /if \(message\.command === "selectTab"\)[\s\S]*return;[\s\S]*if \(this\.busy\)/,
+  );
 });
 
 test("integration manager coalesces concurrent Python resolution", async () => {
@@ -262,26 +272,27 @@ test("Dashboard and Findings render exact recovery and follow-up controls", () =
     steeringPath: "/home/.kiro/steering/kiro-security-power.md",
     runtimeRoot: "/global/runtime",
   };
-  const html = renderSetupHtml({
+  const renderInput = {
     webview: { cspSource: "vscode-webview:" },
     stateRoot: "/global",
     integration,
     activeTab: "findings",
     dashboard,
     repositoryScope: "all",
-    workspaceLabel: "현재 워크스페이스: alpha",
+    workspaceLabel: "Current workspace: alpha",
     hasWorkspace: true,
     globalScanCount: scans.length,
     sourceActionScanIds: ["scan-one", "scan-two", "scan-failed"],
-  });
+  };
+  const html = renderSetupHtml(renderInput);
 
   assert.match(html, /id="scan-filter"/);
   assert.match(html, /data-scan-id="scan-two"/);
   assert.match(html, /\/source\/beta/);
   assert.match(html, /beta-revision/);
-  assert.match(html, /수정안 생성 프롬프트 다시 복사/);
+  assert.match(html, /Copy generate fix prompt again/);
   assert.match(html, /data-command="copyRemediationPrompt"/);
-  assert.match(html, /재개 프롬프트 다시 복사/);
+  assert.match(html, /Copy resume prompt again/);
   assert.match(html, /data-command="cancelRecovery"/);
   assert.match(html, /data-request-id="recovery-one"/);
   assert.match(html, /data-command="trackFinding"/);
@@ -289,10 +300,44 @@ test("Dashboard and Findings render exact recovery and follow-up controls", () =
   assert.match(html, /role="progressbar"/);
   assert.match(html, /data-od-id="dashboard-overview"/);
   assert.match(html, /data-od-id="findings-overview"/);
+  assert.match(html, /data-od-id="run-security-scan"/);
+  assert.match(html, /data-command="copyScanPrompt"/);
   assert.match(
     html,
-    /<span>보고 가능한 발견<\/span><strong>1<\/strong>/,
+    /id="tab-findings"[^>]*aria-controls="panel-findings"[^>]*aria-selected="true"[^>]*tabindex="0"/,
   );
+  assert.match(
+    html,
+    /id="tab-setup"[^>]*aria-controls="panel-setup"[^>]*aria-selected="false"[^>]*tabindex="-1"/,
+  );
+  assert.match(
+    html,
+    /id="panel-findings"[^>]*aria-labelledby="tab-findings"(?![^>]*hidden)/,
+  );
+  assert.match(
+    html,
+    /id="panel-dashboard"[^>]*aria-labelledby="tab-dashboard"[^>]*hidden/,
+  );
+  assert.match(html, /id="finding-filter-summary"/);
+  assert.match(
+    html,
+    /<span>Reportable findings<\/span><strong>1<\/strong>/,
+  );
+
+  const needsAttentionHtml = renderSetupHtml({
+    ...renderInput,
+    integration: {
+      ...integration,
+      state: "mismatch",
+      runtime: { ready: false, detail: "Runtime update required." },
+    },
+    activeTab: "setup",
+  });
+  assert.match(
+    needsAttentionHtml,
+    /class="summary-status pending">5\/6 needs attention<\/span>/,
+  );
+  assert.doesNotMatch(needsAttentionHtml, /data-od-id="run-security-scan"/);
 
   const { projectDashboard } = require(
     "../out/packages/extension/src/workspaceProjection.js",
@@ -304,7 +349,7 @@ test("Dashboard and Findings render exact recovery and follow-up controls", () =
     activeTab: "dashboard",
     dashboard: projectDashboard(dashboard, ["/source/alpha"], "current"),
     repositoryScope: "current",
-    workspaceLabel: "현재 워크스페이스: alpha",
+    workspaceLabel: "Current workspace: alpha",
     hasWorkspace: true,
     globalScanCount: scans.length,
     sourceActionScanIds: ["scan-one"],
@@ -319,12 +364,12 @@ test("Dashboard and Findings render exact recovery and follow-up controls", () =
     activeTab: "dashboard",
     dashboard: projectDashboard(dashboard, ["/source/gamma"], "current"),
     repositoryScope: "current",
-    workspaceLabel: "현재 워크스페이스: gamma",
+    workspaceLabel: "Current workspace: gamma",
     hasWorkspace: true,
     globalScanCount: scans.length,
     sourceActionScanIds: [],
   });
-  assert.match(emptyCurrentHtml, /다른 저장소에 3개의 스캔/);
+  assert.match(emptyCurrentHtml, /3 scans are available in other repositories/);
   assert.match(emptyCurrentHtml, /data-repository-scope="all"/);
 
   const noWorkspaceHtml = renderSetupHtml({
@@ -334,12 +379,12 @@ test("Dashboard and Findings render exact recovery and follow-up controls", () =
     activeTab: "dashboard",
     dashboard: projectDashboard(dashboard, [], "current"),
     repositoryScope: "current",
-    workspaceLabel: "현재 워크스페이스 (0)",
+    workspaceLabel: "Current workspaces (0)",
     hasWorkspace: false,
     globalScanCount: scans.length,
     sourceActionScanIds: [],
   });
-  assert.match(noWorkspaceHtml, /열린 워크스페이스가 없습니다/);
+  assert.match(noWorkspaceHtml, /No workspace is open/);
 
   const allWithOutsideActionsBlocked = renderSetupHtml({
     webview: { cspSource: "vscode-webview:" },
@@ -348,12 +393,12 @@ test("Dashboard and Findings render exact recovery and follow-up controls", () =
     activeTab: "findings",
     dashboard,
     repositoryScope: "all",
-    workspaceLabel: "현재 워크스페이스: alpha",
+    workspaceLabel: "Current workspace: alpha",
     hasWorkspace: true,
     globalScanCount: scans.length,
     sourceActionScanIds: ["scan-one"],
   });
-  assert.match(allWithOutsideActionsBlocked, /수정 작업을 계속하려면 이 저장소를 여세요/);
+  assert.match(allWithOutsideActionsBlocked, /<button disabled[^>]*>Generate fix<\/button>/);
   assert.doesNotMatch(
     allWithOutsideActionsBlocked,
     /data-command="copyRemediationPrompt"/,

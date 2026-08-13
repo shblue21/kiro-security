@@ -30,6 +30,7 @@ type SetupCommand =
   | "selectTab"
   | "selectRepositoryScope"
   | "connectIntegration"
+  | "copyScanPrompt"
   | "showHookFile"
   | "showMcpFile"
   | "showSteeringFile"
@@ -79,48 +80,10 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
     this.workspaceState = context.workspaceState;
   }
 
-  async promptForPendingUpdate(): Promise<void> {
-    let inspection: KiroIntegrationInspection;
-    try {
-      inspection = await this.integration.inspect();
-    } catch (error) {
-      this.output.appendLine(
-        `Unable to check for a Kiro Security integration update: ${errorMessage(error)}`,
-      );
-      return;
-    }
-    const connected =
-      inspection.mcp.state === "installed" || inspection.mcp.state === "mismatch";
-    if (inspection.state !== "mismatch" || !connected) {
-      return;
-    }
-    const approved = await vscode.window.showWarningMessage(
-      "A Kiro Security integration update is ready.",
-      {
-        modal: true,
-        detail:
-          "Update the managed runtime, steering, Hook, MCP entry, and approval rules, then reload Kiro. Reloading stops active chats and tool processes.",
-      },
-      "Update & Reload",
-    );
-    if (approved !== "Update & Reload") {
-      return;
-    }
-    try {
-      await this.integration.install();
-      this.output.appendLine("Kiro Security integration updated. Reloading Kiro.");
-      await vscode.commands.executeCommand("workbench.action.reloadWindow");
-    } catch (error) {
-      const detail = errorMessage(error);
-      this.output.appendLine(`Kiro Security integration update failed: ${detail}`);
-      await vscode.window.showErrorMessage(
-        `Kiro Security integration update failed: ${detail}`,
-      );
-    }
-  }
-
   resolveWebviewView(view: vscode.WebviewView): void {
-    view.webview.options = { enableScripts: true };
+    view.webview.options = {
+      enableScripts: true,
+    };
     const messageSubscription = view.webview.onDidReceiveMessage(
       async (message: unknown) => this.handleMessage(view, message),
     );
@@ -138,7 +101,17 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
     view: vscode.WebviewView,
     message: unknown,
   ): Promise<void> {
-    if (this.busy || !isSetupMessage(message)) {
+    if (!isSetupMessage(message)) {
+      return;
+    }
+    if (message.command === "selectTab") {
+      const tab = validViewTab(message.tab);
+      if (tab) {
+        this.activeTab = tab;
+      }
+      return;
+    }
+    if (this.busy) {
       return;
     }
     this.busy = true;
@@ -146,11 +119,6 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
     try {
       switch (message.command) {
         case "refresh":
-          break;
-        case "selectTab":
-          if (message.tab) {
-            this.activeTab = message.tab;
-          }
           break;
         case "selectRepositoryScope":
           this.repositoryScope = requiredRepositoryScope(
@@ -163,6 +131,12 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
           break;
         case "connectIntegration":
           await this.connectIntegration();
+          break;
+        case "copyScanPrompt":
+          await vscode.env.clipboard.writeText(
+            "Scan this repository for security vulnerabilities.",
+          );
+          this.feedback = "Scan prompt copied. Paste it into Kiro Chat.";
           break;
         case "showHookFile":
           await this.showFile(
@@ -402,8 +376,8 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
     const roots = entries.map((entry) => entry.root);
     const label =
       entries.length === 1
-        ? `현재 워크스페이스: ${entries[0].name}`
-        : `현재 워크스페이스 (${entries.length})`;
+        ? `Current workspace: ${entries[0].name}`
+        : `Current workspaces (${entries.length})`;
     return { roots, label };
   }
 
@@ -509,16 +483,14 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
 
   private async connectIntegration(): Promise<void> {
     const approved = await vscode.window.showWarningMessage(
-      "Connect Kiro Security to normal Kiro chats for this user?",
+      "Connect Kiro Security to Kiro Chat?",
       {
         modal: true,
         detail: [
-          `Adds only the installation-specific '${this.integration.serverKey}' entry in ${this.integration.mcpPath}.`,
-          "Adds exact Kiro Trust rules that auto-approve only this steering file and this installation's non-Start/non-Cancel MCP tools.",
-          "Start and Cancel always remain subject to explicit Kiro approval.",
-          `Creates dedicated files at ${this.integration.chatBinding.hookPath} and ${this.integration.steeringPath}.`,
-          "The Hook matches only exact Kiro Security direct MCP tool IDs. No custom Agent configuration is installed.",
-          "Runtime, database, and scan artifacts remain in Extension global storage.",
+          "This installs the MCP connection, scoped Trust rules, and dedicated integration files for this user.",
+          "• Only Kiro Security tools are auto-approved.",
+          "• Start and Cancel always require approval.",
+          "• No custom Agent configuration is installed.",
         ].join("\n\n"),
       },
       "Connect",
@@ -627,6 +599,7 @@ function isSetupMessage(value: unknown): value is SetupMessage {
     "selectTab",
     "selectRepositoryScope",
     "connectIntegration",
+    "copyScanPrompt",
     "showHookFile",
     "showMcpFile",
     "showSteeringFile",
@@ -673,6 +646,12 @@ function requiredRepositoryScope(
     throw new Error("Invalid repository scope.");
   }
   return value;
+}
+
+function validViewTab(value: ViewTab | undefined): ViewTab | undefined {
+  return value === "setup" || value === "dashboard" || value === "findings"
+    ? value
+    : undefined;
 }
 
 function requiredArtifactKind(

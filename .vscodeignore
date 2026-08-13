@@ -1,8 +1,10 @@
 .git/**
 .gitignore
 .kiro/**
+.od-skills/**
 docs/**
 engine/tests/**
+plugin-source/**
 tests/**
 node_modules/**
 !node_modules/jsonc-parser/**
@@ -30,3 +32,6 @@ scripts/**
 **/__pycache__/**
 package-lock.json
 tsconfig.json
+image*.png
+kiro-security-*.html
+kiro-security-*.html.artifact.json

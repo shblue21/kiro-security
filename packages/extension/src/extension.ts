@@ -36,8 +36,6 @@ export async function activate(
     setupRegistration,
     openSetupCommand,
   );
-  void setupView.promptForPendingUpdate();
-
   if (!context.globalState.get<boolean>("kiroSecurity.onboardingShown.v1")) {
     void vscode.commands
       .executeCommand("workbench.view.extension.kiroSecurity")

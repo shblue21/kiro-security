@@ -67,6 +67,10 @@ test("actual VSIX selection contains direct integration assets and no Power entr
   assert.ok(!files.some((entry) => entry.startsWith("docs/")));
   assert.ok(!files.some((entry) => entry.startsWith("tests/")));
   assert.ok(!files.some((entry) => entry.startsWith("engine/tests/")));
+  assert.ok(!files.some((entry) => entry.startsWith(".od-skills/")));
+  assert.ok(!files.some((entry) => entry.startsWith("plugin-source/")));
+  assert.ok(!files.some((entry) => /^kiro-security-.*\.html(?:\.artifact\.json)?$/.test(entry)));
+  assert.ok(!files.some((entry) => /^image(?:-\d+)?\.png$/.test(entry)));
   assert.ok(!files.some((entry) => entry.includes("__pycache__")));
   assert.ok(!files.some((entry) => entry.endsWith(".pyc")));
 });

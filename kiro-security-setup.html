@@ -1,10 +1,10 @@
 
 <!doctype html>
-<html lang="ko">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Kiro Security 설정</title>
+  <title>Kiro Security Setup</title>
   <style>
     :root {
       --bg: oklch(98% 0.005 250);
@@ -39,6 +39,7 @@
       color: var(--vscode-button-secondaryForeground, var(--fg));
       background: var(--vscode-button-secondaryBackground, var(--border));
       cursor: pointer;
+      letter-spacing: .02em;
     }
 
     button:hover:not(:disabled) {
@@ -61,49 +62,24 @@
     button.primary {
       color: var(--vscode-button-foreground, var(--surface));
       background: var(--vscode-button-background, var(--accent));
-      box-shadow:
-        0 1px 1px color-mix(in oklch, var(--fg) 20%, transparent),
-        0 2px 8px color-mix(in oklch, var(--fg) 12%, transparent);
     }
 
     .topbar {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      min-height: 48px;
-      padding: 8px 10px;
+      min-height: 42px;
+      padding: 7px 10px;
     }
 
     .brand-lockup {
-      display: flex;
-      align-items: center;
-      gap: 9px;
       min-width: 0;
-    }
-
-    .brand-mark {
-      width: 24px;
-      height: 24px;
-      flex: none;
-      display: grid;
-      place-items: center;
-      border: 1px solid var(--vscode-panel-border, var(--border));
-      border-radius: 6px;
-      background: var(--vscode-editor-background, var(--surface));
-      font: 700 10px/1 var(--vscode-editor-font-family, var(--font-mono));
-      letter-spacing: .04em;
     }
 
     h1 {
       margin: 0;
       font-size: 13px;
       font-weight: 650;
-    }
-
-    .topbar p {
-      margin: 1px 0 0;
-      color: var(--vscode-descriptionForeground, var(--muted));
-      font-size: 10px;
     }
 
     .icon-button {
@@ -147,27 +123,22 @@
     main {
       width: min(100%, 760px);
       margin-inline: auto;
-      padding: 10px;
+      padding: 12px 10px 16px;
     }
 
-    .page {
-      display: none;
-      gap: 12px;
-    }
+    .page { display: none; }
 
-    .page.active { display: grid; }
+    .page.active { display: block; }
 
-    .card {
+    .panel-section {
       min-width: 0;
-      padding: 12px;
-      border: 1px solid var(--vscode-panel-border, var(--border));
-      border-radius: 6px;
-      background: var(--vscode-editor-background, var(--surface));
+      padding: 2px 2px 14px;
+      border-bottom: 1px solid var(--vscode-panel-border, var(--border));
     }
 
     .status-hero {
       display: flex;
-      align-items: flex-start;
+      align-items: center;
       justify-content: space-between;
       gap: 12px;
     }
@@ -189,13 +160,15 @@
 
     .badge {
       flex: none;
-      padding: 2px 7px;
-      border: 1px solid currentColor;
-      border-radius: 999px;
+      padding: 0;
       color: var(--vscode-testing-iconPassed, var(--accent));
-      background: color-mix(in oklch, currentColor 8%, transparent);
-      font: 600 10px/1.45 var(--vscode-editor-font-family, var(--font-mono));
+      font: 600 11px/1.45 var(--vscode-font-family, var(--font-body));
       white-space: nowrap;
+    }
+
+    .badge::before {
+      content: "✓";
+      margin-right: 4px;
     }
 
     .context-list {
@@ -208,7 +181,7 @@
 
     .context-row {
       display: grid;
-      grid-template-columns: 42px minmax(0, 1fr);
+      grid-template-columns: 48px minmax(0, 1fr);
       gap: 8px;
       align-items: start;
     }
@@ -225,16 +198,50 @@
       overflow-wrap: anywhere;
     }
 
+    .quick-start {
+      padding-top: 12px;
+    }
+
+    .quick-start > p {
+      max-width: 46ch;
+    }
+
+    .prompt-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 6px;
+      align-items: stretch;
+      margin-top: 6px;
+    }
+
+    .prompt-row code {
+      min-width: 0;
+      padding: 7px 8px;
+      border: 1px solid var(--vscode-input-border, var(--border));
+      border-radius: 3px;
+      color: var(--vscode-input-foreground, var(--fg));
+      background: var(--vscode-input-background, var(--surface));
+      font-size: 11px;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+
+    .copy-button {
+      min-height: 0;
+      padding-inline: 9px;
+    }
+
+    .result-note {
+      margin-top: 7px;
+      font-size: 11px;
+    }
+
     code, .mono {
       font-family: var(--vscode-editor-font-family, var(--font-mono));
       font-variant-numeric: tabular-nums;
     }
 
-    details {
-      margin-top: 12px;
-      padding-top: 9px;
-      border-top: 1px solid var(--vscode-panel-border, var(--border));
-    }
+    details { margin: 0; }
 
     summary {
       border-radius: 3px;
@@ -242,18 +249,17 @@
       font-weight: 600;
     }
 
-    .diagnostic-card {
+    .diagnostic-panel {
       padding: 0;
-      overflow: hidden;
     }
 
-    .diagnostic-card > summary {
+    .diagnostic-panel > summary {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 8px;
-      min-height: 42px;
-      padding: 9px 12px;
+      min-height: 40px;
+      padding: 8px 2px;
       list-style-position: inside;
     }
 
@@ -265,8 +271,7 @@
     }
 
     .details-body {
-      padding: 10px 12px 12px;
-      border-top: 1px solid var(--vscode-panel-border, var(--border));
+      padding: 2px 2px 14px;
     }
 
     dl {
@@ -290,10 +295,7 @@
       margin-top: 12px;
     }
 
-    .compact-checks {
-      display: grid;
-      gap: 7px;
-    }
+    .compact-checks { display: grid; gap: 9px; }
 
     .compact-check {
       display: flex;
@@ -318,7 +320,11 @@
       font: 700 10px/1 var(--vscode-editor-font-family, var(--font-mono));
     }
 
-    .nested-details { margin-top: 10px; }
+    .nested-details {
+      margin-top: 12px;
+      padding-top: 9px;
+      border-top: 1px solid var(--vscode-panel-border, var(--border));
+    }
 
     .nested-details .details-body {
       padding-inline: 0;
@@ -328,22 +334,16 @@
     .nested-details p { font-size: 11px; }
 
     .empty-state {
-      min-height: 210px;
-      display: grid;
-      place-content: center;
-      justify-items: center;
-      text-align: center;
-    }
-
-    .empty-mark {
-      color: var(--vscode-descriptionForeground, var(--muted));
-      font: 300 28px/1 var(--vscode-editor-font-family, var(--font-mono));
+      min-height: 160px;
+      padding: 22px 2px;
     }
 
     .empty-state h2 {
-      margin-top: 10px;
+      margin: 0;
       font-size: 14px;
     }
+
+    .empty-state p { max-width: 42ch; }
 
     .feedback {
       display: none;
@@ -373,82 +373,88 @@
 <body>
   <header class="topbar" data-od-id="setup-topbar">
     <div class="brand-lockup">
-      <span class="brand-mark" aria-hidden="true">KS</span>
-      <div>
-        <h1>Kiro Security Power</h1>
-        <p>저장소 보안 워크벤치</p>
-      </div>
+      <h1>Kiro Security Power</h1>
     </div>
-    <button class="icon-button" id="refresh" title="상태 새로고침" aria-label="상태 새로고침">
+    <button class="icon-button" id="refresh" title="Refresh status" aria-label="Refresh status">
       <span aria-hidden="true">↻</span>
     </button>
   </header>
 
-  <nav class="tabs" aria-label="보안 패널" role="tablist" data-od-id="primary-tabs">
-    <button class="tab active" role="tab" aria-selected="true" data-tab="setup">설정</button>
-    <button class="tab" role="tab" aria-selected="false" data-tab="dashboard">대시보드</button>
-    <button class="tab" role="tab" aria-selected="false" data-tab="findings">발견</button>
+  <nav class="tabs" aria-label="Security panel" role="tablist" data-od-id="primary-tabs">
+    <button class="tab active" role="tab" aria-selected="true" data-tab="setup">Setup</button>
+    <button class="tab" role="tab" aria-selected="false" data-tab="dashboard">Dashboard</button>
+    <button class="tab" role="tab" aria-selected="false" data-tab="findings">Findings</button>
   </nav>
 
   <main data-od-id="setup-content">
     <div class="feedback" id="feedback" role="status"></div>
 
     <div class="page active" id="setup" role="tabpanel">
-      <section class="card" data-od-id="kiro-chat-connection">
+      <section class="panel-section" data-od-id="kiro-chat-connection">
         <div class="status-hero">
           <div>
-            <h2 data-od-id="connection-heading">Kiro Security가 연결되어 있습니다</h2>
-            <p class="muted">일반 Kiro Chat에 보안 워크플로가 자동 적용됩니다.</p>
+            <h2 data-od-id="connection-heading">Kiro Security is connected</h2>
+            <p class="muted">The security workflow is available in every Kiro Chat for this user.</p>
           </div>
-          <span class="badge">연결됨</span>
+          <span class="badge">Connected</span>
         </div>
-        <div class="context-list" aria-label="연결 요약">
+        <div class="context-list" aria-label="Connection summary">
           <div class="context-row">
-            <span>범위</span>
-            <strong>현재 사용자 · 모든 Kiro Chat</strong>
+            <span>Scope</span>
+            <strong>Current user, every Kiro Chat</strong>
           </div>
           <div class="context-row">
-            <span>방식</span>
-            <strong>Agent·Power 선택 없이 자동 연결</strong>
+            <span>Mode</span>
+            <strong>Automatically available. No Agent or Power selection.</strong>
           </div>
         </div>
       </section>
 
-      <details class="card diagnostic-card" data-od-id="system-checks">
+      <section class="panel-section quick-start" data-od-id="run-security-scan">
+        <h2>Run a security scan</h2>
+        <p class="muted">Copy this prompt and paste it into Kiro Chat.</p>
+        <div class="prompt-row">
+          <code id="scan-prompt">Scan this repository for security vulnerabilities.</code>
+          <button class="copy-button" id="copy-scan-prompt" data-od-id="copy-scan-prompt">Copy</button>
+        </div>
+        <p class="muted result-note">Results appear in Dashboard and Findings.</p>
+      </section>
+
+      <details class="panel-section diagnostic-panel" data-od-id="system-checks">
         <summary>
-          <span>연결 세부 정보</span>
-          <span class="summary-status">4/4 정상</span>
+          <span>Connection details</span>
+          <span class="summary-status">6/6 ready</span>
         </summary>
         <div class="details-body">
-          <div class="compact-checks" aria-label="시스템 점검">
+          <div class="compact-checks" aria-label="System checks">
             <div class="compact-check">
-              <div><strong>전역 저장소</strong><span class="muted">런타임과 스캔 결과 저장</span></div>
-              <span aria-label="정상">✓</span>
+              <div><strong>Global storage</strong><span class="muted">Stores runtime and scan results</span></div>
+              <span aria-label="Ready">✓</span>
             </div>
             <div class="compact-check">
-              <div><strong>직접 MCP 런타임</strong><span class="muted">현재 확장 버전과 일치</span></div>
-              <span aria-label="정상">✓</span>
+              <div><strong>Direct MCP runtime</strong><span class="muted">Matches the current extension version</span></div>
+              <span aria-label="Ready">✓</span>
             </div>
             <div class="compact-check">
-              <div><strong>전역 steering</strong><span class="muted">일반 채팅에 워크플로 자동 포함</span></div>
-              <span aria-label="정상">✓</span>
+              <div><strong>Global steering</strong><span class="muted">Adds the workflow to regular chat</span></div>
+              <span aria-label="Ready">✓</span>
             </div>
             <div class="compact-check">
-              <div><strong>채팅 승인 규칙</strong><span class="muted">Start와 Cancel은 명시적 승인 유지</span></div>
-              <span aria-label="정상">✓</span>
+              <div><strong>Direct MCP registration</strong><span class="muted">Registered for this installation</span></div>
+              <span aria-label="Ready">✓</span>
+            </div>
+            <div class="compact-check">
+              <div><strong>Chat identity Hook</strong><span class="muted">Binds requests to the active chat</span></div>
+              <span aria-label="Ready">✓</span>
+            </div>
+            <div class="compact-check">
+              <div><strong>Chat approval rules</strong><span class="muted">Start and Cancel require explicit approval</span></div>
+              <span aria-label="Ready">✓</span>
             </div>
           </div>
 
           <details class="nested-details">
-            <summary>연결 방식</summary>
-            <div class="details-body">
-              <p class="muted">자동 포함 steering이 보안 워크플로를 제공합니다.</p>
-              <p class="muted">직접 도구 Hook은 각 요청을 Kiro <code>session_id</code>에 결합하고, MCP는 이를 한 번만 소비해 채팅이 소유한 워크스페이스를 보호합니다.</p>
-            </div>
-          </details>
-
-          <details class="nested-details">
-            <summary>관리 파일</summary>
+            <summary>Managed files</summary>
             <div class="details-body">
               <dl>
                 <dt>MCP</dt>
@@ -459,9 +465,9 @@
                 <dd class="mono">~/.kiro/hooks/kiro-security-power.json</dd>
               </dl>
               <div class="button-row">
-                <button>Hook 열기</button>
-                <button>MCP 열기</button>
-                <button>Steering 열기</button>
+                <button>Open Hook</button>
+                <button>Open MCP config</button>
+                <button>Open Steering</button>
               </div>
             </div>
           </details>
@@ -470,18 +476,16 @@
     </div>
 
     <div class="page" id="dashboard" role="tabpanel">
-      <section class="card empty-state" data-od-id="dashboard-empty-state">
-        <span class="empty-mark" aria-hidden="true">—</span>
-        <h2>아직 실행한 스캔이 없습니다</h2>
-        <p class="muted">일반 Kiro Chat에서 보안 스캔을 시작하세요.<br>확장 자체는 스캔을 시작하지 않습니다.</p>
+      <section class="empty-state" data-od-id="dashboard-empty-state">
+        <h2>No scans yet</h2>
+        <p class="muted">Start a security scan in Kiro Chat. This extension displays the results.</p>
       </section>
     </div>
 
     <div class="page" id="findings" role="tabpanel">
-      <section class="card empty-state" data-od-id="findings-empty-state">
-        <span class="empty-mark" aria-hidden="true">—</span>
-        <h2>완료된 발견이 없습니다</h2>
-        <p class="muted">스캔 최종화가 완료되면<br>검증된 발견이 이곳에 표시됩니다.</p>
+      <section class="empty-state" data-od-id="findings-empty-state">
+        <h2>No completed findings</h2>
+        <p class="muted">Validated findings appear here after a scan is finalized.</p>
       </section>
     </div>
   </main>
@@ -513,7 +517,13 @@
     });
 
     document.getElementById("refresh").addEventListener("click", () => {
-      showFeedback("통합 상태를 새로 확인했습니다.");
+      showFeedback("Integration status refreshed.");
+    });
+
+    document.getElementById("copy-scan-prompt").addEventListener("click", async () => {
+      const prompt = document.getElementById("scan-prompt").textContent;
+      await navigator.clipboard.writeText(prompt);
+      showFeedback("Scan prompt copied.");
     });
   </script>
 </body>
