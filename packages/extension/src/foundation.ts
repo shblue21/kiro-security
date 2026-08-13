@@ -4,7 +4,6 @@ import * as vscode from "vscode";
 
 export interface FoundationPaths {
   readonly stateRoot: vscode.Uri;
-  readonly database: vscode.Uri;
   readonly scanRoot: vscode.Uri;
   readonly runtimeRoot: vscode.Uri;
 }
@@ -40,7 +39,6 @@ export async function prepareFoundationStorage(
 
   return {
     stateRoot,
-    database: vscode.Uri.joinPath(stateRoot, "workbench.sqlite3"),
     scanRoot,
     runtimeRoot,
   };

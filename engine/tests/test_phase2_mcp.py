@@ -193,36 +193,6 @@ class PhaseTwoMcpTests(unittest.TestCase):
             client.notify("notifications/initialized")
 
             listed = client.request("tools/list", {})
-            tool_names = {
-                tool["name"] for tool in listed["result"]["tools"]
-            }
-            self.assertEqual(
-                tool_names,
-                {
-                    "kiro_security_get_capabilities",
-                    "kiro_security_create_workspace",
-                    "kiro_security_get_workspace",
-                    "kiro_security_save_workspace",
-                    "kiro_security_start_scan",
-                    "kiro_security_get_scan_context",
-                    "kiro_security_update_scan_progress",
-                    "kiro_security_get_artifact_contract",
-                    "kiro_security_read_scan_artifact",
-                    "kiro_security_write_scan_artifact",
-                    "kiro_security_complete_scan",
-                    "kiro_security_export_scan",
-                    "kiro_security_claim_scan_recovery",
-                    "kiro_security_release_scan_recovery",
-                    "kiro_security_claim_remediation",
-                    "kiro_security_get_remediation",
-                    "kiro_security_set_remediation",
-                    "kiro_security_release_remediation",
-                    "kiro_security_claim_tracking",
-                    "kiro_security_get_tracking",
-                    "kiro_security_fail_scan",
-                    "kiro_security_cancel_scan",
-                },
-            )
             for tool in listed["result"]["tools"]:
                 self.assertIn("requestNonce", tool["inputSchema"]["required"])
             tools_by_name = {

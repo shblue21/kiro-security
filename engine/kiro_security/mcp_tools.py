@@ -786,13 +786,6 @@ def _required_integer(arguments, key, minimum):
     return value
 
 
-def _required_object(arguments, key):
-    value = arguments.get(key)
-    if not isinstance(value, dict):
-        raise WorkbenchError("invalid_arguments", "%s must be an object." % key)
-    return value
-
-
 def _required_json_object(arguments, key):
     text = _required_string(arguments, key)
     try:

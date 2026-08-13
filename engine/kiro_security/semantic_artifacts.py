@@ -17,14 +17,12 @@ from .phase_contracts import build_phase_contract
 from .scan_files import ArtifactContractError, atomic_write, read_regular_file
 from .semantic_contract import (
     ATTACK_PATH_INSTANCE_DISPOSITIONS,
-    BASE_DESCRIPTORS,
     DEEP_CHECKPOINT_RE,
     DEEP_CHECKPOINT_SCHEMA_KEY,
     DEEP_MERGE_RE,
     DEEP_WORKER_RE,
     DEEP_WORKER_SCHEMA_KEY,
     DEEP_WORKERS_PER_ROUND,
-    DIGEST_RE,
     VALIDATION_INSTANCE_DISPOSITIONS,
     canonical_digest as _canonical_digest,
     canonical_findings as _canonical_findings,
@@ -670,7 +668,7 @@ class SemanticArtifactStore:
         if canonical is not None and "derived-writeup" in valid:
             try:
                 _validate_derived_writeups(
-                    _findings_with_writeups_document(canonical["findings"]),
+                    {"findings": _findings_with_writeups(canonical["findings"])},
                     valid["derived-writeup"],
                 )
             except WorkbenchError:
@@ -798,13 +796,10 @@ class SemanticArtifactStore:
             "discovery.candidates",
         )
 
-    def _canonical_reportable_finding_count(self, scan):
-        canonical = self.read(scan, "canonical-result")
-        return len(_reportable_findings(canonical["findings"]))
-
     def _canonical_reportable_finding_count_or_zero(self, scan):
         try:
-            return self._canonical_reportable_finding_count(scan)
+            canonical = self.read(scan, "canonical-result")
+            return len(_reportable_findings(canonical["findings"]))
         except WorkbenchError:
             return 0
 
@@ -1004,8 +999,8 @@ class SemanticArtifactStore:
             severity_counts[level] = severity_counts.get(level, 0) + 1
         manifest["totalFindings"] = len(finding_values)
         manifest["severityCounts"] = severity_counts
-        reportable_findings = _reportable_findings_document(findings)
-        writeup_findings = _findings_with_writeups_document(findings)
+        reportable_findings = {"findings": _reportable_findings(findings)}
+        writeup_findings = {"findings": _findings_with_writeups(findings)}
         if writeup_findings["findings"]:
             _materialize_derived_writeups(
                 _scan_dir(scan),
@@ -1309,10 +1304,6 @@ def _reportable_findings(findings):
     return [finding for finding in values if _is_reportable_finding(finding)]
 
 
-def _reportable_findings_document(findings):
-    return {"findings": _reportable_findings(findings)}
-
-
 def _findings_with_writeups(findings):
     values = findings.get("findings", [])
     return [
@@ -1320,12 +1311,6 @@ def _findings_with_writeups(findings):
         for finding in values
         if isinstance(finding.get("writeup"), dict)
     ]
-
-
-def _findings_with_writeups_document(findings):
-    return {"findings": _findings_with_writeups(findings)}
-
-
 def _validate_derived_hardening(hardening):
     hardening_outputs = hardening["outputs"]
     if len(hardening_outputs) != 1 or hardening_outputs[0]["path"] != (

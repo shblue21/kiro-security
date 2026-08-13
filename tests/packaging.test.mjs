@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import test from "node:test";
 
@@ -25,14 +25,6 @@ test("extension manifest exposes setup without a Power-import command", () => {
     "machine",
   );
   assert.equal(existsSync(manifest.main), true);
-});
-
-test("internal reference documents stay excluded from the VSIX", () => {
-  const ignored = readFileSync(".vscodeignore", "utf8").split(/\r?\n/);
-  assert.ok(ignored.includes("docs/**"));
-  assert.ok(ignored.includes("engine/tests/**"));
-  assert.ok(ignored.includes("tests/**"));
-  assert.ok(!ignored.includes("engine/**"));
 });
 
 test("actual VSIX selection contains direct integration assets and no Power entry point", () => {

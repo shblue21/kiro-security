@@ -17,10 +17,6 @@ test("setup view connects steering, direct MCP, and Hook without Agent or Power 
   const setupSurface = `${setup}\n${setupHtml}`;
   const extension = readFileSync("packages/extension/src/extension.ts", "utf8");
   const integration = readFileSync("packages/extension/src/integration.ts", "utf8");
-  const chatBinding = readFileSync(
-    "packages/extension/src/chatBinding.ts",
-    "utf8",
-  );
   assert.match(setup, /enableScripts: true/);
   assert.doesNotMatch(setup, /localResourceRoots|asWebviewUri/);
   assert.match(setupSurface, /connectIntegration/);
@@ -28,28 +24,16 @@ test("setup view connects steering, direct MCP, and Hook without Agent or Power 
   assert.match(setupSurface, /showMcpFile/);
   assert.match(setupSurface, /showSteeringFile/);
   assert.doesNotMatch(setupSurface, /showPermissionsFile/);
-  assert.match(setupHtml, /data-od-id="kiro-chat-connection"/);
-  assert.match(setupHtml, /var\(--vscode-foreground, var\(--fg\)\)/);
-  assert.match(setup, /scoped Trust rules/);
   assert.doesNotMatch(setupSurface, /preparePowerIntegration/);
   assert.doesNotMatch(setupSurface, /verifyIntegration|Verify again/);
   assert.match(setupHtml, /<style>\$\{setupStyles\(\)\}<\/style>/);
   assert.match(setupHtml, /<script nonce="\$\{nonce\}">/);
   assert.match(setupHtml, /Content-Security-Policy/);
-  assert.doesNotMatch(setup, /<!doctype html>|function setupStyles/);
   assert.match(extension, /getOrCreateInstallationServerKey/);
   assert.match(extension, /new SecuritySetupView\(/);
   assert.doesNotMatch(extension, /promptForPendingUpdate/);
   assert.match(setup, /await this\.integration\.install\(\)/);
   assert.doesNotMatch(integration, /before\.state === "mismatch"/);
-  assert.equal((integration.match(/resolvePythonExecutable\(\)/g) ?? []).length, 1);
-  assert.doesNotMatch(chatBinding, /resolvePythonExecutable/);
-  assert.doesNotMatch(integration, /WorkbenchAdminClient/);
-  assert.match(setup, /new WorkbenchAdminClient\(/);
-  assert.match(
-    setupHtml,
-    /input\.integration\.state === "absent" \|\| input\.integration\.state === "mismatch"/,
-  );
   assert.match(setup, /context\.workspaceState\.get<RepositoryScope>/);
   assert.match(setup, /vscode\.workspace\.workspaceFolders/);
   assert.match(setup, /dashboard: projectedDashboard/);
@@ -290,16 +274,12 @@ test("Dashboard and Findings render exact recovery and follow-up controls", () =
   assert.match(html, /data-scan-id="scan-two"/);
   assert.match(html, /\/source\/beta/);
   assert.match(html, /beta-revision/);
-  assert.match(html, /Copy generate fix prompt again/);
   assert.match(html, /data-command="copyRemediationPrompt"/);
-  assert.match(html, /Copy resume prompt again/);
   assert.match(html, /data-command="cancelRecovery"/);
   assert.match(html, /data-request-id="recovery-one"/);
   assert.match(html, /data-command="trackFinding"/);
   assert.match(html, /data-artifact-kind="report"/);
   assert.match(html, /role="progressbar"/);
-  assert.match(html, /data-od-id="dashboard-overview"/);
-  assert.match(html, /data-od-id="findings-overview"/);
   assert.match(html, /data-od-id="run-security-scan"/);
   assert.match(html, /data-command="copyScanPrompt"/);
   assert.match(

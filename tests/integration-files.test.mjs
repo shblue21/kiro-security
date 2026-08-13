@@ -23,7 +23,6 @@ test("extension foundation uses one external global workbench boundary", () => {
   assert.match(foundation, /context\.globalStorageUri/);
   assert.match(foundation, /stateRoot\.scheme !== "file"/);
   assert.match(foundation, /stateRoot\.scheme !== "vscode-userdata"/);
-  assert.match(foundation, /workbench\.sqlite3/);
   assert.match(foundation, /Uri\.joinPath\(stateRoot, "scans"\)/);
   assert.doesNotMatch(foundation, /workspaceFolders|storageUri/);
 });

@@ -33,7 +33,6 @@ export interface ChatBindingInspection {
   readonly hookPath: string;
   readonly bridgePath: string;
   readonly detail: string;
-  readonly pythonExecutable?: string;
 }
 
 export class ChatBindingManager {
@@ -76,7 +75,6 @@ export class ChatBindingManager {
       bridgeDetail: bridge.detail,
       hookPath: this.hookPath,
       bridgePath: this.bridgePath,
-      pythonExecutable,
     });
   }
 
@@ -94,12 +92,6 @@ export class ChatBindingManager {
   }
 
   async install(
-    pythonExecutable: string,
-  ): Promise<HookRegistrationMutation> {
-    return this.prepareAndPublish(pythonExecutable);
-  }
-
-  private async prepareAndPublish(
     pythonExecutable: string,
   ): Promise<HookRegistrationMutation> {
     await materializeHookBridge({
@@ -131,13 +123,11 @@ function combineInspection(input: {
   readonly bridgeDetail: string;
   readonly hookPath: string;
   readonly bridgePath: string;
-  readonly pythonExecutable: string;
 }): ChatBindingInspection {
   const common = {
     registrationState: input.registrationState,
     hookPath: input.hookPath,
     bridgePath: input.bridgePath,
-    pythonExecutable: input.pythonExecutable,
   };
   if (input.registrationState === "conflict") {
     return {

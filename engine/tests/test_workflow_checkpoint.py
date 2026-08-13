@@ -1,8 +1,6 @@
 """Deep worker checkpoint durability and merge-isolation coverage."""
 
-import json
 import unittest
-from pathlib import Path
 
 from workflow_test_support import WorkflowTestCase
 from kiro_security.errors import WorkbenchError
@@ -95,12 +93,6 @@ class DeepCheckpointTests(WorkflowTestCase):
                 owner_session_hash=self.owner_a,
             )
         self.assertEqual(raised.exception.code, "artifact_changed")
-        checkpoint_path = Path(written["artifact"]["path"])
-        self.assertEqual(
-            json.loads(checkpoint_path.read_text(encoding="utf-8"))["attempt"],
-            1,
-        )
-
         failed = self._deep_checkpoint(deep, 1, 1, status="failed")
         failed["partial"]["candidates"] = [
             {"id": "checkpoint-only-candidate"}

@@ -5,26 +5,21 @@ const ADMIN_TIMEOUT_MS = 30_000;
 
 export interface ScanProjection {
   readonly id: string;
-  readonly workspaceId: string;
   readonly status: "running" | "complete" | "failed" | "canceled";
   readonly phase: string;
   readonly mode: "standard" | "diff" | "deep";
   readonly scope: string;
   readonly scanDir: string;
   readonly failureMessage?: string | null;
-  readonly startedAt: string;
-  readonly completedAt?: string | null;
   readonly updatedAt: string;
   readonly target: {
     readonly path: string;
     readonly revision: string;
-    readonly snapshotDigest?: string | null;
   };
   readonly progress: {
     readonly reviewItemsTotal: number;
     readonly reviewItemsCompleted: number;
     readonly reportableFindingsCount: number;
-    readonly deepReviewPass?: number | null;
   };
 }
 
@@ -55,9 +50,6 @@ export interface RecoveryRequestProjection {
   readonly scanId: string;
   readonly status: "pending" | "claimed" | "delivered" | "canceled";
   readonly version: number;
-  readonly claimedAt?: number | null;
-  readonly deliveredAt?: number | null;
-  readonly createdAt: string;
   readonly updatedAt: string;
 }
 
@@ -67,10 +59,6 @@ export interface RemediationRequestProjection {
   readonly state: string;
   readonly version: number;
   readonly pendingAction?: "generate" | "apply" | "verify" | null;
-  readonly patchPath?: string | null;
-  readonly summary?: string | null;
-  readonly verificationSummary?: string | null;
-  readonly createdAt: string;
   readonly updatedAt: string;
 }
 

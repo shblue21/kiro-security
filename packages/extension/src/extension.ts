@@ -55,7 +55,3 @@ export async function activate(
       );
   }
 }
-
-export function deactivate(): void {
-  // Kiro owns the direct MCP process; the Extension owns no server process.
-}
