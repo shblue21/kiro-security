@@ -11,8 +11,13 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT / "engine"))
 
 from kiro_security.phase_contracts import build_phase_contract  # noqa: E402
+from kiro_security.errors import WorkbenchError  # noqa: E402
 from kiro_security.scan_lifecycle import ScanLifecycleService  # noqa: E402
-from kiro_security.semantic_contract import DEEP_WORKERS_PER_ROUND  # noqa: E402
+from kiro_security.semantic_contract import (  # noqa: E402
+    DEEP_WORKERS_PER_ROUND,
+    descriptor_schemas,
+    validate_content,
+)
 
 
 class RuntimeContractTests(unittest.TestCase):
@@ -98,6 +103,7 @@ class RuntimeContractTests(unittest.TestCase):
         )
         self.assertIn("critical -> P0, high -> P1, medium -> P2", attack_path)
         self.assertIn("Never assign priority to ignore", attack_path)
+        self.assertIn("Keep disposition, finalSeverity", attack_path)
         self.assertIn("instanceId sets exactly match validation", attack_path)
         self.assertNotIn("new dedicated worker", attack_path)
 
@@ -105,13 +111,89 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertIn("exactly one dedicated writeup worker", reporting)
         self.assertIn("new dedicated worker", reporting)
         self.assertIn("retry once", reporting)
+        self.assertIn("exact derived-writeup payload shape", reporting)
+        self.assertIn("do not use writeups or content aliases", reporting)
+        self.assertIn(
+            "Do not submit canonical-result and derived artifacts concurrently",
+            reporting,
+        )
+        self.assertIn("retry that descriptor at most twice", reporting)
+        self.assertIn("Do not issue parallel retries", reporting)
         self.assertIn("leave reporting unclosed", reporting)
         self.assertIn("exactly one collection-wide", reporting)
         self.assertIn("report.md exists", reporting)
         self.assertIn("scan remains incomplete", reporting)
         self.assertIn("extensions.candidateId", reporting)
         self.assertIn("extensions.candidateInstanceId", reporting)
+        self.assertIn("primary readable artifact", reporting)
+        self.assertIn(
+            "Read full canonical results only when explicitly requested", reporting
+        )
+        self.assertIn("usage.cachedInputTokens", reporting)
+        self.assertIn("Name the highest-priority finding", reporting)
+        self.assertIn("do not add a generic question", reporting)
+        self.assertIn("Wait for the user's answer", reporting)
         self.assertNotIn("Matrix row impact=unknown", reporting)
+
+    def test_attack_path_decisions_are_consistent_when_optional_fields_exist(self):
+        scan = {
+            "id": "scan-contract-test",
+            "mode": "standard",
+            "target_path": "/tmp/scan-contract-test",
+            "scope": ".",
+        }
+        instance_schema = descriptor_schemas(scan)["attack-path"]["properties"][
+            "results"
+        ]["items"]["properties"]["instances"]["items"]
+        self.assertEqual(instance_schema["required"], ["instanceId", "disposition"])
+        self.assertEqual(
+            set(instance_schema["properties"]["finalSeverity"]["enum"]),
+            {"critical", "high", "medium", "low", "ignore", "unknown"},
+        )
+        self.assertEqual(
+            set(instance_schema["properties"]["priority"]["enum"]),
+            {"P0", "P1", "P2", "P3"},
+        )
+
+        cases = (
+            (True, {"disposition": "reportable", "priority": "P1"}),
+            (True, {"disposition": "reportable", "finalSeverity": "low"}),
+            (True, {"disposition": "reportable", "finalSeverity": "low", "priority": "P3"}),
+            (True, {"disposition": "ignored"}),
+            (True, {"disposition": "ignored", "finalSeverity": "ignore"}),
+            (True, {"disposition": "deferred", "finalSeverity": "unknown"}),
+            (False, {"disposition": "reportable", "finalSeverity": "ignore"}),
+            (False, {"disposition": "ignored", "finalSeverity": "low"}),
+            (False, {"disposition": "ignored", "priority": "P3"}),
+            (False, {"disposition": "reportable", "finalSeverity": "low", "priority": "P1"}),
+            (False, {"disposition": "deferred", "finalSeverity": "ignore"}),
+            (False, {"disposition": "deferred", "priority": "P2"}),
+            (False, {"disposition": "reportable", "priority": "P9"}),
+        )
+
+        def content(instance):
+            return {
+                "scanId": scan["id"],
+                "results": [
+                    {
+                        "candidateId": "candidate-1",
+                        "instances": [{"instanceId": "instance-1", **instance}],
+                    }
+                ],
+            }
+
+        for is_valid, instance in cases:
+            with self.subTest(is_valid=is_valid, instance=instance):
+                if is_valid:
+                    validate_content(scan, "attack-path", content(instance))
+                    continue
+                with self.assertRaises(WorkbenchError) as raised:
+                    validate_content(scan, "attack-path", content(instance))
+                self.assertEqual(raised.exception.code, "invalid_artifact")
+                self.assertIn(
+                    "attack-path.results[0].instances[0]",
+                    str(raised.exception),
+                )
 
     def test_lifecycle_lock_and_transaction_order_is_explicit(self):
         def function(method):

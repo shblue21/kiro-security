@@ -51,7 +51,7 @@ test("actual MCP, TypeScript, and Hook expose the same ordered tool contract", a
     AUTO_APPROVED_MCP_TOOLS,
     MANUAL_APPROVAL_MCP_TOOLS,
     MCP_TOOL_NAMES,
-  } = require("../out/packages/extension/src/integrationConfig.js");
+  } = require("../out/packages/extension/src/integration/integrationConfig.js");
   const temporary = await mkdtemp(join(tmpdir(), "kiro-contract-test-"));
   try {
     const python = pythonExecutable();

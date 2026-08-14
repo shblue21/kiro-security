@@ -16,14 +16,14 @@ const executeFile = promisify(execFile);
 
 test("direct runtime is materialized in global storage and launches the MCP server", async () => {
   const { WorkbenchAdminClient } = require(
-    "../out/packages/extension/src/workbenchClient.js",
+    "../out/packages/extension/src/workbench/workbenchClient.js",
   );
   const {
     getDirectLauncherPath,
     initializeDirectRuntime,
     inspectDirectRuntime,
     materializeDirectRuntime,
-  } = require("../out/packages/extension/src/integrationFiles.js");
+  } = require("../out/packages/extension/src/integration/integrationFiles.js");
   const temporary = await mkdtemp(join(tmpdir(), "kiro-direct-runtime-test-"));
   try {
     const stateRoot = join(temporary, "global-state");
@@ -80,7 +80,7 @@ test("direct runtime materialization is serialized across extension hosts", asyn
   try {
     const stateRoot = join(temporary, "global-state");
     const modulePath = resolve(
-      "out/packages/extension/src/integrationFiles.js",
+      "out/packages/extension/src/integration/integrationFiles.js",
     );
     const program = `
       const { materializeDirectRuntime } = require(process.env.RUNTIME_MODULE);

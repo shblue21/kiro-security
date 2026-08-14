@@ -241,7 +241,10 @@ TOOL_DEFINITIONS = (
         "description": (
             "Validate and atomically persist one allowlisted JSON artifact for the "
             "current semantic phase. Pass the exact artifact as contentJson so empty "
-            "arrays remain distinguishable from omitted fields."
+            "arrays remain distinguishable from omitted fields. Only descriptors in "
+            "the latest artifact contract are writable. In reporting, wait for the "
+            "canonical-result write to succeed and reload the contract before writing "
+            "derived artifacts."
         ),
         "inputSchema": _attested_schema(
             {

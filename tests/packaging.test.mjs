@@ -40,6 +40,7 @@ test("actual VSIX selection contains direct integration assets and no Power entr
   assert.ok(files.includes("engine/kiro_security/mcp_tools.py"));
   assert.ok(files.includes("engine/kiro_security/phase_contracts.py"));
   assert.ok(files.includes("engine/kiro_security/scan_files.py"));
+  assert.ok(files.includes("engine/kiro_security/semantic_materialization.py"));
   assert.ok(files.includes("node_modules/jsonc-parser/lib/umd/main.js"));
   assert.ok(files.includes("node_modules/graceful-fs/LICENSE"));
   assert.ok(files.includes("node_modules/proper-lockfile/LICENSE"));
@@ -48,12 +49,29 @@ test("actual VSIX selection contains direct integration assets and no Power entr
   assert.ok(files.includes("node_modules/signal-exit/LICENSE.txt"));
   assert.ok(files.includes("node_modules/yaml/LICENSE"));
   assert.ok(files.includes("node_modules/yaml/dist/index.js"));
-  assert.ok(files.includes("out/packages/extension/src/approvalPolicy.js"));
-  assert.ok(files.includes("out/packages/extension/src/integrationConfig.js"));
-  assert.ok(files.includes("out/packages/extension/src/integrationFiles.js"));
-  assert.ok(files.includes("out/packages/extension/src/integration.js"));
-  assert.ok(files.includes("out/packages/extension/src/setupView.js"));
-  assert.ok(files.includes("out/packages/extension/src/setupViewHtml.js"));
+  assert.ok(
+    files.includes("out/packages/extension/src/integration/approvalPolicy.js"),
+  );
+  assert.ok(
+    files.includes("out/packages/extension/src/integration/directRuntimeFiles.js"),
+  );
+  assert.ok(
+    files.includes("out/packages/extension/src/integration/integrationConfig.js"),
+  );
+  assert.ok(
+    files.includes("out/packages/extension/src/integration/integrationFiles.js"),
+  );
+  assert.ok(
+    files.includes("out/packages/extension/src/integration/integration.js"),
+  );
+  assert.ok(
+    files.includes("out/packages/extension/src/integration/localFileSafety.js"),
+  );
+  assert.ok(files.includes("out/packages/extension/src/view/setupView.js"));
+  assert.ok(files.includes("out/packages/extension/src/view/setupViewHtml.js"));
+  assert.ok(
+    files.includes("out/packages/extension/src/view/setupViewScript.js"),
+  );
   assert.ok(!files.some((entry) => entry.startsWith("powers/")));
   assert.ok(!files.some((entry) => entry.includes("powerIntegration")));
   assert.ok(!files.some((entry) => entry.startsWith("docs/")));

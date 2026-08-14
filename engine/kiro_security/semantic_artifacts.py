@@ -3,18 +3,16 @@
 import hashlib
 import hmac
 import json
-import re
 import stat
 from pathlib import Path
 
 from .artifacts import (
-    REPORTABLE_SEVERITIES,
     canonical_json_bytes,
     has_sealed_manifest,
 )
 from .errors import WorkbenchError
 from .phase_contracts import build_phase_contract
-from .scan_files import ArtifactContractError, atomic_write, read_regular_file
+from .scan_files import read_regular_file
 from .semantic_contract import (
     ATTACK_PATH_INSTANCE_DISPOSITIONS,
     DEEP_CHECKPOINT_RE,
@@ -26,7 +24,6 @@ from .semantic_contract import (
     VALIDATION_INSTANCE_DISPOSITIONS,
     canonical_digest as _canonical_digest,
     canonical_findings as _canonical_findings,
-    coverage_mode,
     coverage_receipts as _coverage_receipts,
     deep_merge_descriptor as _deep_merge_descriptor,
     deep_worker_descriptor as _deep_worker_descriptor,
@@ -40,6 +37,18 @@ from .semantic_contract import (
     validate_content as _validate_content,
     validate_deep_checkpoint as _validate_deep_checkpoint,
     worklist_ids as _worklist_ids,
+)
+from .semantic_materialization import (
+    bind_finalizer_inputs as _bind_finalizer_inputs,
+    findings_with_writeups as _findings_with_writeups,
+    is_reportable_finding as _is_reportable_finding,
+    materialize_coverage_receipts as _materialize_coverage_receipts,
+    materialize_derived_hardening as _materialize_derived_hardening,
+    materialize_derived_writeups as _materialize_derived_writeups,
+    reportable_findings as _reportable_findings,
+    validate_derived_hardening as _validate_derived_hardening,
+    validate_derived_writeups as _validate_derived_writeups,
+    write_output as _atomic_write,
 )
 
 
@@ -124,13 +133,6 @@ class SemanticArtifactStore:
                 "Semantic artifacts cannot be changed after the scan is sealed.",
             )
         normalized = _require_descriptor(descriptor, scan["mode"])
-        _validate_content(scan, normalized, content)
-        if normalized == "validation":
-            self._require_validation_binding(scan, content)
-        elif normalized == "attack-path":
-            self._require_attack_path_binding(scan, content)
-        elif normalized == "canonical-result":
-            self.require_candidate_finding_binding(scan, content)
         persisted = None
         present = None
         if scan["mode"] == "deep" and scan["phase"] == "discovery":
@@ -138,12 +140,30 @@ class SemanticArtifactStore:
             present = {item["descriptor"] for item in persisted}
         schema_key = _descriptor_schema_key(normalized)
         if schema_key not in self._current_descriptor_schemas(scan, persisted):
+            if scan["phase"] == "reporting" and normalized in (
+                "derived-writeup",
+                "derived-hardening",
+            ):
+                raise WorkbenchError(
+                    "artifact_phase_not_active",
+                    "Derived reporting artifacts are not writable until "
+                    "canonical-result is persisted. Wait for the canonical-result "
+                    "write to succeed, reload the artifact contract, and use the "
+                    "newly exposed derived schema.",
+                )
             raise WorkbenchError(
                 "artifact_phase_not_active",
                 "Artifact descriptor is not writable in the current scan phase. "
                 "Reload the scan context and artifact contract; closed-phase "
                 "artifacts require a new scan to change.",
             )
+        _validate_content(scan, normalized, content)
+        if normalized == "validation":
+            self._require_validation_binding(scan, content)
+        elif normalized == "attack-path":
+            self._require_attack_path_binding(scan, content)
+        elif normalized == "canonical-result":
+            self.require_candidate_finding_binding(scan, content)
         if present is not None:
             self._require_deep_write_order(scan, normalized, content, present)
         if normalized == "derived-writeup":
@@ -1096,233 +1116,6 @@ def _current_descriptor_schemas(scan, deep_keys=None):
     return {key: schemas[key] for key in keys}
 
 
-def _bind_finalizer_inputs(
-    scan,
-    manifest,
-    findings,
-    coverage,
-    completed_at,
-    target_id,
-    threat_model,
-):
-    if not isinstance(manifest, dict) or not isinstance(findings, dict):
-        raise WorkbenchError(
-            "invalid_canonical_result",
-            "Canonical manifest and findings must be objects.",
-        )
-    scan_manifest = manifest.get("scan")
-    if not isinstance(scan_manifest, dict):
-        raise WorkbenchError(
-            "invalid_canonical_result",
-            "Canonical manifest requires a scan object.",
-        )
-    scan_manifest["id"] = scan["id"]
-    scan_manifest["status"] = "completed"
-    scan_manifest["startedAt"] = scan["started_at"]
-    scan_manifest["completedAt"] = completed_at
-    scan_manifest.pop("sealedAt", None)
-    scan_manifest.pop("artifacts", None)
-    scan_manifest["coverageRef"] = "coverage.json"
-    scan_manifest["findingsRef"] = "findings.json"
-    scan_manifest["producer"] = {"name": "Kiro Security", "version": "0.1.0"}
-    target = {
-        "targetId": target_id,
-        "displayName": Path(scan["target_path"]).name,
-    }
-    if scan["mode"] == "diff":
-        target.update(
-            {
-                "kind": "git_diff",
-                "snapshotDigest": scan["target_snapshot_digest"],
-                "baseRevision": scan["diff_base_revision"],
-                "headRevision": scan["diff_head_revision"],
-            }
-        )
-    elif scan["target_revision"] == "unversioned":
-        target.update(
-            {
-                "kind": "directory_snapshot",
-                "snapshotDigest": scan["target_snapshot_digest"],
-            }
-        )
-    else:
-        target.update(
-            {
-                "kind": "git_worktree",
-                "revision": scan["target_revision"],
-                "snapshotDigest": scan["target_snapshot_digest"],
-            }
-        )
-    scan_manifest["target"] = target
-    include_paths = coverage.get("includePaths")
-    exclude_paths = coverage.get("excludePaths")
-    if include_paths != [scan["scope"]] or not isinstance(exclude_paths, list):
-        raise WorkbenchError(
-            "coverage_scope_mismatch",
-            "Coverage include/exclude paths must match the authoritative scan scope.",
-        )
-    scan_manifest["scope"] = {
-        "includePaths": include_paths,
-        "excludePaths": exclude_paths,
-        "summary": "Kiro Security %s scan." % scan["mode"],
-    }
-    scan_manifest["threatModel"] = _project_threat_model(threat_model)
-    manifest["documentType"] = "codex-security.scan-manifest"
-    manifest["schemaVersion"] = "1.0"
-    findings["documentType"] = "codex-security.findings"
-    findings["schemaVersion"] = "1.0"
-    findings["scanId"] = scan["id"]
-    coverage["documentType"] = "codex-security.coverage"
-    coverage["schemaVersion"] = "1.0"
-    coverage["scanId"] = scan["id"]
-    expected_mode = coverage_mode(scan)
-    if coverage.get("mode") != expected_mode:
-        raise WorkbenchError(
-            "coverage_mode_mismatch",
-            "Coverage mode must match the authoritative scan mode.",
-        )
-
-
-def _project_threat_model(threat_model):
-    projected = {"summary": threat_model["summary"].strip()}
-    for key in (
-        "assets",
-        "trustBoundaries",
-        "attackerCapabilities",
-        "securityObjectives",
-        "assumptions",
-    ):
-        if key not in threat_model:
-            continue
-        values = []
-        for item in threat_model[key]:
-            if isinstance(item, str):
-                values.append(item.strip())
-                continue
-            name = item["name"].strip()
-            sensitivity = item.get("sensitivity")
-            description = item.get("description")
-            if sensitivity is not None:
-                name = "%s (%s)" % (name, sensitivity.strip())
-            if description is not None:
-                name = "%s: %s" % (name, description.strip())
-            values.append(name)
-        projected[key] = values
-    return projected
-
-
-def _materialize_coverage_receipts(root, coverage):
-    seen = set()
-    for index, surface in enumerate(coverage["surfaces"]):
-        surface_id = surface.get("id")
-        if not isinstance(surface_id, str) or not surface_id.strip():
-            raise WorkbenchError(
-                "invalid_coverage_receipt",
-                "Coverage surface requires an id.",
-            )
-        slug = re.sub(r"[^a-z0-9._-]+", "-", surface_id.lower()).strip("-")
-        if not slug or slug in seen:
-            raise WorkbenchError(
-                "invalid_coverage_receipt",
-                "Coverage surface ids must produce unique safe receipt names.",
-            )
-        seen.add(slug)
-        receipt = surface.pop("receipt", None)
-        if not isinstance(receipt, dict):
-            raise WorkbenchError(
-                "invalid_coverage_receipt",
-                "Coverage surface requires an embedded receipt object.",
-            )
-        receipt["surfaceId"] = surface_id
-        relative = "artifacts/03_coverage/%03d-%s.json" % (index + 1, slug)
-        _atomic_write(root, relative, canonical_json_bytes(receipt))
-        surface["receiptRefs"] = [relative]
-
-
-def _materialize_derived_writeups(root, findings, writeups):
-    supplied_writeups = _validate_derived_writeups(findings, writeups)
-    for relative, markdown in supplied_writeups.items():
-        _atomic_write(root, relative, markdown.encode("utf-8"))
-
-
-def _materialize_derived_hardening(root, manifest, hardening):
-    hardening_output = _validate_derived_hardening(hardening)
-    _atomic_write(
-        root,
-        "hardening/hardening.md",
-        hardening_output["markdown"].encode("utf-8"),
-    )
-    manifest["scan"]["hardening"] = {
-        "portfolioPath": "hardening/hardening.md",
-    }
-
-
-def _validate_derived_writeups(findings, writeups):
-    finding_values = findings.get("findings", [])
-    if any(
-        not isinstance(finding.get("writeup"), dict)
-        or not isinstance(finding["writeup"].get("reportPath"), str)
-        for finding in finding_values
-    ):
-        raise WorkbenchError(
-            "derived_writeup_missing",
-            "Every canonical finding requires a derived writeup reference.",
-        )
-    writeup_paths = {
-        finding["writeup"]["reportPath"]
-        for finding in finding_values
-    }
-    supplied_writeups = {
-        output["path"]: output["markdown"]
-        for output in writeups["outputs"]
-    }
-    if set(supplied_writeups) != writeup_paths:
-        raise WorkbenchError(
-            "derived_writeup_mismatch",
-            "Derived writeup outputs must exactly match canonical finding references.",
-        )
-    for relative, markdown in supplied_writeups.items():
-        if (
-            not relative.startswith("findings/")
-            or len(Path(relative).parts) != 3
-            or Path(relative).name != ("%s.md" % Path(relative).parent.name)
-            or ".." in Path(relative).parts
-        ):
-            raise WorkbenchError(
-                "invalid_derived_path",
-                "Finding writeups must use findings/<slug>/<slug>.md.",
-            )
-    return supplied_writeups
-
-
-def _is_reportable_finding(finding):
-    return finding.get("severity", {}).get("level") in REPORTABLE_SEVERITIES
-
-
-def _reportable_findings(findings):
-    values = findings.get("findings", [])
-    return [finding for finding in values if _is_reportable_finding(finding)]
-
-
-def _findings_with_writeups(findings):
-    values = findings.get("findings", [])
-    return [
-        finding
-        for finding in values
-        if isinstance(finding.get("writeup"), dict)
-    ]
-def _validate_derived_hardening(hardening):
-    hardening_outputs = hardening["outputs"]
-    if len(hardening_outputs) != 1 or hardening_outputs[0]["path"] != (
-        "hardening/hardening.md"
-    ):
-        raise WorkbenchError(
-            "derived_hardening_mismatch",
-            "Derived hardening must provide hardening/hardening.md.",
-        )
-    return hardening_outputs[0]
-
-
 def _scan_dir(scan):
     root = Path(scan["scan_dir"]).resolve(strict=True)
     metadata = root.lstat()
@@ -1378,16 +1171,6 @@ def _decode_json(content):
 
 def _raise_nonfinite(token):
     raise ValueError("non-finite JSON number: %s" % token)
-
-
-def _atomic_write(root, relative, content):
-    try:
-        atomic_write(root, relative, content)
-    except ArtifactContractError as exc:
-        raise WorkbenchError(
-            "unsafe_artifact_path",
-            "Artifact output must stay under the scan directory.",
-        ) from exc
 
 
 def _artifact_state(descriptor, path, digest):

@@ -50,6 +50,17 @@ VALIDATION_INSTANCE_DISPOSITIONS = frozenset(
 ATTACK_PATH_INSTANCE_DISPOSITIONS = frozenset(
     ("reportable", "ignored", "deferred")
 )
+ATTACK_PATH_PRIORITY_BY_SEVERITY = {
+    "critical": "P0",
+    "high": "P1",
+    "medium": "P2",
+    "low": "P3",
+}
+ATTACK_PATH_SEVERITIES_BY_DISPOSITION = {
+    "reportable": REPORTABLE_SEVERITIES,
+    "ignored": frozenset(("ignore",)),
+    "deferred": REPORTABLE_SEVERITIES | frozenset(("unknown",)),
+}
 
 
 def descriptor_schemas(scan):
@@ -80,7 +91,8 @@ def descriptor_schemas(scan):
             ("scanId", "results"),
             {
                 "results": _phase_result_array_schema(
-                    ATTACK_PATH_INSTANCE_DISPOSITIONS
+                    ATTACK_PATH_INSTANCE_DISPOSITIONS,
+                    attack_path=True,
                 )
             },
         ),
@@ -134,6 +146,7 @@ def validate_content(scan, descriptor, content):
             "attack-path.results",
             ATTACK_PATH_INSTANCE_DISPOSITIONS,
         )
+        _validate_attack_path_decisions(content["results"])
     worker_match = DEEP_WORKER_RE.fullmatch(descriptor)
     if worker_match and (
         content.get("round") != int(worker_match.group(1))
@@ -593,6 +606,47 @@ def phase_result_instances(value, context, allowed_dispositions):
     return result
 
 
+def _validate_attack_path_decisions(results):
+    for result_index, result in enumerate(results):
+        for instance_index, instance in enumerate(result["instances"]):
+            context = "attack-path.results[%d].instances[%d]" % (
+                result_index,
+                instance_index,
+            )
+            disposition = instance["disposition"]
+            has_severity = "finalSeverity" in instance
+            has_priority = "priority" in instance
+            severity = instance.get("finalSeverity")
+
+            if has_severity and (
+                not isinstance(severity, str)
+                or severity not in ATTACK_PATH_SEVERITIES_BY_DISPOSITION[disposition]
+            ):
+                raise WorkbenchError(
+                    "invalid_artifact",
+                    "%s finalSeverity is inconsistent with disposition." % context,
+                )
+
+            if not has_priority:
+                continue
+            priority = instance["priority"]
+            priority_is_valid = (
+                disposition == "reportable"
+                and isinstance(priority, str)
+                and priority in ATTACK_PATH_PRIORITY_BY_SEVERITY.values()
+                and (
+                    not has_severity
+                    or priority == ATTACK_PATH_PRIORITY_BY_SEVERITY[severity]
+                )
+            )
+            if not priority_is_valid:
+                raise WorkbenchError(
+                    "invalid_artifact",
+                    "%s priority is inconsistent with disposition or finalSeverity."
+                    % context,
+                )
+
+
 def worklist_ids(value):
     if not isinstance(value, list) or not value:
         raise WorkbenchError(
@@ -854,8 +908,25 @@ def _record_array_schema(key):
     }
 
 
-def _phase_result_array_schema(allowed_dispositions):
+def _phase_result_array_schema(allowed_dispositions, attack_path=False):
     text = {"type": "string", "minLength": 1}
+    instance_properties = {
+        "instanceId": text,
+        "disposition": {"enum": sorted(allowed_dispositions)},
+    }
+    if attack_path:
+        instance_properties.update(
+            {
+                "finalSeverity": {
+                    "enum": sorted(
+                        REPORTABLE_SEVERITIES | frozenset(("ignore", "unknown"))
+                    )
+                },
+                "priority": {
+                    "enum": sorted(ATTACK_PATH_PRIORITY_BY_SEVERITY.values())
+                },
+            }
+        )
     return {
         "type": "array",
         "items": {
@@ -869,12 +940,7 @@ def _phase_result_array_schema(allowed_dispositions):
                     "items": {
                         "type": "object",
                         "required": ["instanceId", "disposition"],
-                        "properties": {
-                            "instanceId": text,
-                            "disposition": {
-                                "enum": sorted(allowed_dispositions)
-                            },
-                        },
+                        "properties": instance_properties,
                         "additionalProperties": True,
                     },
                 },
@@ -1161,7 +1227,25 @@ def _derived_schema(descriptor):
     }
     if descriptor == "derived-hardening":
         outputs.update({"minItems": 1, "maxItems": 1})
-    return _schema(("scanId", "outputs"), {"outputs": outputs})
+    schema = _schema(("scanId", "outputs"), {"outputs": outputs})
+    if descriptor == "derived-hardening":
+        example_path = "hardening/hardening.md"
+        example_markdown = "# Structural hardening\n"
+    else:
+        example_path = "findings/example-finding/example-finding.md"
+        example_markdown = "# Example finding\n"
+    schema["examples"] = [
+        {
+            "scanId": "<authoritative scanId>",
+            "outputs": [
+                {
+                    "path": example_path,
+                    "markdown": example_markdown,
+                }
+            ],
+        }
+    ]
+    return schema
 
 
 def _brief_schema(scan):

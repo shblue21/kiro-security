@@ -12,7 +12,7 @@ import { homedir } from "node:os";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 
-import { isSeq, parseDocument } from "yaml";
+import { isMap, isSeq, parseDocument } from "yaml";
 
 import {
   AUTO_APPROVED_MCP_TOOLS,
@@ -20,6 +20,7 @@ import {
   requireMcpServerKey,
 } from "./integrationConfig";
 import { findDuplicateJsonObjectKey } from "./jsonSafety";
+import { isMissing } from "./localFileSafety";
 import { withSharedFileLock } from "./sharedFileLock";
 
 const MAX_POLICY_BYTES = 1024 * 1024;
@@ -131,17 +132,27 @@ export async function inspectApprovalPolicy(input: {
 export async function installApprovalPolicy(input: {
   readonly serverKey: string;
   readonly homeDirectory?: string;
+  readonly staleServerKeys?: readonly string[];
 }): Promise<{ readonly changed: boolean }> {
+  const staleServerKeys = [...new Set(input.staleServerKeys ?? [])]
+    .filter((serverKey) => serverKey !== input.serverKey)
+    .map(requireMcpServerKey);
   const policyPath = await resolveUserPolicyPath(input.homeDirectory);
   return withSharedFileLock(
     policyPath,
     "The Kiro user permission file",
-    () => installApprovalPolicyLocked(input.serverKey, policyPath),
+    () =>
+      installApprovalPolicyLocked(
+        input.serverKey,
+        staleServerKeys,
+        policyPath,
+      ),
   );
 }
 
 async function installApprovalPolicyLocked(
   serverKey: string,
+  staleServerKeys: readonly string[],
   policyPath: string,
 ): Promise<{ readonly changed: boolean }> {
   const snapshot = await readPolicy(policyPath);
@@ -155,7 +166,10 @@ async function installApprovalPolicyLocked(
     throw new Error(conflict);
   }
   const missing = missingRules(existingRules, required);
-  if (missing.length === 0) {
+  if (
+    missing.length === 0 &&
+    !hasStaleGeneratedRules(existingRules, staleServerKeys)
+  ) {
     return { changed: false };
   }
 
@@ -177,6 +191,7 @@ async function installApprovalPolicyLocked(
   if (isSeq(rulesNode)) {
     rulesNode.flow = false;
   }
+  removeStaleGeneratedRules(rulesNode, staleServerKeys);
   for (const rule of missing) {
     document.addIn(["rules"], {
       capability: rule.capability,
@@ -191,12 +206,72 @@ async function installApprovalPolicyLocked(
   const verified = parsePolicyContents(updated, format);
   if (
     missingRules(verified, required).length > 0 ||
-    approvalPolicyConflict(verified, required)
+    approvalPolicyConflict(verified, required) ||
+    hasStaleGeneratedRules(verified, staleServerKeys)
   ) {
     throw new Error("The Kiro Security approval policy failed verification.");
   }
   await writePolicy(policyPath, snapshot, updated);
   return { changed: true };
+}
+
+function removeStaleGeneratedRules(
+  rulesNode: unknown,
+  staleServerKeys: readonly string[],
+): void {
+  if (!isSeq(rulesNode) || staleServerKeys.length === 0) {
+    return;
+  }
+  rulesNode.items = rulesNode.items.filter((ruleNode) => {
+    return (
+      !isMap(ruleNode) ||
+      !isStaleGeneratedRule(
+        ruleNode.toJSON() as ParsedPermissionRule,
+        staleServerKeys,
+      )
+    );
+  });
+}
+
+function hasStaleGeneratedRules(
+  rules: readonly unknown[],
+  staleServerKeys: readonly string[],
+): boolean {
+  return rules.some(
+    (rule) =>
+      typeof rule === "object" &&
+      rule !== null &&
+      !Array.isArray(rule) &&
+      isStaleGeneratedRule(
+        rule as ParsedPermissionRule,
+        staleServerKeys,
+      ),
+  );
+}
+
+function isStaleGeneratedRule(
+  rule: ParsedPermissionRule,
+  staleServerKeys: readonly string[],
+): boolean {
+  if (
+    rule.capability !== "mcp" ||
+    (rule.effect !== "allow" && rule.effect !== "ask") ||
+    !Array.isArray(rule.match) ||
+    rule.match.length === 0 ||
+    (Array.isArray(rule.exclude) && rule.exclude.length > 0)
+  ) {
+    return false;
+  }
+  const toolNames =
+    rule.effect === "allow"
+      ? AUTO_APPROVED_MCP_TOOLS
+      : MANUAL_APPROVAL_MCP_TOOLS;
+  const staleMatches = new Set(
+    staleServerKeys.flatMap((serverKey) =>
+      toolNames.map((toolName) => `${serverKey}/${toolName}`),
+    ),
+  );
+  return rule.match.every((match) => staleMatches.has(match));
 }
 
 type PolicySnapshot =
@@ -512,13 +587,4 @@ async function writePolicy(
     await rm(stagingPath, { force: true });
     throw error;
   }
-}
-
-function isMissing(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    (error as NodeJS.ErrnoException).code === "ENOENT"
-  );
 }

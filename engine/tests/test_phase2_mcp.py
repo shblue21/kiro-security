@@ -427,6 +427,8 @@ class PhaseTwoMcpTests(unittest.TestCase):
                 {"scanId": scan_id, "phase": "validation"},
             )["structuredContent"]
             self.assertEqual(later["phase"], "validation")
+            self.assertEqual(later["progress"]["reviewItemsCompleted"], 0)
+            self.assertEqual(later["progress"]["reviewItemsTotal"], 0)
 
             failed = client.call_tool(
                 "kiro_security_fail_scan",

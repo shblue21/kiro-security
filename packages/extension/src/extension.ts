@@ -1,8 +1,8 @@
 import * as vscode from "vscode";
 
 import { prepareFoundationStorage } from "./foundation";
-import { getOrCreateInstallationServerKey } from "./integrationFiles";
-import { SecuritySetupView } from "./setupView";
+import { getOrCreateInstallationServerKey } from "./integration/integrationFiles";
+import { SecuritySetupView } from "./view/setupView";
 
 export async function activate(
   context: vscode.ExtensionContext,

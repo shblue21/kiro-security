@@ -1,7 +1,5 @@
 import {
-  chmod,
   lstat,
-  mkdir,
   readFile,
   rename,
   rm,
@@ -13,6 +11,13 @@ import { isDeepStrictEqual } from "node:util";
 import { randomUUID } from "node:crypto";
 
 import { buildDirectMcpContract } from "./integrationConfig";
+import {
+  ensurePrivateDirectory,
+  isMissing,
+  readOptionalRegularFile,
+  readRequiredRegularFile,
+  restrictFile,
+} from "./localFileSafety";
 
 export const HOOK_FILE_NAME = "kiro-security-power.json";
 export const HOOK_NAME = "Kiro Security Power chat identity bridge";
@@ -180,7 +185,7 @@ export async function installHookRegistration(input: {
   }
 
   const hookDirectory = path.dirname(input.hookPath);
-  await ensureDirectory(hookDirectory);
+  await ensurePrivateDirectory(hookDirectory, false);
   const stagingPath = path.join(
     hookDirectory,
     `.${HOOK_FILE_NAME}.staging-${randomUUID()}`,
@@ -205,10 +210,15 @@ export async function inspectHookBridge(input: {
   readonly sourcePath: string;
   readonly bridgePath: string;
 }): Promise<BridgeInspection> {
-  const source = await readRegularFile(input.sourcePath, "Packaged Hook bridge");
+  const source = await readRequiredRegularFile(
+    input.sourcePath,
+    "Packaged Hook bridge",
+    "regular file",
+  );
   const destination = await readOptionalRegularFile(
     input.bridgePath,
     "Materialized Hook bridge",
+    "regular file",
   );
   if (destination === undefined) {
     return {
@@ -236,17 +246,22 @@ export async function materializeHookBridge(input: {
   readonly sourcePath: string;
   readonly bridgePath: string;
 }): Promise<boolean> {
-  const source = await readRegularFile(input.sourcePath, "Packaged Hook bridge");
+  const source = await readRequiredRegularFile(
+    input.sourcePath,
+    "Packaged Hook bridge",
+    "regular file",
+  );
   const destination = await readOptionalRegularFile(
     input.bridgePath,
     "Materialized Hook bridge",
+    "regular file",
   );
   if (destination !== undefined && bridgeIsCurrent(source, destination)) {
     return false;
   }
 
   const bridgeDirectory = path.dirname(input.bridgePath);
-  await ensureDirectory(bridgeDirectory);
+  await ensurePrivateDirectory(bridgeDirectory, false);
   const stagingPath = path.join(
     bridgeDirectory,
     `.${HOOK_BRIDGE_FILE_NAME}.staging-${randomUUID()}`,
@@ -344,75 +359,4 @@ function parseJson(contents: string): unknown {
   } catch {
     return undefined;
   }
-}
-
-async function ensureDirectory(directoryPath: string): Promise<void> {
-  try {
-    const metadata = await lstat(directoryPath);
-    if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
-      throw new Error(
-        `Refusing to use a symlink or non-directory path: ${directoryPath}`,
-      );
-    }
-    return;
-  } catch (error) {
-    if (!isMissing(error)) {
-      throw error;
-    }
-  }
-  await mkdir(directoryPath, { recursive: true, mode: 0o700 });
-  if (process.platform !== "win32") {
-    await chmod(directoryPath, 0o700);
-  }
-}
-
-async function readRegularFile(
-  filePath: string,
-  label: string,
-): Promise<{ readonly contents: Buffer; readonly mode: number }> {
-  const value = await readOptionalRegularFile(filePath, label);
-  if (value === undefined) {
-    throw new Error(`${label} does not exist: ${filePath}`);
-  }
-  return value;
-}
-
-async function readOptionalRegularFile(
-  filePath: string,
-  label: string,
-): Promise<
-  | { readonly contents: Buffer; readonly mode: number }
-  | undefined
-> {
-  let metadata;
-  try {
-    metadata = await lstat(filePath);
-  } catch (error) {
-    if (isMissing(error)) {
-      return undefined;
-    }
-    throw error;
-  }
-  if (metadata.isSymbolicLink() || !metadata.isFile()) {
-    throw new Error(`${label} must be a regular file: ${filePath}`);
-  }
-  return {
-    contents: await readFile(filePath),
-    mode: metadata.mode,
-  };
-}
-
-async function restrictFile(filePath: string, mode: number): Promise<void> {
-  if (process.platform !== "win32") {
-    await chmod(filePath, mode);
-  }
-}
-
-function isMissing(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    (error as NodeJS.ErrnoException).code === "ENOENT"
-  );
 }

@@ -26,9 +26,9 @@ test("Hook registration matches only the exact direct MCP tool IDs", () => {
     getHookBridgePath,
     getHookRegistrationPath,
     HOOK_FILE_NAME,
-  } = require("../out/packages/extension/src/chatBindingFiles.js");
+  } = require("../out/packages/extension/src/integration/chatBindingFiles.js");
   const { buildDirectMcpContract } = require(
-    "../out/packages/extension/src/integrationConfig.js",
+    "../out/packages/extension/src/integration/integrationConfig.js",
   );
   const contract = buildDirectMcpContract(TEST_SERVER_KEY);
   const hookPath = getHookRegistrationPath("/users/tester");
@@ -62,7 +62,7 @@ test("Hook install is idempotent and refreshes its changed dedicated file", asyn
     getHookRegistrationPath,
     inspectHookRegistration,
     installHookRegistration,
-  } = require("../out/packages/extension/src/chatBindingFiles.js");
+  } = require("../out/packages/extension/src/integration/chatBindingFiles.js");
   const temporary = await mkdtemp(join(tmpdir(), "kiro-hook-files-test-"));
   try {
     const hookPath = getHookRegistrationPath(join(temporary, "home"));
@@ -99,7 +99,7 @@ test("dedicated Hook path refuses symlink targets", async () => {
     getHookRegistrationPath,
     inspectHookRegistration,
     installHookRegistration,
-  } = require("../out/packages/extension/src/chatBindingFiles.js");
+  } = require("../out/packages/extension/src/integration/chatBindingFiles.js");
   const temporary = await mkdtemp(join(tmpdir(), "kiro-hook-conflict-test-"));
   try {
     const hookPath = getHookRegistrationPath(join(temporary, "home"));
@@ -130,12 +130,12 @@ test("Hook bridge binds host session identity to exact direct MCP calls", async 
     getPackagedHookBridgePath,
     inspectHookBridge,
     materializeHookBridge,
-  } = require("../out/packages/extension/src/chatBindingFiles.js");
+  } = require("../out/packages/extension/src/integration/chatBindingFiles.js");
   const {
     buildDirectMcpContract,
     MCP_TOOL_NAMES,
   } = require(
-    "../out/packages/extension/src/integrationConfig.js",
+    "../out/packages/extension/src/integration/integrationConfig.js",
   );
   const directContract = buildDirectMcpContract(TEST_SERVER_KEY);
   const temporary = await mkdtemp(join(tmpdir(), "kiro-hook-bridge-test-"));

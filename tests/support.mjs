@@ -15,5 +15,5 @@ export function pythonExecutable() {
 }
 
 export function loadSetupViewHtmlModule() {
-  return require("../out/packages/extension/src/setupViewHtml.js");
+  return require("../out/packages/extension/src/view/setupViewHtml.js");
 }

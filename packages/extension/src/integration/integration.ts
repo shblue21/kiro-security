@@ -9,7 +9,7 @@ import {
   ChatBindingManager,
   type ChatBindingInspection,
 } from "./chatBinding";
-import type { FoundationPaths } from "./foundation";
+import type { FoundationPaths } from "../foundation";
 import {
   buildDirectMcpContract,
   buildDirectMcpServerConfiguration,
@@ -183,18 +183,17 @@ export class KiroIntegrationManager {
       ).changed || changed;
     changed =
       (await this.chatBinding.install(pythonExecutable)).changed || changed;
-    changed =
-      (
-        await installMcpRegistration({
-          mcpPath: this.mcpPath,
-          serverKey: this.serverKey,
-          expected: this.expectedMcpConfiguration(pythonExecutable),
-        })
-      ).changed || changed;
+    const mcpMutation = await installMcpRegistration({
+      mcpPath: this.mcpPath,
+      serverKey: this.serverKey,
+      expected: this.expectedMcpConfiguration(pythonExecutable),
+    });
+    changed = mcpMutation.changed || changed;
     changed =
       (
         await installApprovalPolicy({
           serverKey: this.serverKey,
+          staleServerKeys: mcpMutation.removedServerKeys,
         })
       ).changed || changed;
     const after = await this.inspect();

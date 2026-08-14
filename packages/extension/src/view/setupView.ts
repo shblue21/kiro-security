@@ -3,22 +3,22 @@ import * as path from "node:path";
 
 import * as vscode from "vscode";
 
-import type { FoundationPaths } from "./foundation";
+import type { FoundationPaths } from "../foundation";
 import {
   KiroIntegrationManager,
   type KiroIntegrationInspection,
-} from "./integration";
+} from "../integration/integration";
 import { renderSetupHtml, type ViewTab } from "./setupViewHtml";
 import {
   WorkbenchAdminClient,
   type DashboardProjection,
   type ScanProjection,
-} from "./workbenchClient";
+} from "../workbench/workbenchClient";
 import {
   isScanInWorkspace,
   projectDashboard,
   type RepositoryScope,
-} from "./workspaceProjection";
+} from "../workbench/workspaceProjection";
 
 export { renderSetupHtml } from "./setupViewHtml";
 
@@ -482,27 +482,12 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
   }
 
   private async connectIntegration(): Promise<void> {
-    const approved = await vscode.window.showWarningMessage(
-      "Connect Kiro Security to Kiro Chat?",
-      {
-        modal: true,
-        detail: [
-          "This installs the MCP connection, scoped Trust rules, and dedicated integration files for this user.",
-          "• Only Kiro Security tools are auto-approved.",
-          "• Start and Cancel always require approval.",
-          "• No custom Agent configuration is installed.",
-        ].join("\n\n"),
-      },
-      "Connect",
-    );
-    if (approved !== "Connect") {
-      return;
-    }
     const result = await this.integration.install();
-    this.feedback = result.changed
-      ? "Kiro Security is connected to normal Kiro chats."
-      : "Kiro Security integration was already current.";
-    this.output.appendLine(this.feedback);
+    this.output.appendLine(
+      result.changed
+        ? "Kiro Security is connected to normal Kiro chats."
+        : "Kiro Security integration was already current.",
+    );
   }
 
   private async showFile(candidate: string, absentMessage: string): Promise<void> {

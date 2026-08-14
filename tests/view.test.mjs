@@ -9,14 +9,21 @@ import {
 } from "./support.mjs";
 
 test("setup view connects steering, direct MCP, and Hook without Agent or Power import", () => {
-  const setup = readFileSync("packages/extension/src/setupView.ts", "utf8");
+  const setup = readFileSync("packages/extension/src/view/setupView.ts", "utf8");
   const setupHtml = readFileSync(
-    "packages/extension/src/setupViewHtml.ts",
+    "packages/extension/src/view/setupViewHtml.ts",
     "utf8",
   );
-  const setupSurface = `${setup}\n${setupHtml}`;
+  const setupScript = readFileSync(
+    "packages/extension/src/view/setupViewScript.ts",
+    "utf8",
+  );
+  const setupSurface = `${setup}\n${setupHtml}\n${setupScript}`;
   const extension = readFileSync("packages/extension/src/extension.ts", "utf8");
-  const integration = readFileSync("packages/extension/src/integration.ts", "utf8");
+  const integration = readFileSync(
+    "packages/extension/src/integration/integration.ts",
+    "utf8",
+  );
   assert.match(setup, /enableScripts: true/);
   assert.doesNotMatch(setup, /localResourceRoots|asWebviewUri/);
   assert.match(setupSurface, /connectIntegration/);
@@ -27,12 +34,16 @@ test("setup view connects steering, direct MCP, and Hook without Agent or Power 
   assert.doesNotMatch(setupSurface, /preparePowerIntegration/);
   assert.doesNotMatch(setupSurface, /verifyIntegration|Verify again/);
   assert.match(setupHtml, /<style>\$\{setupStyles\(\)\}<\/style>/);
-  assert.match(setupHtml, /<script nonce="\$\{nonce\}">/);
+  assert.match(
+    setupHtml,
+    /<script nonce="\$\{nonce\}">\$\{setupViewScript\(input\.activeTab\)\}<\/script>/,
+  );
   assert.match(setupHtml, /Content-Security-Policy/);
   assert.match(extension, /getOrCreateInstallationServerKey/);
   assert.match(extension, /new SecuritySetupView\(/);
   assert.doesNotMatch(extension, /promptForPendingUpdate/);
   assert.match(setup, /await this\.integration\.install\(\)/);
+  assert.doesNotMatch(setup, /showWarningMessage/);
   assert.doesNotMatch(integration, /before\.state === "mismatch"/);
   assert.match(setup, /context\.workspaceState\.get<RepositoryScope>/);
   assert.match(setup, /vscode\.workspace\.workspaceFolders/);
@@ -41,10 +52,10 @@ test("setup view connects steering, direct MCP, and Hook without Agent or Power 
   assert.match(setupHtml, /data-command="selectRepositoryScope"/);
   assert.doesNotMatch(setupHtml, /data-path=/);
   assert.doesNotMatch(setupHtml, /data-command="selectTab"/);
-  assert.match(setupHtml, /vscode\.setState\(\{ activeTab: name \}\)/);
-  assert.match(setupHtml, /vscode\.getState\(\)\?\.activeTab/);
+  assert.match(setupScript, /vscode\.setState\(\{ activeTab: name \}\)/);
+  assert.match(setupScript, /vscode\.getState\(\)\?\.activeTab/);
   for (const key of ["ArrowRight", "ArrowLeft", "Home", "End"]) {
-    assert.match(setupHtml, new RegExp(`event\\.key === '${key}'`));
+    assert.match(setupScript, new RegExp(`event\\.key === '${key}'`));
   }
   assert.match(
     setup,
@@ -56,10 +67,10 @@ test("integration manager coalesces concurrent Python resolution", async () => {
   const Module = require("node:module");
   const originalLoad = Module._load;
   const pythonRuntimePath = require.resolve(
-    "../out/packages/extension/src/pythonRuntime.js",
+    "../out/packages/extension/src/integration/pythonRuntime.js",
   );
   const integrationPath = require.resolve(
-    "../out/packages/extension/src/integration.js",
+    "../out/packages/extension/src/integration/integration.js",
   );
   Module._load = function loadWithVscodeStub(request, parent, isMain) {
     if (request === "vscode") {
@@ -282,6 +293,15 @@ test("Dashboard and Findings render exact recovery and follow-up controls", () =
   assert.match(html, /role="progressbar"/);
   assert.match(html, /data-od-id="run-security-scan"/);
   assert.match(html, /data-command="copyScanPrompt"/);
+  assert.match(html, /class="dashboard-summary"/);
+  assert.match(html, /class="scan-card"/);
+  assert.match(html, /Filter findings/);
+  assert.doesNotMatch(html, /<span class="eyebrow">(?:Workbench|Validated results)<\/span>/);
+  assert.ok(
+    html.indexOf('data-command="copyRemediationPrompt"') <
+      html.indexOf('data-command="closeTriage"'),
+    "remediation should appear before triage actions",
+  );
   assert.match(
     html,
     /id="tab-findings"[^>]*aria-controls="panel-findings"[^>]*aria-selected="true"[^>]*tabindex="0"/,
@@ -301,7 +321,7 @@ test("Dashboard and Findings render exact recovery and follow-up controls", () =
   assert.match(html, /id="finding-filter-summary"/);
   assert.match(
     html,
-    /<span>Reportable findings<\/span><strong>1<\/strong>/,
+    /<span>Reportable findings<\/span>\s*<strong>1<\/strong>/,
   );
 
   const needsAttentionHtml = renderSetupHtml({
@@ -320,7 +340,7 @@ test("Dashboard and Findings render exact recovery and follow-up controls", () =
   assert.doesNotMatch(needsAttentionHtml, /data-od-id="run-security-scan"/);
 
   const { projectDashboard } = require(
-    "../out/packages/extension/src/workspaceProjection.js",
+    "../out/packages/extension/src/workbench/workspaceProjection.js",
   );
   const currentHtml = renderSetupHtml({
     webview: { cspSource: "vscode-webview:" },
@@ -389,7 +409,7 @@ test("Dashboard and Findings render exact recovery and follow-up controls", () =
 
 test("workspace projection excludes unrelated repositories and linked requests", () => {
   const { projectDashboard, isScanInWorkspace } = require(
-    "../out/packages/extension/src/workspaceProjection.js",
+    "../out/packages/extension/src/workbench/workspaceProjection.js",
   );
   const scan = (id, target, scope = ".") => ({
     id,
@@ -460,7 +480,7 @@ test("workspace projection excludes unrelated repositories and linked requests",
 });
 
 test("tracking action creates a durable backend request before copying a prompt", () => {
-  const setup = readFileSync("packages/extension/src/setupView.ts", "utf8");
+  const setup = readFileSync("packages/extension/src/view/setupView.ts", "utf8");
   assert.match(
     setup,
     /callWorkbench<[\s\S]*?>\("createTracking", \{\s*occurrenceId: exactOccurrence/,

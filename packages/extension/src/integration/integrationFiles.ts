@@ -1,14 +1,8 @@
-import { execFile } from "node:child_process";
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import {
   access,
-  chmod,
-  cp,
   link,
   lstat,
-  mkdir,
-  mkdtemp,
-  readdir,
   readFile,
   rename,
   rm,
@@ -16,7 +10,6 @@ import {
 } from "node:fs/promises";
 import { homedir } from "node:os";
 import * as path from "node:path";
-import { promisify } from "node:util";
 import { isDeepStrictEqual } from "node:util";
 
 import {
@@ -28,18 +21,35 @@ import {
 
 import {
   MCP_MANAGED_MARKER,
+  MCP_SERVER_KEY_PATTERN,
   requireMcpServerKey,
   type DirectMcpServerConfiguration,
 } from "./integrationConfig";
 import { findDuplicateJsonObjectKey } from "./jsonSafety";
+import {
+  ensurePrivateDirectory as ensureDirectory,
+  isMissing,
+  readOptionalRegularFile,
+  readRequiredRegularFile,
+  restrictFile,
+} from "./localFileSafety";
 import { withSharedFileLock } from "./sharedFileLock";
 
-const executeFile = promisify(execFile);
 const MAX_CONFIG_BYTES = 1024 * 1024;
 
 export const STEERING_FILE_NAME = "kiro-security-power.md";
-export const LAUNCHER_FILE_NAME = "kiro_security_launcher.py";
 export const INTEGRATION_IDENTITY_FILE_NAME = "integration-identity.json";
+
+export {
+  LAUNCHER_FILE_NAME,
+  getDirectLauncherPath,
+  getDirectRuntimeRoot,
+  getPackagedLauncherPath,
+  initializeDirectRuntime,
+  inspectDirectRuntime,
+  materializeDirectRuntime,
+  type RuntimeInspection,
+} from "./directRuntimeFiles";
 
 export type IntegrationFileState =
   | "absent"
@@ -56,9 +66,8 @@ export interface IntegrationMutation {
   readonly changed: boolean;
 }
 
-export interface RuntimeInspection {
-  readonly ready: boolean;
-  readonly detail: string;
+export interface McpRegistrationMutation extends IntegrationMutation {
+  readonly removedServerKeys: readonly string[];
 }
 
 export function getUserMcpConfigPath(
@@ -71,18 +80,6 @@ export function getUserSteeringPath(
   homeDirectory: string = homedir(),
 ): string {
   return path.join(homeDirectory, ".kiro", "steering", STEERING_FILE_NAME);
-}
-
-export function getDirectRuntimeRoot(stateRoot: string): string {
-  return path.join(stateRoot, "runtime", "direct-mcp");
-}
-
-export function getDirectLauncherPath(stateRoot: string): string {
-  return path.join(getDirectRuntimeRoot(stateRoot), LAUNCHER_FILE_NAME);
-}
-
-export function getPackagedLauncherPath(extensionRoot: string): string {
-  return path.join(extensionRoot, "runtime", LAUNCHER_FILE_NAME);
 }
 
 export function getPackagedSteeringPath(extensionRoot: string): string {
@@ -136,137 +133,6 @@ export async function getOrCreateInstallationServerKey(
   }
 }
 
-export async function inspectDirectRuntime(input: {
-  readonly extensionRoot: string;
-  readonly stateRoot: string;
-}): Promise<RuntimeInspection> {
-  const sourceLauncher = await readRequiredRegularFile(
-    getPackagedLauncherPath(input.extensionRoot),
-    "Packaged MCP launcher",
-  );
-  const destinationLauncher = await readOptionalRegularFile(
-    getDirectLauncherPath(input.stateRoot),
-    "Materialized MCP launcher",
-  );
-  const destinationEngine = path.join(
-    getDirectRuntimeRoot(input.stateRoot),
-    "engine",
-    "kiro_security",
-  );
-  if (destinationLauncher === undefined || !(await exists(destinationEngine))) {
-    return {
-      ready: false,
-      detail: "The direct MCP runtime has not been materialized in Extension global storage.",
-    };
-  }
-  const sourceEngine = path.join(input.extensionRoot, "engine", "kiro_security");
-  const [sourceDigest, destinationDigest] = await Promise.all([
-    digestPythonTree(sourceEngine),
-    digestPythonTree(destinationEngine),
-  ]);
-  const permissionsReady =
-    process.platform === "win32" ||
-    (destinationLauncher.mode & 0o077) === 0;
-  if (
-    sourceLauncher.contents.equals(destinationLauncher.contents) &&
-    sourceDigest === destinationDigest &&
-    permissionsReady
-  ) {
-    return {
-      ready: true,
-      detail: "The Extension global-storage MCP runtime is current.",
-    };
-  }
-  return {
-    ready: false,
-    detail: "The Extension global-storage MCP runtime differs from the packaged runtime.",
-  };
-}
-
-export async function materializeDirectRuntime(input: {
-  readonly extensionRoot: string;
-  readonly stateRoot: string;
-}): Promise<IntegrationMutation> {
-  const runtimeRoot = getDirectRuntimeRoot(input.stateRoot);
-  return withSharedFileLock(
-    runtimeRoot,
-    "The Kiro Security runtime",
-    () => materializeDirectRuntimeLocked(input),
-  );
-}
-
-async function materializeDirectRuntimeLocked(input: {
-  readonly extensionRoot: string;
-  readonly stateRoot: string;
-}): Promise<IntegrationMutation> {
-  if ((await inspectDirectRuntime(input)).ready) {
-    return { changed: false };
-  }
-  const runtimeRoot = getDirectRuntimeRoot(input.stateRoot);
-  const parent = path.dirname(runtimeRoot);
-  await ensureDirectory(parent);
-  const stagingRoot = await mkdtemp(
-    path.join(parent, ".direct-mcp-staging-"),
-  );
-  try {
-    await cp(
-      getPackagedLauncherPath(input.extensionRoot),
-      path.join(stagingRoot, LAUNCHER_FILE_NAME),
-      { errorOnExist: true, force: false },
-    );
-    await mkdir(path.join(stagingRoot, "engine"), {
-      recursive: true,
-      mode: 0o700,
-    });
-    await cp(
-      path.join(input.extensionRoot, "engine", "kiro_security"),
-      path.join(stagingRoot, "engine", "kiro_security"),
-      {
-        recursive: true,
-        errorOnExist: true,
-        force: false,
-        filter: (source) =>
-          path.basename(source) !== "__pycache__" && !source.endsWith(".pyc"),
-      },
-    );
-    await restrictTree(stagingRoot);
-    await replaceDirectory(stagingRoot, runtimeRoot);
-  } catch (error) {
-    await rm(stagingRoot, { force: true, recursive: true });
-    throw error;
-  }
-  return { changed: true };
-}
-
-export async function initializeDirectRuntime(input: {
-  readonly pythonExecutable: string;
-  readonly launcherPath: string;
-  readonly stateRoot: string;
-  readonly scanRoot: string;
-}): Promise<void> {
-  const { stdout } = await executeFile(
-    input.pythonExecutable,
-    ["-B", "-S", input.launcherPath, "--initialize"],
-    {
-      encoding: "utf8",
-      maxBuffer: 64 * 1024,
-      timeout: 15_000,
-      windowsHide: true,
-      env: {
-        ...process.env,
-        PYTHONIOENCODING: "utf-8",
-        PYTHONUNBUFFERED: "1",
-        KIRO_SECURITY_STATE_ROOT: input.stateRoot,
-        KIRO_SECURITY_SCAN_ROOT: input.scanRoot,
-      },
-    },
-  );
-  const state = JSON.parse(stdout.trim()) as { schemaVersion?: unknown };
-  if (state.schemaVersion !== 1) {
-    throw new Error("The direct MCP runtime did not initialize schema v1.");
-  }
-}
-
 export async function inspectSteering(input: {
   readonly sourcePath: string;
   readonly steeringPath: string;
@@ -315,20 +181,33 @@ export async function inspectMcpRegistration(input: {
   if (document.kind === "unsafe") {
     return { state: "conflict", detail: document.detail };
   }
+  const staleServerKeys = managedSiblingServerKeys(
+    document.parsed,
+    input.serverKey,
+    input.expected,
+  );
   const server = getServerEntry(document.parsed, input.serverKey);
   if (server === undefined) {
     return {
-      state: "absent",
-      detail: "The Kiro user MCP configuration has no Kiro Security server entry.",
+      state: staleServerKeys.length > 0 ? "mismatch" : "absent",
+      detail:
+        staleServerKeys.length > 0
+          ? "The Kiro user MCP configuration contains a previous registration for this installation."
+          : "The Kiro user MCP configuration has no Kiro Security server entry.",
     };
   }
   const permissionsReady =
     process.platform === "win32" || (document.mode & 0o077) === 0;
   if (isDeepStrictEqual(server, input.expected) && permissionsReady) {
-    return {
-      state: "installed",
-      detail: "The Kiro user MCP registration is current.",
-    };
+    return staleServerKeys.length === 0
+      ? {
+          state: "installed",
+          detail: "The Kiro user MCP registration is current.",
+        }
+      : {
+          state: "mismatch",
+          detail: "The Kiro user MCP configuration contains a previous registration for this installation.",
+        };
   }
   if (isManagedServerEntry(server)) {
     return {
@@ -348,7 +227,7 @@ export async function installMcpRegistration(input: {
   readonly mcpPath: string;
   readonly serverKey: string;
   readonly expected: DirectMcpServerConfiguration;
-}): Promise<IntegrationMutation> {
+}): Promise<McpRegistrationMutation> {
   return withSharedFileLock(
     input.mcpPath,
     "The Kiro user MCP configuration",
@@ -360,13 +239,13 @@ async function installMcpRegistrationLocked(input: {
   readonly mcpPath: string;
   readonly serverKey: string;
   readonly expected: DirectMcpServerConfiguration;
-}): Promise<IntegrationMutation> {
+}): Promise<McpRegistrationMutation> {
   const inspection = await inspectMcpRegistration(input);
   if (inspection.state === "conflict") {
     throw new Error(inspection.detail);
   }
   if (inspection.state === "installed") {
-    return { changed: false };
+    return { changed: false, removedServerKeys: [] };
   }
   const snapshot = await readMcpDocument(input.mcpPath);
   if (snapshot.kind === "unsafe") {
@@ -376,7 +255,15 @@ async function installMcpRegistrationLocked(input: {
     snapshot.kind === "absent"
       ? '{\n  "mcpServers": {}\n}\n'
       : snapshot.contents;
-  const updated = applyEdits(
+  const staleServerKeys =
+    snapshot.kind === "file"
+      ? managedSiblingServerKeys(
+          snapshot.parsed,
+          input.serverKey,
+          input.expected,
+        )
+      : [];
+  let updated = applyEdits(
     source,
     modify(
       source,
@@ -385,8 +272,16 @@ async function installMcpRegistrationLocked(input: {
       { formattingOptions: { insertSpaces: true, tabSize: 2, eol: "\n" } },
     ),
   );
+  for (const staleServerKey of staleServerKeys) {
+    updated = applyEdits(
+      updated,
+      modify(updated, ["mcpServers", staleServerKey], undefined, {
+        formattingOptions: { insertSpaces: true, tabSize: 2, eol: "\n" },
+      }),
+    );
+  }
   await writeSharedConfig(input.mcpPath, snapshot, updated);
-  return { changed: true };
+  return { changed: true, removedServerKeys: staleServerKeys };
 }
 
 async function inspectDedicatedFile(
@@ -512,6 +407,53 @@ function isManagedServerEntry(value: unknown): boolean {
   );
 }
 
+function managedSiblingServerKeys(
+  parsed: unknown,
+  currentServerKey: string,
+  expected: DirectMcpServerConfiguration,
+): string[] {
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return [];
+  }
+  const servers = (parsed as { mcpServers?: unknown }).mcpServers;
+  if (typeof servers !== "object" || servers === null || Array.isArray(servers)) {
+    return [];
+  }
+  return Object.entries(servers)
+    .filter(
+      ([serverKey, server]) =>
+        serverKey !== currentServerKey &&
+        MCP_SERVER_KEY_PATTERN.test(serverKey) &&
+        isSameInstallationServerEntry(server, expected),
+    )
+    .map(([serverKey]) => serverKey)
+    .sort();
+}
+
+function isSameInstallationServerEntry(
+  value: unknown,
+  expected: DirectMcpServerConfiguration,
+): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const server = value as Readonly<Record<string, unknown>>;
+  const env = server.env;
+  return (
+    isManagedServerEntry(server) &&
+    Array.isArray(server.args) &&
+    isDeepStrictEqual(server.args, expected.args) &&
+    server.disabled === false &&
+    typeof env === "object" &&
+    env !== null &&
+    !Array.isArray(env) &&
+    (env as Readonly<Record<string, unknown>>).KIRO_SECURITY_STATE_ROOT ===
+      expected.env.KIRO_SECURITY_STATE_ROOT &&
+    (env as Readonly<Record<string, unknown>>).KIRO_SECURITY_SCAN_ROOT ===
+      expected.env.KIRO_SECURITY_SCAN_ROOT
+  );
+}
+
 async function writeSharedConfig(
   filePath: string,
   snapshot: McpDocument,
@@ -579,158 +521,6 @@ async function writeDedicatedFile(
     await rm(stagingPath, { force: true });
     throw error;
   }
-}
-
-async function replaceDirectory(
-  source: string,
-  destination: string,
-): Promise<void> {
-  const previous = `${destination}.previous-${randomUUID()}`;
-  const destinationExists = await exists(destination);
-  if (destinationExists) {
-    await rename(destination, previous);
-  }
-  try {
-    await rename(source, destination);
-  } catch (error) {
-    if (destinationExists) {
-      await rename(previous, destination);
-    }
-    throw error;
-  }
-  if (destinationExists) {
-    await rm(previous, { force: true, recursive: true });
-  }
-}
-
-async function digestPythonTree(root: string): Promise<string> {
-  const hash = createHash("sha256");
-  const visit = async (directory: string, relative: string): Promise<void> => {
-    const entries = await readdir(directory, { withFileTypes: true });
-    entries.sort((left, right) => left.name.localeCompare(right.name));
-    for (const entry of entries) {
-      if (entry.name === "__pycache__" || entry.name.endsWith(".pyc")) {
-        continue;
-      }
-      const absolute = path.join(directory, entry.name);
-      const childRelative = path.join(relative, entry.name);
-      if (entry.isSymbolicLink()) {
-        throw new Error(`Runtime source must not contain symlinks: ${absolute}`);
-      }
-      if (entry.isDirectory()) {
-        await visit(absolute, childRelative);
-      } else if (entry.isFile()) {
-        hash.update(childRelative.split(path.sep).join("/"));
-        hash.update("\0");
-        hash.update(await readFile(absolute));
-        hash.update("\0");
-      } else {
-        throw new Error(`Runtime source contains an unsupported entry: ${absolute}`);
-      }
-    }
-  };
-  await visit(root, "");
-  return hash.digest("hex");
-}
-
-async function restrictTree(root: string): Promise<void> {
-  if (process.platform === "win32") {
-    return;
-  }
-  await chmod(root, 0o700);
-  const entries = await readdir(root, { withFileTypes: true });
-  for (const entry of entries) {
-    const candidate = path.join(root, entry.name);
-    if (entry.isDirectory()) {
-      await restrictTree(candidate);
-    } else if (entry.isFile()) {
-      await chmod(
-        candidate,
-        entry.name === LAUNCHER_FILE_NAME ? 0o700 : 0o600,
-      );
-    }
-  }
-}
-
-async function ensureDirectory(
-  directoryPath: string,
-  restrictExisting = true,
-): Promise<void> {
-  let created = false;
-  try {
-    const metadata = await lstat(directoryPath);
-    if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
-      throw new Error(
-        `Refusing to use a symlink or non-directory path: ${directoryPath}`,
-      );
-    }
-  } catch (error) {
-    if (!isMissing(error)) {
-      throw error;
-    }
-    await mkdir(directoryPath, { recursive: true, mode: 0o700 });
-    created = true;
-  }
-  if (process.platform !== "win32" && (created || restrictExisting)) {
-    await chmod(directoryPath, 0o700);
-  }
-}
-
-async function readRequiredRegularFile(
-  filePath: string,
-  label: string,
-): Promise<{ readonly contents: Buffer; readonly mode: number }> {
-  const value = await readOptionalRegularFile(filePath, label);
-  if (value === undefined) {
-    throw new Error(`${label} does not exist: ${filePath}`);
-  }
-  return value;
-}
-
-async function readOptionalRegularFile(
-  filePath: string,
-  label: string,
-): Promise<
-  | { readonly contents: Buffer; readonly mode: number }
-  | undefined
-> {
-  let metadata;
-  try {
-    metadata = await lstat(filePath);
-  } catch (error) {
-    if (isMissing(error)) {
-      return undefined;
-    }
-    throw error;
-  }
-  if (metadata.isSymbolicLink() || !metadata.isFile()) {
-    throw new Error(`${label} must be a regular non-symlink file: ${filePath}`);
-  }
-  return { contents: await readFile(filePath), mode: metadata.mode };
-}
-
-async function restrictFile(filePath: string, mode: number): Promise<void> {
-  if (process.platform !== "win32") {
-    await chmod(filePath, mode);
-  }
-}
-
-async function exists(candidate: string): Promise<boolean> {
-  try {
-    await access(candidate);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function isMissing(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    (error as NodeJS.ErrnoException).code === "ENOENT"
-  );
 }
 
 function isAlreadyExists(error: unknown): boolean {

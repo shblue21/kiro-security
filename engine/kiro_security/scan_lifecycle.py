@@ -306,6 +306,7 @@ class ScanLifecycleService:
                 next_phase = requested_phase or scan["phase"]
                 current_phase_index = PHASES.index(scan["phase"])
                 next_phase_index = PHASES.index(next_phase)
+                phase_advanced = next_phase_index > current_phase_index
                 if next_phase_index < current_phase_index:
                     raise WorkbenchError(
                         "progress_regression",
@@ -359,12 +360,16 @@ class ScanLifecycleService:
                 next_total = (
                     requested_total
                     if requested_total is not None
-                    else progress["review_items_total"]
+                    else (0 if phase_advanced else progress["review_items_total"])
                 )
                 next_completed = (
                     requested_completed
                     if requested_completed is not None
-                    else progress["review_items_completed"]
+                    else (
+                        0
+                        if phase_advanced
+                        else progress["review_items_completed"]
+                    )
                 )
                 next_findings = (
                     requested_findings
@@ -381,7 +386,7 @@ class ScanLifecycleService:
                         "invalid_progress",
                         "Completed review items cannot exceed total review items.",
                     )
-                if not new_deep_pass and (
+                if not phase_advanced and not new_deep_pass and (
                     next_total < progress["review_items_total"]
                     or next_completed < progress["review_items_completed"]
                 ):

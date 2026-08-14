@@ -32,6 +32,7 @@ export function setupStyles(): string {
       background: var(--vscode-button-secondaryBackground, var(--border));
       cursor: pointer;
       letter-spacing: .02em;
+      white-space: nowrap;
       transition: background-color 120ms ease, border-color 120ms ease, transform 120ms ease;
     }
     button:hover:not(:disabled) { background: var(--vscode-button-secondaryHoverBackground, color-mix(in oklch, var(--border) 72%, var(--fg))); }
@@ -105,8 +106,10 @@ export function setupStyles(): string {
     .status-hero p { margin-top: 4px; }
     .card-title h2, .section-heading h2 { margin: 0; font-size: 14px; line-height: 1.35; overflow-wrap: anywhere; }
     .section-heading h2 { margin-top: 3px; font-size: 16px; }
+    .section-heading-stacked { display: block; }
+    .section-heading-stacked h2 { margin: 0; }
+    .section-heading-stacked p { max-width: 52ch; margin: 3px 0 0; }
     .card-title p { color: var(--vscode-descriptionForeground, var(--muted)); overflow-wrap: anywhere; }
-    .eyebrow { color: var(--vscode-descriptionForeground, var(--muted)); font: 600 10px/1.2 var(--vscode-editor-font-family, var(--font-mono)); letter-spacing: .07em; text-transform: uppercase; }
     .badge {
       flex: none;
       border: 1px solid currentColor;
@@ -127,17 +130,9 @@ export function setupStyles(): string {
       font: 600 11px/1.45 var(--vscode-font-family, var(--font-body));
     }
     .connection-panel .badge-ready::before { content: "✓"; margin-right: 4px; }
-    .context-list {
-      display: grid;
-      gap: 6px;
-      margin-top: 11px;
-      padding-top: 10px;
-      border-top: 1px solid var(--vscode-panel-border, var(--border));
-    }
-    .context-row { display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 8px; align-items: start; }
-    .context-row > span { color: var(--vscode-descriptionForeground, var(--muted)); font-size: 11px; }
-    .context-row > strong { min-width: 0; font-size: 12px; font-weight: 500; overflow-wrap: anywhere; }
-    .quick-start { padding-top: 12px; }
+    .connection-note { max-width: 56ch; margin: 9px 0 0; color: var(--vscode-descriptionForeground, var(--muted)); font-size: 11px; }
+    .quick-start { margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--vscode-panel-border, var(--border)); }
+    .quick-start h3 { margin: 0; font-size: 12px; font-weight: 600; }
     .quick-start > p { max-width: 46ch; }
     .prompt-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: stretch; margin-top: 6px; }
     .prompt-row code {
@@ -186,14 +181,19 @@ export function setupStyles(): string {
     .scope-buttons { display: flex; flex: none; gap: 2px; }
     .scope-buttons button { min-height: 28px; padding: 3px 8px; background: transparent; }
     .scope-buttons button.active { border-color: var(--vscode-focusBorder, var(--accent)); color: var(--vscode-foreground, var(--fg)); background: var(--vscode-list-activeSelectionBackground, var(--border)); }
-    .metric-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; margin-top: 11px; }
-    .metric { min-width: 0; border: 1px solid var(--vscode-panel-border, var(--border)); border-radius: 5px; padding: 9px; background: var(--vscode-editor-background, var(--surface)); }
-    .metric span { display: block; min-height: 2.8em; color: var(--vscode-descriptionForeground, var(--muted)); font-size: 11px; line-height: 1.35; }
-    .metric strong { display: block; margin-top: 2px; font: 650 18px/1.2 var(--vscode-editor-font-family, var(--font-mono)); font-variant-numeric: tabular-nums; }
-    .metric-success strong { color: var(--vscode-testing-iconPassed, var(--fg)); }
-    .metric-warning strong { color: var(--vscode-editorWarning-foreground, var(--fg)); }
-    .metric-danger strong { color: var(--vscode-errorForeground, var(--fg)); }
-    .metric-strip { display: flex; align-items: center; min-width: 0; margin-top: 9px; padding: 8px 10px; border: 1px solid var(--vscode-panel-border, var(--border)); border-radius: 5px; background: var(--vscode-editor-background, var(--surface)); }
+    .dashboard-summary { display: grid; grid-template-columns: minmax(150px, 1.35fr) minmax(0, 2fr); margin-top: 11px; border-block: 1px solid var(--vscode-panel-border, var(--border)); }
+    .summary-primary { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 11px 12px 11px 2px; border-right: 1px solid var(--vscode-panel-border, var(--border)); }
+    .summary-primary span { color: var(--vscode-descriptionForeground, var(--muted)); font-size: 11px; }
+    .summary-primary strong { font: 650 22px/1 var(--vscode-editor-font-family, var(--font-mono)); font-variant-numeric: tabular-nums; }
+    .summary-primary.metric-danger strong { color: var(--vscode-errorForeground, var(--fg)); }
+    .summary-secondary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .summary-metric { display: grid; align-content: center; gap: 2px; min-width: 0; padding: 8px 10px; }
+    .summary-metric + .summary-metric { border-left: 1px solid var(--vscode-panel-border, var(--border)); }
+    .summary-metric > span { overflow: hidden; color: var(--vscode-descriptionForeground, var(--muted)); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+    .summary-metric strong { font: 650 14px/1.2 var(--vscode-editor-font-family, var(--font-mono)); font-variant-numeric: tabular-nums; }
+    .summary-metric.metric-success strong { color: var(--vscode-testing-iconPassed, var(--fg)); }
+    .summary-metric.metric-warning strong { color: var(--vscode-editorWarning-foreground, var(--fg)); }
+    .metric-strip { display: flex; align-items: center; min-width: 0; margin-top: 9px; padding: 8px 2px; border-block: 1px solid var(--vscode-panel-border, var(--border)); }
     .metric-inline { min-width: 0; display: inline-flex; align-items: baseline; gap: 5px; color: var(--vscode-descriptionForeground, var(--muted)); font-size: 10px; white-space: nowrap; }
     .metric-inline + .metric-inline { margin-left: 9px; padding-left: 9px; border-left: 1px solid var(--vscode-panel-border, var(--border)); }
     .metric-inline strong { color: var(--vscode-foreground, var(--fg)); font: 650 13px/1 var(--vscode-editor-font-family, var(--font-mono)); font-variant-numeric: tabular-nums; }
@@ -201,19 +201,21 @@ export function setupStyles(): string {
     .metric-inline.metric-danger strong { color: var(--vscode-errorForeground, var(--fg)); }
     .section-divider { display: flex; align-items: center; gap: 8px; color: var(--vscode-descriptionForeground, var(--muted)); font: 600 10px/1 var(--vscode-editor-font-family, var(--font-mono)); letter-spacing: .05em; text-transform: uppercase; }
     .section-divider::after { content: ""; height: 1px; flex: 1; background: var(--vscode-panel-border, var(--border)); }
+    .scan-card { min-width: 0; padding: 12px 2px 14px; border-top: 1px solid var(--vscode-panel-border, var(--border)); }
     .scan-facts { margin-top: 12px; }
     .progress-track { height: 4px; margin-top: 12px; overflow: hidden; border-radius: 999px; background: var(--vscode-progressBar-background, var(--border)); }
     .progress-track span { display: block; height: 100%; border-radius: inherit; background: var(--vscode-focusBorder, var(--accent)); }
-    .finding-filter { padding: 0; overflow: hidden; }
-    .finding-filter > summary { min-height: 42px; display: flex; align-items: center; gap: 8px; padding: 9px 12px; list-style-position: inside; }
+    .finding-filter { padding: 0; overflow: hidden; border-block: 1px solid var(--vscode-panel-border, var(--border)); }
+    .finding-filter > summary { min-height: 40px; display: flex; align-items: center; gap: 8px; padding: 8px 2px; list-style-position: inside; }
     .filter-summary { margin-left: auto; color: var(--vscode-descriptionForeground, var(--muted)); font: 500 10px/1.3 var(--vscode-editor-font-family, var(--font-mono)); white-space: nowrap; }
-    .finding-toolbar { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; padding: 10px 12px 12px; border-top: 1px solid var(--vscode-panel-border, var(--border)); }
+    .finding-toolbar { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; padding: 10px 2px 12px; border-top: 1px solid var(--vscode-panel-border, var(--border)); }
     .finding-toolbar label { display: grid; gap: 4px; color: var(--vscode-descriptionForeground, var(--muted)); font-size: 11px; }
     .badge-row { display: flex; flex: none; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
     .finding-summary { margin-top: 10px !important; }
     .quick-meta { display: flex; flex-wrap: wrap; gap: 5px 10px; margin-top: 9px; color: var(--vscode-descriptionForeground, var(--muted)); font-size: 11px; }
     .quick-meta strong { color: var(--vscode-foreground, var(--fg)); font-weight: 500; }
     .finding-details { margin-top: 10px; padding-top: 8px; }
+    .finding-card { border: 0; border-top: 1px solid var(--vscode-panel-border, var(--border)); border-radius: 0; padding: 13px 2px 15px; background: transparent; }
     .blocked-action { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 9px; margin-top: 11px; padding: 9px; border-radius: 4px; background: var(--vscode-textBlockQuote-background, var(--bg)); }
     .blocked-action button { min-height: 30px; color: var(--vscode-descriptionForeground, var(--muted)); }
     select { width: 100%; min-width: 0; min-height: 30px; border: 1px solid var(--vscode-dropdown-border, var(--border)); border-radius: 3px; padding: 4px 7px; color: var(--vscode-dropdown-foreground, var(--fg)); background: var(--vscode-dropdown-background, var(--surface)); }
@@ -225,7 +227,8 @@ export function setupStyles(): string {
     .empty-state button { margin-top: 10px; }
     @media (max-width: 520px) {
       .content { padding: 11px; }
-      .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .dashboard-summary { grid-template-columns: 1fr; }
+      .summary-primary { border-right: 0; border-bottom: 1px solid var(--vscode-panel-border, var(--border)); padding-right: 2px; }
       .finding-toolbar { grid-template-columns: 1fr; }
       .blocked-action { grid-template-columns: 1fr; }
       .blocked-action button { width: 100%; }

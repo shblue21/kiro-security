@@ -35,6 +35,17 @@ class WorkflowLifecycleTests(WorkflowTestCase):
                 ["properties"]["receipt"]["properties"]["closed"],
                 {"const": True},
             )
+            writeup_example = contract["descriptorSchemas"]["derived-writeup"][
+                "examples"
+            ][0]
+            self.assertEqual(
+                set(writeup_example["outputs"][0]),
+                {"path", "markdown"},
+            )
+            self.assertEqual(
+                writeup_example["outputs"][0]["path"],
+                "findings/example-finding/example-finding.md",
+            )
             persisted = {
                 item["descriptor"]: item
                 for item in contract["persisted"]
@@ -348,8 +359,12 @@ class WorkflowLifecycleTests(WorkflowTestCase):
         validation = self.workbench.update_scan_progress(
             scan_id,
             phase="validation",
+            review_items_total=6,
+            review_items_completed=0,
             owner_session_hash=self.owner_a,
         )
+        self.assertEqual(validation["progress"]["reviewItemsCompleted"], 0)
+        self.assertEqual(validation["progress"]["reviewItemsTotal"], 6)
         self.assertEqual(
             validation["progress"]["reportableFindingsCount"],
             0,
@@ -396,6 +411,17 @@ class WorkflowLifecycleTests(WorkflowTestCase):
             )
         self.assertEqual(raised.exception.code, "invalid_artifact")
 
+    def test_attack_path_rejects_inconsistent_decision_before_phase_close(self):
+        with self.assertRaises(WorkbenchError) as raised:
+            self._complete(
+                attack_path_instance={
+                    "instanceId": "instance-1",
+                    "disposition": "reportable",
+                    "finalSeverity": "ignore",
+                }
+            )
+        self.assertEqual(raised.exception.code, "invalid_artifact")
+
     def test_semantic_artifacts_reject_symlinked_output_parent(self):
         outside = self.root / "outside"
         outside.mkdir()
@@ -418,6 +444,15 @@ class WorkflowLifecycleTests(WorkflowTestCase):
 
     def test_no_candidate_canonical_finding_is_rejected_on_write(self):
         scan_id = self._advance_empty_standard_to_reporting()
+        for descriptor, invalid_content in (
+            ("derived-writeup", {"writeups": []}),
+            ("derived-hardening", {"content": "# Hardening"}),
+        ):
+            with self.subTest(descriptor=descriptor):
+                with self.assertRaises(WorkbenchError) as raised:
+                    self._write(scan_id, descriptor, invalid_content)
+                self.assertEqual(raised.exception.code, "artifact_phase_not_active")
+                self.assertIn("canonical-result is persisted", str(raised.exception))
         with self.assertRaises(WorkbenchError) as raised:
             self._write(
                 scan_id,

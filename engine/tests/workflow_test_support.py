@@ -165,6 +165,7 @@ class WorkflowTestCase(unittest.TestCase):
         finding_severity="medium",
         informational_writeup=False,
         omit_derived_writeup=False,
+        attack_path_instance=None,
     ):
         _workspace_id, scan_id = self._start()
         reportable = with_finding and finding_severity != "informational"
@@ -249,7 +250,8 @@ class WorkflowTestCase(unittest.TestCase):
                     {
                         "candidateId": "candidate-1",
                         "instances": [
-                            {
+                            attack_path_instance
+                            or {
                                 "instanceId": "instance-1",
                                 "disposition": (
                                     "reportable" if reportable else "ignored"

@@ -421,6 +421,10 @@ ATTACK_PATH = {
         "ignore; ignore -> ignore; unknown -> low.",
         "After the matrix, map only reportable final severity to priority: critical -> "
         "P0, high -> P1, medium -> P2, and low -> P3. Never assign priority to ignore.",
+        "Keep disposition, finalSeverity, and optional priority consistent: reportable "
+        "uses a reportable final severity and matching priority when recorded; ignored "
+        "uses ignore and no priority; deferred uses a reportable or unknown severity and "
+        "no priority.",
         "Once facts are fixed, do not re-argue severity from scratch or inflate it from "
         "the original hypothesis. Missing deployment evidence lowers confidence or "
         "keeps facts unknown rather than automatically defeating other strong evidence.",
@@ -497,6 +501,10 @@ REPORTING = {
         "Write all accepted per-finding material together as derived-writeup with "
         "exact safe findings/<slug>/<slug>.md paths and Markdown bodies matching the "
         "canonical writeup references.",
+        "The exact derived-writeup payload shape is "
+        "{\"scanId\":\"<authoritative scanId>\",\"outputs\":[{\"path\":"
+        "\"findings/<slug>/<slug>.md\",\"markdown\":\"<complete Markdown>\"}]}. "
+        "Use path and markdown exactly; do not use writeups or content aliases.",
         "Only after every writeup is accepted, produce exactly one collection-wide "
         "structural hardening portfolio mapping evidence to violated invariants, trust "
         "boundaries, control owners, dangerous capabilities, recurring controls, and "
@@ -511,6 +519,14 @@ REPORTING = {
         "Write coverage and canonical-result before derived-writeup and "
         "derived-hardening. Derived documents are unsealed projections and never "
         "replace canonical JSON authority.",
+        "Do not submit canonical-result and derived artifacts concurrently. Wait for "
+        "the canonical-result write to succeed, then reload the artifact contract and "
+        "use only the derived schemas newly exposed there.",
+        "When an artifact write is explicitly rejected before persistence for input "
+        "validation, correct only the named fields and retry that descriptor at most "
+        "twice. Do not issue parallel retries or blindly retry an ambiguous transport "
+        "or write failure. If the second corrected retry fails, leave reporting "
+        "unclosed and surface the exact blocker.",
         "Call scan completion only after the current artifact contract reports full "
         "closure. Do not author report.md, stable ids, seals, SARIF, or CSV directly; "
         "the deterministic finalizer owns them.",
@@ -529,14 +545,28 @@ REPORTING = {
     "completion": (
         "The current artifact contract reports complete closure.",
         "Completion returns a verified manifest digest and generated report path.",
-        "The generated report.md exists and is the primary readable result. Link it "
-        "together with the canonical manifest, findings, and coverage paths returned "
-        "by completion, and report only validated reportable findings and honest "
-        "coverage limits.",
+        "In the final response, link the generated markdown report path as the primary "
+        "readable artifact. Also link the canonical manifest, findings, and coverage "
+        "paths returned by completion.",
+        "Read full canonical results only when explicitly requested.",
+        "Report only validated reportable findings and honest coverage limits.",
         "Do not mark the scan objective complete or return a final scan result before "
         "completion succeeds and report.md exists.",
-        "The final response waits for a separate user request before export, "
-        "remediation, tracking, patching, or another scan.",
+        "After completion succeeds, include its returned usage.totalTokens, "
+        "usage.inputTokens, and usage.cachedInputTokens in the final response when "
+        "usage.coverage is complete or partial, and explicitly label a partial "
+        "measurement. If coverage is unavailable, say that token usage could not be "
+        "measured instead of reporting zero or estimating a cost.",
+        "If the scan found reportable issues, ask whether the user wants to export the "
+        "findings as JSON, SARIF, or CSV, generate remediation patches, or track "
+        "selected findings. Name the highest-priority finding.",
+        "Offer tracking only when an available destination can be used, and name the "
+        "destination in the question.",
+        "If the report names a specific follow-up, ask whether the user wants to "
+        "investigate it. If the scan found nothing and has no specific follow-up, do "
+        "not add a generic question.",
+        "Wait for the user's answer before exporting findings, generating patches, "
+        "tracking findings, or starting another scan.",
     ),
 }
 

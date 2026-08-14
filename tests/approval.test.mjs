@@ -21,7 +21,7 @@ test("direct MCP config keeps Start and Cancel on the explicit approval boundary
     MCP_MANAGED_MARKER,
     buildDirectMcpContract,
     buildDirectMcpServerConfiguration,
-  } = require("../out/packages/extension/src/integrationConfig.js");
+  } = require("../out/packages/extension/src/integration/integrationConfig.js");
   const contract = buildDirectMcpContract(TEST_SERVER_KEY);
   const configuration = buildDirectMcpServerConfiguration({
     serverKey: TEST_SERVER_KEY,
@@ -42,11 +42,11 @@ test("Trust v2 policy allows setup tools and asks only for Start and Cancel", as
     buildApprovalPolicyRules,
     inspectApprovalPolicy,
     installApprovalPolicy,
-  } = require("../out/packages/extension/src/approvalPolicy.js");
+  } = require("../out/packages/extension/src/integration/approvalPolicy.js");
   const {
     AUTO_APPROVED_MCP_TOOLS,
     MANUAL_APPROVAL_MCP_TOOLS,
-  } = require("../out/packages/extension/src/integrationConfig.js");
+  } = require("../out/packages/extension/src/integration/integrationConfig.js");
   const temporary = await mkdtemp(join(tmpdir(), "kiro-approval-policy-test-"));
   try {
     const settings = join(temporary, ".kiro", "settings");
@@ -146,25 +146,106 @@ test("Trust v2 policy allows setup tools and asks only for Start and Cancel", as
   }
 });
 
+test("Trust v2 policy removes only stale generated MCP matches", async () => {
+  const { installApprovalPolicy } = require(
+    "../out/packages/extension/src/integration/approvalPolicy.js",
+  );
+  const { parse } = require("yaml");
+  const temporary = await mkdtemp(join(tmpdir(), "kiro-approval-stale-test-"));
+  const staleKey = "ksp_bbbbbbbbbbbbbbbbbbbb";
+  try {
+    const settings = join(temporary, ".kiro", "settings");
+    const policyPath = join(settings, "permissions.yaml");
+    await mkdir(settings, { recursive: true });
+    await writeFile(
+      policyPath,
+      `# Preserve user policy
+rules:
+  - capability: mcp
+    match: [${staleKey}/kiro_security_get_capabilities]
+    effect: allow
+  - capability: mcp
+    match: [${staleKey}/kiro_security_start_scan]
+    effect: ask
+  - capability: mcp
+    match: [${staleKey}/kiro_security_get_workspace, company/custom_tool]
+    effect: allow
+`,
+      "utf8",
+    );
+
+    assert.equal(
+      (await installApprovalPolicy({
+        serverKey: TEST_SERVER_KEY,
+        staleServerKeys: [staleKey],
+        homeDirectory: temporary,
+      })).changed,
+      true,
+    );
+    const installed = readFileSync(policyPath, "utf8");
+    const rules = parse(installed).rules;
+    assert.match(installed, /Preserve user policy/);
+    assert.ok(
+      rules.some(
+        (rule) =>
+          rule.effect === "allow" &&
+          rule.match?.includes("company/custom_tool") &&
+          rule.match?.includes(`${staleKey}/kiro_security_get_workspace`),
+      ),
+    );
+    assert.equal(
+      rules.some(
+        (rule) =>
+          rule.match?.includes(`${staleKey}/kiro_security_get_capabilities`) ||
+          rule.match?.includes(`${staleKey}/kiro_security_start_scan`),
+      ),
+      false,
+    );
+    assert.equal(
+      (await installApprovalPolicy({
+        serverKey: TEST_SERVER_KEY,
+        staleServerKeys: [staleKey],
+        homeDirectory: temporary,
+      })).changed,
+      false,
+    );
+  } finally {
+    await rm(temporary, { force: true, recursive: true });
+  }
+});
+
 test("Trust v2 policy supports JSON and refuses malformed shared files", async () => {
   const {
     inspectApprovalPolicy,
     installApprovalPolicy,
-  } = require("../out/packages/extension/src/approvalPolicy.js");
+  } = require("../out/packages/extension/src/integration/approvalPolicy.js");
   const temporary = await mkdtemp(join(tmpdir(), "kiro-approval-json-test-"));
+  const staleKey = "ksp_bbbbbbbbbbbbbbbbbbbb";
   try {
     const settings = join(temporary, ".kiro", "settings");
     const jsonPath = join(settings, "permissions.json");
     await mkdir(settings, { recursive: true });
-    await writeFile(jsonPath, '{"rules":[]}\n', "utf8");
+    await writeFile(
+      jsonPath,
+      `${JSON.stringify({
+        rules: [{
+          capability: "mcp",
+          match: [`${staleKey}/kiro_security_get_capabilities`],
+          effect: "allow",
+        }],
+      })}\n`,
+      "utf8",
+    );
     assert.equal(
       (await installApprovalPolicy({
         serverKey: TEST_SERVER_KEY,
+        staleServerKeys: [staleKey],
         homeDirectory: temporary,
       })).changed,
       true,
     );
     const parsed = JSON.parse(readFileSync(jsonPath, "utf8"));
+    assert.doesNotMatch(readFileSync(jsonPath, "utf8"), new RegExp(staleKey));
     assert.ok(
       parsed.rules.some(
         (rule) =>
@@ -199,7 +280,7 @@ test("Trust v2 policy reports effective Kiro Security conflicts without changing
   const {
     inspectApprovalPolicy,
     installApprovalPolicy,
-  } = require("../out/packages/extension/src/approvalPolicy.js");
+  } = require("../out/packages/extension/src/integration/approvalPolicy.js");
   const temporary = await mkdtemp(join(tmpdir(), "kiro-approval-conflict-test-"));
   try {
     async function assertConflict(name, rule, effect) {
@@ -263,7 +344,7 @@ test("Trust v2 policy reports effective Kiro Security conflicts without changing
 
 test("concurrent Trust v2 installs preserve every Kiro Security rule", async () => {
   const { installApprovalPolicy } = require(
-    "../out/packages/extension/src/approvalPolicy.js",
+    "../out/packages/extension/src/integration/approvalPolicy.js",
   );
   const temporary = await mkdtemp(join(tmpdir(), "kiro-approval-lock-test-"));
   try {

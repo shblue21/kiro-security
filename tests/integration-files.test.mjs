@@ -99,7 +99,7 @@ test("auto-inclusion steering owns normal-chat orchestration without a Power ent
 
 test("steering install refreshes its changed dedicated file", async () => {
   const { inspectSteering, installSteering } = require(
-    "../out/packages/extension/src/integrationFiles.js",
+    "../out/packages/extension/src/integration/integrationFiles.js",
   );
   const temporary = await mkdtemp(join(tmpdir(), "kiro-steering-files-test-"));
   try {
@@ -115,6 +115,11 @@ test("steering install refreshes its changed dedicated file", async () => {
     assert.equal((await inspectSteering({ sourcePath, steeringPath })).state, "mismatch");
     assert.equal((await installSteering({ sourcePath, steeringPath })).changed, true);
     assert.equal(readFileSync(steeringPath, "utf8"), "current steering\n");
+    if (process.platform !== "win32") {
+      await rm(steeringPath);
+      await symlink(sourcePath, steeringPath);
+      assert.equal((await inspectSteering({ sourcePath, steeringPath })).state, "conflict");
+    }
   } finally {
     await rm(temporary, { force: true, recursive: true });
   }
@@ -124,9 +129,9 @@ test("installation MCP identity is random, persistent, and private", async () =>
   const {
     getIntegrationIdentityPath,
     getOrCreateInstallationServerKey,
-  } = require("../out/packages/extension/src/integrationFiles.js");
+  } = require("../out/packages/extension/src/integration/integrationFiles.js");
   const { buildDirectMcpContract, MCP_SERVER_KEY_PATTERN } = require(
-    "../out/packages/extension/src/integrationConfig.js",
+    "../out/packages/extension/src/integration/integrationConfig.js",
   );
   const temporary = await mkdtemp(join(tmpdir(), "kiro-integration-identity-test-"));
   try {
@@ -159,12 +164,12 @@ test("installation MCP identity is random, persistent, and private", async () =>
 
 test("MCP registration install preserves unrelated JSONC entries", async () => {
   const { buildDirectMcpServerConfiguration } = require(
-    "../out/packages/extension/src/integrationConfig.js",
+    "../out/packages/extension/src/integration/integrationConfig.js",
   );
   const {
     inspectMcpRegistration,
     installMcpRegistration,
-  } = require("../out/packages/extension/src/integrationFiles.js");
+  } = require("../out/packages/extension/src/integration/integrationFiles.js");
   const temporary = await mkdtemp(join(tmpdir(), "kiro-mcp-config-test-"));
   try {
     const mcpPath = join(temporary, ".kiro", "settings", "mcp.json");
@@ -194,12 +199,102 @@ test("MCP registration install preserves unrelated JSONC entries", async () => {
   }
 });
 
+test("MCP registration converges same-installation stale keys only", async () => {
+  const { buildDirectMcpServerConfiguration } = require(
+    "../out/packages/extension/src/integration/integrationConfig.js",
+  );
+  const { inspectMcpRegistration, installMcpRegistration } = require(
+    "../out/packages/extension/src/integration/integrationFiles.js",
+  );
+  const temporary = await mkdtemp(join(tmpdir(), "kiro-mcp-reconcile-test-"));
+  try {
+    const mcpPath = join(temporary, ".kiro", "settings", "mcp.json");
+    await mkdir(join(temporary, ".kiro", "settings"), { recursive: true });
+    const staleKey = "ksp_bbbbbbbbbbbbbbbbbbbb";
+    const otherRootKey = "ksp_cccccccccccccccccccc";
+    const markerOnlyKey = "ksp_dddddddddddddddddddd";
+    const expected = buildDirectMcpServerConfiguration({
+      serverKey: TEST_SERVER_KEY,
+      pythonExecutable: "/runtime/python3",
+      launcherPath: "/global/state/runtime/direct-mcp/kiro_security_launcher.py",
+      stateRoot: "/global/state",
+      scanRoot: "/global/state/scans",
+    });
+    const stale = {
+      ...buildDirectMcpServerConfiguration({
+        serverKey: staleKey,
+        pythonExecutable: "/old/python3",
+        launcherPath: "/global/state/runtime/direct-mcp/kiro_security_launcher.py",
+        stateRoot: "/global/state",
+        scanRoot: "/global/state/scans",
+      }),
+      timeout: 1,
+    };
+    const otherRoot = buildDirectMcpServerConfiguration({
+      serverKey: otherRootKey,
+      pythonExecutable: "/runtime/python3",
+      launcherPath: "/other/state/runtime/direct-mcp/kiro_security_launcher.py",
+      stateRoot: "/other/state",
+      scanRoot: "/other/state/scans",
+    });
+    await writeFile(
+      mcpPath,
+      `{
+  // preserve unrelated configuration
+  "mcpServers": ${JSON.stringify({
+    [TEST_SERVER_KEY]: expected,
+    [staleKey]: stale,
+    [otherRootKey]: otherRoot,
+    [markerOnlyKey]: {
+      command: "custom",
+      env: { KIRO_SECURITY_MANAGED_BY: "kiro-security-power-vsix" },
+    },
+    user: { command: "user" },
+  }, null, 2)}
+}
+`,
+      "utf8",
+    );
+
+    assert.equal(
+      (await inspectMcpRegistration({
+        mcpPath,
+        serverKey: TEST_SERVER_KEY,
+        expected,
+      })).state,
+      "mismatch",
+    );
+    const mutation = await installMcpRegistration({
+      mcpPath,
+      serverKey: TEST_SERVER_KEY,
+      expected,
+    });
+    assert.deepEqual(mutation.removedServerKeys, [staleKey]);
+    const installed = readFileSync(mcpPath, "utf8");
+    assert.match(installed, /preserve unrelated configuration/);
+    assert.doesNotMatch(installed, new RegExp(staleKey));
+    assert.match(installed, new RegExp(otherRootKey));
+    assert.match(installed, new RegExp(markerOnlyKey));
+    assert.match(installed, /"user"/);
+    assert.deepEqual(
+      await installMcpRegistration({
+        mcpPath,
+        serverKey: TEST_SERVER_KEY,
+        expected,
+      }),
+      { changed: false, removedServerKeys: [] },
+    );
+  } finally {
+    await rm(temporary, { force: true, recursive: true });
+  }
+});
+
 test("concurrent MCP registration installs preserve every server entry", async () => {
   const { buildDirectMcpServerConfiguration } = require(
-    "../out/packages/extension/src/integrationConfig.js",
+    "../out/packages/extension/src/integration/integrationConfig.js",
   );
   const { installMcpRegistration } = require(
-    "../out/packages/extension/src/integrationFiles.js",
+    "../out/packages/extension/src/integration/integrationFiles.js",
   );
   const temporary = await mkdtemp(join(tmpdir(), "kiro-mcp-lock-test-"));
   try {
@@ -215,16 +310,16 @@ test("concurrent MCP registration installs preserve every server entry", async (
       "ksp_bbbbbbbbbbbbbbbbbbbb",
     ];
     await Promise.all(
-      serverKeys.map((serverKey) =>
+      serverKeys.map((serverKey, index) =>
         installMcpRegistration({
           mcpPath,
           serverKey,
           expected: buildDirectMcpServerConfiguration({
             serverKey,
             pythonExecutable: "/runtime/python3",
-            launcherPath: "/global/runtime/launcher.py",
-            stateRoot: "/global/state",
-            scanRoot: "/global/state/scans",
+            launcherPath: `/global/state-${index}/runtime/launcher.py`,
+            stateRoot: `/global/state-${index}`,
+            scanRoot: `/global/state-${index}/scans`,
           }),
         }),
       ),
@@ -242,12 +337,12 @@ test("concurrent MCP registration installs preserve every server entry", async (
 
 test("MCP registration refuses ambiguous duplicate JSONC keys without mutation", async () => {
   const { buildDirectMcpServerConfiguration } = require(
-    "../out/packages/extension/src/integrationConfig.js",
+    "../out/packages/extension/src/integration/integrationConfig.js",
   );
   const {
     inspectMcpRegistration,
     installMcpRegistration,
-  } = require("../out/packages/extension/src/integrationFiles.js");
+  } = require("../out/packages/extension/src/integration/integrationFiles.js");
   const temporary = await mkdtemp(join(tmpdir(), "kiro-mcp-duplicate-test-"));
   try {
     const mcpPath = join(temporary, "mcp.json");
@@ -300,10 +395,10 @@ test("MCP registration refuses unmanaged key collisions and symlink paths", asyn
     return;
   }
   const { buildDirectMcpServerConfiguration } = require(
-    "../out/packages/extension/src/integrationConfig.js",
+    "../out/packages/extension/src/integration/integrationConfig.js",
   );
   const { inspectMcpRegistration, installMcpRegistration } = require(
-    "../out/packages/extension/src/integrationFiles.js",
+    "../out/packages/extension/src/integration/integrationFiles.js",
   );
   const temporary = await mkdtemp(join(tmpdir(), "kiro-mcp-conflict-test-"));
   try {
