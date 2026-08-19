@@ -10,13 +10,13 @@ export async function activate(
   context: vscode.ExtensionContext,
 ): Promise<void> {
   const output = vscode.window.createOutputChannel("Kiro Security Power");
-  const openSetupCommand = vscode.commands.registerCommand(
-    "kiroSecurity.openSetup",
-    async () => {
+  context.subscriptions.push(output);
+  context.subscriptions.push(
+    vscode.commands.registerCommand("kiroSecurity.openSetup", async () => {
       await vscode.commands.executeCommand(
         "workbench.view.extension.kiroSecurity",
       );
-    },
+    }),
   );
   if (!isSupportedKiroHost(vscode.env)) {
     const unsupportedView = vscode.window.registerWebviewViewProvider(
@@ -28,7 +28,7 @@ export async function activate(
         },
       },
     );
-    context.subscriptions.push(output, unsupportedView, openSetupCommand);
+    context.subscriptions.push(unsupportedView);
     return;
   }
   const paths = await prepareFoundationStorage(context);
@@ -46,11 +46,7 @@ export async function activate(
     setupView,
   );
 
-  context.subscriptions.push(
-    output,
-    setupRegistration,
-    openSetupCommand,
-  );
+  context.subscriptions.push(setupRegistration);
   if (!context.globalState.get<boolean>("kiroSecurity.onboardingShown.v1")) {
     void vscode.commands
       .executeCommand("workbench.view.extension.kiroSecurity")
