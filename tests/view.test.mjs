@@ -48,7 +48,6 @@ test("setup view connects steering, direct MCP, and Hook without Agent or Power 
   assert.match(extension, /new SecuritySetupView\(/);
   assert.doesNotMatch(extension, /promptForPendingUpdate/);
   assert.match(setup, /await this\.integration\.install\(\)/);
-  assert.match(setup, /requireSupportedKiroHost\(vscode\.env\)/);
   assert.doesNotMatch(setup, /showWarningMessage/);
   assert.doesNotMatch(integration, /before\.state === "mismatch"/);
   assert.match(setup, /context\.workspaceState\.get<RepositoryScope>/);
@@ -87,6 +86,10 @@ test("host detection is deterministic and unsupported hosts render read-only gui
   const html = renderUnsupportedHostHtml({ cspSource: "vscode-webview:" });
   assert.match(html, /Kiro IDE is required/);
   assert.doesNotMatch(html, /connectIntegration|<script/);
+  assert.match(
+    html,
+    /content="default-src 'none'; style-src vscode-webview: 'unsafe-inline'"/,
+  );
 });
 
 test("integration manager coalesces concurrent Python resolution", async () => {

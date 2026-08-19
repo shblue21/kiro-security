@@ -16,6 +16,22 @@ import { setupStyles } from "./setupViewStyles";
 
 export type { ViewTab } from "./setupViewScript";
 
+export function baseCspDirectives(cspSource: string): readonly string[] {
+  return ["default-src 'none'", `style-src ${cspSource} 'unsafe-inline'`];
+}
+
+export function documentStart(cspDirectives: readonly string[]): string {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="${cspDirectives.join("; ")}">
+  <title>Kiro Security Power</title>
+  <style>${setupStyles()}</style>
+</head>`;
+}
+
 export function renderSetupHtml(input: {
   readonly webview: vscode.Webview;
   readonly stateRoot: string;
@@ -31,10 +47,9 @@ export function renderSetupHtml(input: {
 }): string {
   const nonce = randomBytes(16).toString("base64");
   const csp = [
-    "default-src 'none'",
-    `style-src ${input.webview.cspSource} 'unsafe-inline'`,
+    ...baseCspDirectives(input.webview.cspSource),
     `script-src 'nonce-${nonce}'`,
-  ].join("; ");
+  ];
   const presentation = integrationPresentation(input.integration);
   const checks = [
     { name: "Global storage", detail: input.stateRoot, ready: true },
@@ -46,15 +61,7 @@ export function renderSetupHtml(input: {
   ];
   const readyCheckCount = checks.filter((check) => check.ready).length;
   const allChecksReady = readyCheckCount === checks.length;
-  return `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="${csp}">
-  <title>Kiro Security Power</title>
-  <style>${setupStyles()}</style>
-</head>
+  return `${documentStart(csp)}
 <body>
   <header class="topbar" data-od-id="setup-topbar">
     <div class="brand-lockup">
