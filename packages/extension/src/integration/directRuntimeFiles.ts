@@ -10,6 +10,7 @@ import {
   readFile,
   rename,
   rm,
+  writeFile,
 } from "node:fs/promises";
 import * as path from "node:path";
 import { promisify } from "node:util";
@@ -24,6 +25,19 @@ import { withSharedFileLock } from "./sharedFileLock";
 const executeFile = promisify(execFile);
 
 export const LAUNCHER_FILE_NAME = "kiro_security_launcher.py";
+export const RUNTIME_MANIFEST_FILE_NAME = "runtime-manifest.json";
+
+interface RuntimeManifest {
+  readonly version: 1;
+  readonly packageVersion: string;
+  readonly runtimeDigest: string;
+}
+
+interface DirectRuntimeInput {
+  readonly extensionRoot: string;
+  readonly stateRoot: string;
+  readonly packageVersion: string;
+}
 
 export interface RuntimeInspection {
   readonly ready: boolean;
@@ -42,10 +56,10 @@ export function getPackagedLauncherPath(extensionRoot: string): string {
   return path.join(extensionRoot, "runtime", LAUNCHER_FILE_NAME);
 }
 
-export async function inspectDirectRuntime(input: {
-  readonly extensionRoot: string;
-  readonly stateRoot: string;
-}): Promise<RuntimeInspection> {
+export async function inspectDirectRuntime(
+  input: DirectRuntimeInput,
+): Promise<RuntimeInspection> {
+  requirePackageVersion(input.packageVersion);
   const sourceLauncher = await readRequiredRegularFile(
     getPackagedLauncherPath(input.extensionRoot),
     "Packaged MCP launcher",
@@ -65,10 +79,21 @@ export async function inspectDirectRuntime(input: {
       detail: "The direct MCP runtime has not been materialized in Extension global storage.",
     };
   }
+  const manifestFile = await readOptionalRegularFile(
+    path.join(getDirectRuntimeRoot(input.stateRoot), RUNTIME_MANIFEST_FILE_NAME),
+    "Materialized MCP runtime manifest",
+  );
+  if (manifestFile === undefined) {
+    return {
+      ready: false,
+      detail: "The materialized MCP runtime predates version tracking.",
+    };
+  }
+  const manifest = parseRuntimeManifest(manifestFile.contents);
   const sourceEngine = path.join(input.extensionRoot, "engine", "kiro_security");
   const [sourceDigest, destinationDigest] = await Promise.all([
-    digestPythonTree(sourceEngine),
-    digestPythonTree(destinationEngine),
+    digestRuntime(sourceLauncher.contents, sourceEngine),
+    digestRuntime(destinationLauncher.contents, destinationEngine),
   ]);
   const permissionsReady =
     process.platform === "win32" ||
@@ -76,11 +101,19 @@ export async function inspectDirectRuntime(input: {
   if (
     sourceLauncher.contents.equals(destinationLauncher.contents) &&
     sourceDigest === destinationDigest &&
+    manifest.packageVersion === input.packageVersion &&
+    manifest.runtimeDigest === destinationDigest &&
     permissionsReady
   ) {
     return {
       ready: true,
       detail: "The Extension global-storage MCP runtime is current.",
+    };
+  }
+  if (comparePackageVersions(manifest.packageVersion, input.packageVersion) > 0) {
+    return {
+      ready: false,
+      detail: `A newer MCP runtime (${manifest.packageVersion}) is installed.`,
     };
   }
   return {
@@ -89,10 +122,10 @@ export async function inspectDirectRuntime(input: {
   };
 }
 
-export async function materializeDirectRuntime(input: {
-  readonly extensionRoot: string;
-  readonly stateRoot: string;
-}): Promise<{ readonly changed: boolean }> {
+export async function materializeDirectRuntime(
+  input: DirectRuntimeInput,
+): Promise<{ readonly changed: boolean }> {
+  requirePackageVersion(input.packageVersion);
   const runtimeRoot = getDirectRuntimeRoot(input.stateRoot);
   return withSharedFileLock(
     runtimeRoot,
@@ -101,14 +134,44 @@ export async function materializeDirectRuntime(input: {
   );
 }
 
-async function materializeDirectRuntimeLocked(input: {
-  readonly extensionRoot: string;
-  readonly stateRoot: string;
-}): Promise<{ readonly changed: boolean }> {
+async function materializeDirectRuntimeLocked(
+  input: DirectRuntimeInput,
+): Promise<{ readonly changed: boolean }> {
+  const runtimeRoot = getDirectRuntimeRoot(input.stateRoot);
+  const installedManifestFile = await readOptionalRegularFile(
+    path.join(runtimeRoot, RUNTIME_MANIFEST_FILE_NAME),
+    "Materialized MCP runtime manifest",
+  );
+  const installedManifest = installedManifestFile === undefined
+    ? undefined
+    : parseRuntimeManifest(installedManifestFile.contents);
+  if (
+    installedManifest !== undefined &&
+    comparePackageVersions(installedManifest.packageVersion, input.packageVersion) > 0
+  ) {
+    throw new Error(
+      `Refusing to replace newer Kiro Security runtime ${installedManifest.packageVersion} with ${input.packageVersion}.`,
+    );
+  }
+  const sourceLauncher = await readRequiredRegularFile(
+    getPackagedLauncherPath(input.extensionRoot),
+    "Packaged MCP launcher",
+  );
+  const sourceDigest = await digestRuntime(
+    sourceLauncher.contents,
+    path.join(input.extensionRoot, "engine", "kiro_security"),
+  );
+  if (
+    installedManifest?.packageVersion === input.packageVersion &&
+    installedManifest.runtimeDigest !== sourceDigest
+  ) {
+    throw new Error(
+      `Kiro Security runtime ${input.packageVersion} has conflicting packaged content.`,
+    );
+  }
   if ((await inspectDirectRuntime(input)).ready) {
     return { changed: false };
   }
-  const runtimeRoot = getDirectRuntimeRoot(input.stateRoot);
   const parent = path.dirname(runtimeRoot);
   await ensurePrivateDirectory(parent);
   const stagingRoot = await mkdtemp(
@@ -134,6 +197,16 @@ async function materializeDirectRuntimeLocked(input: {
         filter: (source) =>
           path.basename(source) !== "__pycache__" && !source.endsWith(".pyc"),
       },
+    );
+    const manifest: RuntimeManifest = {
+      version: 1,
+      packageVersion: input.packageVersion,
+      runtimeDigest: sourceDigest,
+    };
+    await writeFile(
+      path.join(stagingRoot, RUNTIME_MANIFEST_FILE_NAME),
+      `${JSON.stringify(manifest, null, 2)}\n`,
+      { encoding: "utf8", flag: "wx", mode: 0o600 },
     );
     await restrictTree(stagingRoot);
     await replaceDirectory(stagingRoot, runtimeRoot);
@@ -223,6 +296,61 @@ async function digestPythonTree(root: string): Promise<string> {
   };
   await visit(root, "");
   return hash.digest("hex");
+}
+
+async function digestRuntime(
+  launcherContents: Buffer,
+  engineRoot: string,
+): Promise<string> {
+  const hash = createHash("sha256");
+  hash.update("launcher\0");
+  hash.update(launcherContents);
+  hash.update("\0engine\0");
+  hash.update(await digestPythonTree(engineRoot));
+  return `sha256:${hash.digest("hex")}`;
+}
+
+function parseRuntimeManifest(contents: Buffer): RuntimeManifest {
+  let value: unknown;
+  try {
+    value = JSON.parse(contents.toString("utf8"));
+  } catch {
+    throw new Error("The materialized MCP runtime manifest is not valid JSON.");
+  }
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    (value as { version?: unknown }).version !== 1 ||
+    typeof (value as { packageVersion?: unknown }).packageVersion !== "string" ||
+    !/^sha256:[0-9a-f]{64}$/.test(
+      String((value as { runtimeDigest?: unknown }).runtimeDigest),
+    )
+  ) {
+    throw new Error("The materialized MCP runtime manifest is invalid.");
+  }
+  const manifest = value as RuntimeManifest;
+  requirePackageVersion(manifest.packageVersion);
+  return manifest;
+}
+
+function comparePackageVersions(left: string, right: string): number {
+  const leftParts = requirePackageVersion(left);
+  const rightParts = requirePackageVersion(right);
+  for (let index = 0; index < leftParts.length; index += 1) {
+    const difference = leftParts[index] - rightParts[index];
+    if (difference !== 0) {
+      return difference;
+    }
+  }
+  return 0;
+}
+
+function requirePackageVersion(value: string): readonly number[] {
+  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(value);
+  if (!match) {
+    throw new Error(`Unsupported Extension package version: ${value}`);
+  }
+  return match.slice(1).map(Number);
 }
 
 async function restrictTree(root: string): Promise<void> {

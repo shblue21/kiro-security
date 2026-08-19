@@ -4,6 +4,7 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 
 import type { FoundationPaths } from "../foundation";
+import { requireSupportedKiroHost } from "../hostEnvironment";
 import {
   KiroIntegrationManager,
   type KiroIntegrationInspection,
@@ -482,6 +483,7 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
   }
 
   private async connectIntegration(): Promise<void> {
+    requireSupportedKiroHost(vscode.env);
     const result = await this.integration.install();
     this.output.appendLine(
       result.changed

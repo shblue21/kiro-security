@@ -28,7 +28,7 @@ test("direct runtime is materialized in global storage and launches the MCP serv
   try {
     const stateRoot = join(temporary, "global-state");
     const scanRoot = join(stateRoot, "scans");
-    const input = { extensionRoot: resolve("."), stateRoot };
+    const input = { extensionRoot: resolve("."), stateRoot, packageVersion: "0.1.0" };
     assert.equal((await materializeDirectRuntime(input)).changed, true);
     assert.equal((await materializeDirectRuntime(input)).changed, false);
     assert.equal((await inspectDirectRuntime(input)).ready, true);
@@ -87,6 +87,7 @@ test("direct runtime materialization is serialized across extension hosts", asyn
       materializeDirectRuntime({
         extensionRoot: process.env.EXTENSION_ROOT,
         stateRoot: process.env.STATE_ROOT,
+        packageVersion: "0.1.0",
       }).then(
         (result) => process.stdout.write(JSON.stringify(result)),
         (error) => { console.error(error); process.exitCode = 1; },
@@ -110,12 +111,46 @@ test("direct runtime materialization is serialized across extension hosts", asyn
     assert.deepEqual(changed, [false, true]);
     const { inspectDirectRuntime } = require(modulePath);
     assert.equal(
-      (await inspectDirectRuntime({ extensionRoot: resolve("."), stateRoot })).ready,
+      (await inspectDirectRuntime({
+        extensionRoot: resolve("."),
+        stateRoot,
+        packageVersion: "0.1.0",
+      })).ready,
       true,
     );
 
     const runtimeEntries = await readdir(join(stateRoot, "runtime"));
     assert.deepEqual(runtimeEntries.sort(), ["direct-mcp"]);
+  } finally {
+    await rm(temporary, { force: true, recursive: true });
+  }
+});
+
+test("an older extension cannot replace a newer materialized runtime", async () => {
+  const { inspectDirectRuntime, materializeDirectRuntime } = require(
+    "../out/packages/extension/src/integration/integrationFiles.js",
+  );
+  const temporary = await mkdtemp(join(tmpdir(), "kiro-runtime-version-test-"));
+  try {
+    const stateRoot = join(temporary, "global-state");
+    const previous = {
+      extensionRoot: resolve("."),
+      stateRoot,
+      packageVersion: "0.1.0",
+    };
+    const current = {
+      extensionRoot: resolve("."),
+      stateRoot,
+      packageVersion: "0.2.0",
+    };
+    assert.equal((await materializeDirectRuntime(previous)).changed, true);
+    assert.equal((await inspectDirectRuntime(current)).ready, false);
+    assert.equal((await materializeDirectRuntime(current)).changed, true);
+    await assert.rejects(
+      materializeDirectRuntime(previous),
+      /Refusing to replace newer Kiro Security runtime 0\.2\.0 with 0\.1\.0/,
+    );
+    assert.equal((await inspectDirectRuntime(current)).ready, true);
   } finally {
     await rm(temporary, { force: true, recursive: true });
   }

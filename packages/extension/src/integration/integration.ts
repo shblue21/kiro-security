@@ -69,6 +69,7 @@ export class KiroIntegrationManager {
   readonly runtimeRoot: string;
   readonly launcherPath: string;
   private readonly extensionRoot: string;
+  private readonly packageVersion: string;
   private readonly steeringSourcePath: string;
   private pythonExecutablePromise: Promise<string> | undefined;
 
@@ -78,6 +79,11 @@ export class KiroIntegrationManager {
     serverKey: string,
   ) {
     this.extensionRoot = context.extensionUri.fsPath;
+    const packageVersion = context.extension.packageJSON.version;
+    if (typeof packageVersion !== "string") {
+      throw new Error("The Extension package version is unavailable.");
+    }
+    this.packageVersion = packageVersion;
     this.contract = buildDirectMcpContract(serverKey);
     this.serverKey = this.contract.serverKey;
     this.chatBinding = new ChatBindingManager(context, paths, this.contract);
@@ -128,6 +134,7 @@ export class KiroIntegrationManager {
       inspectDirectRuntime({
         extensionRoot: this.extensionRoot,
         stateRoot: this.paths.stateRoot.fsPath,
+        packageVersion: this.packageVersion,
       }),
       inspectApprovalPolicy({ serverKey: this.serverKey }),
     ]);
@@ -171,6 +178,7 @@ export class KiroIntegrationManager {
         await materializeDirectRuntime({
           extensionRoot: this.extensionRoot,
           stateRoot: this.paths.stateRoot.fsPath,
+          packageVersion: this.packageVersion,
         })
       ).changed || changed;
     await this.initializeRuntime(pythonExecutable);

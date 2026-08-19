@@ -5,7 +5,7 @@
   "version": "0.1.0",
   "publisher": "kiro-security-power",
   "private": true,
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "Apache-2.0",
   "engines": {
     "vscode": "^1.85.0"
   },

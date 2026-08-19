@@ -40,9 +40,15 @@ test("setup view connects steering, direct MCP, and Hook without Agent or Power 
   );
   assert.match(setupHtml, /Content-Security-Policy/);
   assert.match(extension, /getOrCreateInstallationServerKey/);
+  assert.match(extension, /if \(!isSupportedKiroHost\(vscode\.env\)\)/);
+  assert.ok(
+    extension.indexOf("if (!isSupportedKiroHost(vscode.env))") <
+      extension.indexOf("prepareFoundationStorage(context)"),
+  );
   assert.match(extension, /new SecuritySetupView\(/);
   assert.doesNotMatch(extension, /promptForPendingUpdate/);
   assert.match(setup, /await this\.integration\.install\(\)/);
+  assert.match(setup, /requireSupportedKiroHost\(vscode\.env\)/);
   assert.doesNotMatch(setup, /showWarningMessage/);
   assert.doesNotMatch(integration, /before\.state === "mismatch"/);
   assert.match(setup, /context\.workspaceState\.get<RepositoryScope>/);
@@ -61,6 +67,26 @@ test("setup view connects steering, direct MCP, and Hook without Agent or Power 
     setup,
     /if \(message\.command === "selectTab"\)[\s\S]*return;[\s\S]*if \(this\.busy\)/,
   );
+});
+
+test("host detection is deterministic and unsupported hosts render read-only guidance", () => {
+  const { isSupportedKiroHost } = require(
+    "../out/packages/extension/src/hostEnvironment.js",
+  );
+  const { renderUnsupportedHostHtml } = require(
+    "../out/packages/extension/src/view/unsupportedHostView.js",
+  );
+
+  assert.equal(isSupportedKiroHost({ appName: "Kiro", uriScheme: "kiro" }), true);
+  assert.equal(
+    isSupportedKiroHost({ appName: "Visual Studio Code", uriScheme: "vscode" }),
+    false,
+  );
+  assert.equal(isSupportedKiroHost({ appName: "Cursor", uriScheme: "cursor" }), false);
+
+  const html = renderUnsupportedHostHtml({ cspSource: "vscode-webview:" });
+  assert.match(html, /Kiro IDE is required/);
+  assert.doesNotMatch(html, /connectIntegration|<script/);
 });
 
 test("integration manager coalesces concurrent Python resolution", async () => {
@@ -90,7 +116,10 @@ test("integration manager coalesces concurrent Python resolution", async () => {
   try {
     const { KiroIntegrationManager } = require(integrationPath);
     const manager = new KiroIntegrationManager(
-      { extensionUri: { fsPath: "/extension" } },
+      {
+        extensionUri: { fsPath: "/extension" },
+        extension: { packageJSON: { version: "0.1.0" } },
+      },
       {
         stateRoot: { fsPath: "/global/state" },
         scanRoot: { fsPath: "/global/state/scans" },
