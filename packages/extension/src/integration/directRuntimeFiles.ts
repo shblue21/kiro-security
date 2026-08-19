@@ -79,17 +79,13 @@ export async function inspectDirectRuntime(
       detail: "The direct MCP runtime has not been materialized in Extension global storage.",
     };
   }
-  const manifestFile = await readOptionalRegularFile(
-    path.join(getDirectRuntimeRoot(input.stateRoot), RUNTIME_MANIFEST_FILE_NAME),
-    "Materialized MCP runtime manifest",
-  );
-  if (manifestFile === undefined) {
+  const manifest = await readRuntimeManifest(input.stateRoot);
+  if (manifest === undefined) {
     return {
       ready: false,
-      detail: "The materialized MCP runtime predates version tracking.",
+      detail: "The materialized MCP runtime manifest is missing or invalid.",
     };
   }
-  const manifest = parseRuntimeManifest(manifestFile.contents);
   const sourceEngine = path.join(input.extensionRoot, "engine", "kiro_security");
   const [sourceDigest, destinationDigest] = await Promise.all([
     digestRuntime(sourceLauncher.contents, sourceEngine),
@@ -108,12 +104,6 @@ export async function inspectDirectRuntime(
     return {
       ready: true,
       detail: "The Extension global-storage MCP runtime is current.",
-    };
-  }
-  if (comparePackageVersions(manifest.packageVersion, input.packageVersion) > 0) {
-    return {
-      ready: false,
-      detail: `A newer MCP runtime (${manifest.packageVersion}) is installed.`,
     };
   }
   return {
@@ -137,22 +127,10 @@ export async function materializeDirectRuntime(
 async function materializeDirectRuntimeLocked(
   input: DirectRuntimeInput,
 ): Promise<{ readonly changed: boolean }> {
-  const runtimeRoot = getDirectRuntimeRoot(input.stateRoot);
-  const installedManifestFile = await readOptionalRegularFile(
-    path.join(runtimeRoot, RUNTIME_MANIFEST_FILE_NAME),
-    "Materialized MCP runtime manifest",
-  );
-  const installedManifest = installedManifestFile === undefined
-    ? undefined
-    : parseRuntimeManifest(installedManifestFile.contents);
-  if (
-    installedManifest !== undefined &&
-    comparePackageVersions(installedManifest.packageVersion, input.packageVersion) > 0
-  ) {
-    throw new Error(
-      `Refusing to replace newer Kiro Security runtime ${installedManifest.packageVersion} with ${input.packageVersion}.`,
-    );
+  if ((await inspectDirectRuntime(input)).ready) {
+    return { changed: false };
   }
+  const runtimeRoot = getDirectRuntimeRoot(input.stateRoot);
   const sourceLauncher = await readRequiredRegularFile(
     getPackagedLauncherPath(input.extensionRoot),
     "Packaged MCP launcher",
@@ -161,27 +139,16 @@ async function materializeDirectRuntimeLocked(
     sourceLauncher.contents,
     path.join(input.extensionRoot, "engine", "kiro_security"),
   );
-  if (
-    installedManifest?.packageVersion === input.packageVersion &&
-    installedManifest.runtimeDigest !== sourceDigest
-  ) {
-    throw new Error(
-      `Kiro Security runtime ${input.packageVersion} has conflicting packaged content.`,
-    );
-  }
-  if ((await inspectDirectRuntime(input)).ready) {
-    return { changed: false };
-  }
   const parent = path.dirname(runtimeRoot);
   await ensurePrivateDirectory(parent);
   const stagingRoot = await mkdtemp(
     path.join(parent, ".direct-mcp-staging-"),
   );
   try {
-    await cp(
-      getPackagedLauncherPath(input.extensionRoot),
+    await writeFile(
       path.join(stagingRoot, LAUNCHER_FILE_NAME),
-      { errorOnExist: true, force: false },
+      sourceLauncher.contents,
+      { flag: "wx", mode: 0o700 },
     );
     await mkdir(path.join(stagingRoot, "engine"), {
       recursive: true,
@@ -310,47 +277,60 @@ async function digestRuntime(
   return `sha256:${hash.digest("hex")}`;
 }
 
-function parseRuntimeManifest(contents: Buffer): RuntimeManifest {
+async function readRuntimeManifest(
+  stateRoot: string,
+): Promise<RuntimeManifest | undefined> {
+  let manifestFile;
+  try {
+    manifestFile = await readOptionalRegularFile(
+      path.join(getDirectRuntimeRoot(stateRoot), RUNTIME_MANIFEST_FILE_NAME),
+      "Materialized MCP runtime manifest",
+    );
+  } catch (error) {
+    // Coded errors are real I/O failures (EACCES, EIO) that re-materializing
+    // cannot fix; anything else is an abnormal on-disk state that can.
+    if (typeof error === "object" && error !== null && "code" in error) {
+      throw error;
+    }
+    return undefined;
+  }
+  return manifestFile === undefined
+    ? undefined
+    : parseRuntimeManifest(manifestFile.contents);
+}
+
+function parseRuntimeManifest(contents: Buffer): RuntimeManifest | undefined {
   let value: unknown;
   try {
     value = JSON.parse(contents.toString("utf8"));
   } catch {
-    throw new Error("The materialized MCP runtime manifest is not valid JSON.");
+    return undefined;
   }
   if (
     typeof value !== "object" ||
     value === null ||
+    Array.isArray(value) ||
     (value as { version?: unknown }).version !== 1 ||
-    typeof (value as { packageVersion?: unknown }).packageVersion !== "string" ||
+    !isPackageVersion((value as { packageVersion?: unknown }).packageVersion) ||
     !/^sha256:[0-9a-f]{64}$/.test(
       String((value as { runtimeDigest?: unknown }).runtimeDigest),
     )
   ) {
-    throw new Error("The materialized MCP runtime manifest is invalid.");
+    return undefined;
   }
-  const manifest = value as RuntimeManifest;
-  requirePackageVersion(manifest.packageVersion);
-  return manifest;
+  return value as RuntimeManifest;
 }
 
-function comparePackageVersions(left: string, right: string): number {
-  const leftParts = requirePackageVersion(left);
-  const rightParts = requirePackageVersion(right);
-  for (let index = 0; index < leftParts.length; index += 1) {
-    const difference = leftParts[index] - rightParts[index];
-    if (difference !== 0) {
-      return difference;
-    }
-  }
-  return 0;
+const PACKAGE_VERSION_PATTERN = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/;
+
+function isPackageVersion(value: unknown): value is string {
+  return typeof value === "string" && PACKAGE_VERSION_PATTERN.test(value);
 }
 
-function requirePackageVersion(value: string): readonly number[] {
-  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(value);
-  if (!match) {
+function requirePackageVersion(value: string): void {
+  if (!isPackageVersion(value)) {
     throw new Error(`Unsupported Extension package version: ${value}`);
   }
-  return match.slice(1).map(Number);
 }
 
 async function restrictTree(root: string): Promise<void> {

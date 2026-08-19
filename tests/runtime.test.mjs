@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -126,7 +126,7 @@ test("direct runtime materialization is serialized across extension hosts", asyn
   }
 });
 
-test("an older extension cannot replace a newer materialized runtime", async () => {
+test("the packaged runtime replaces any mismatched materialized runtime", async () => {
   const { inspectDirectRuntime, materializeDirectRuntime } = require(
     "../out/packages/extension/src/integration/integrationFiles.js",
   );
@@ -146,11 +146,39 @@ test("an older extension cannot replace a newer materialized runtime", async () 
     assert.equal((await materializeDirectRuntime(previous)).changed, true);
     assert.equal((await inspectDirectRuntime(current)).ready, false);
     assert.equal((await materializeDirectRuntime(current)).changed, true);
-    await assert.rejects(
-      materializeDirectRuntime(previous),
-      /Refusing to replace newer Kiro Security runtime 0\.2\.0 with 0\.1\.0/,
-    );
     assert.equal((await inspectDirectRuntime(current)).ready, true);
+    assert.equal((await materializeDirectRuntime(previous)).changed, true);
+    assert.equal((await inspectDirectRuntime(previous)).ready, true);
+    assert.equal((await inspectDirectRuntime(current)).ready, false);
+  } finally {
+    await rm(temporary, { force: true, recursive: true });
+  }
+});
+
+test("a corrupted runtime manifest self-heals on the next materialization", async () => {
+  const { inspectDirectRuntime, materializeDirectRuntime } = require(
+    "../out/packages/extension/src/integration/integrationFiles.js",
+  );
+  const temporary = await mkdtemp(join(tmpdir(), "kiro-runtime-manifest-test-"));
+  try {
+    const stateRoot = join(temporary, "global-state");
+    const input = {
+      extensionRoot: resolve("."),
+      stateRoot,
+      packageVersion: "0.1.0-beta.1",
+    };
+    assert.equal((await materializeDirectRuntime(input)).changed, true);
+    assert.equal((await inspectDirectRuntime(input)).ready, true);
+    const manifestPath = join(
+      stateRoot,
+      "runtime",
+      "direct-mcp",
+      "runtime-manifest.json",
+    );
+    await writeFile(manifestPath, '{"version":1,"packageVe');
+    assert.equal((await inspectDirectRuntime(input)).ready, false);
+    assert.equal((await materializeDirectRuntime(input)).changed, true);
+    assert.equal((await inspectDirectRuntime(input)).ready, true);
   } finally {
     await rm(temporary, { force: true, recursive: true });
   }
