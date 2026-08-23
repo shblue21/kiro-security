@@ -483,6 +483,10 @@ export class SecuritySetupView implements vscode.WebviewViewProvider {
 
   private async connectIntegration(): Promise<void> {
     const result = await this.integration.install();
+    if (result.restartRecommended) {
+      this.feedback =
+        "Security runtime updated. Restart Kiro if an existing chat was already using it.";
+    }
     this.output.appendLine(
       result.changed
         ? "Kiro Security is connected to normal Kiro chats."

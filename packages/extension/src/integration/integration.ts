@@ -58,6 +58,7 @@ export interface KiroIntegrationInspection {
 
 export interface KiroIntegrationMutation {
   readonly changed: boolean;
+  readonly restartRecommended: boolean;
 }
 
 export class KiroIntegrationManager {
@@ -168,19 +169,19 @@ export class KiroIntegrationManager {
       throw new Error(before.detail);
     }
     if (before.state === "ready") {
-      return { changed: false };
+      return { changed: false, restartRecommended: false };
     }
     const pythonExecutable =
       before.pythonExecutable ?? (await this.getPythonExecutable());
     let changed = false;
-    changed =
-      (
-        await materializeDirectRuntime({
-          extensionRoot: this.extensionRoot,
-          stateRoot: this.paths.stateRoot.fsPath,
-          packageVersion: this.packageVersion,
-        })
-      ).changed || changed;
+    const runtimeChanged = (
+      await materializeDirectRuntime({
+        extensionRoot: this.extensionRoot,
+        stateRoot: this.paths.stateRoot.fsPath,
+        packageVersion: this.packageVersion,
+      })
+    ).changed;
+    changed = runtimeChanged || changed;
     await this.initializeRuntime(pythonExecutable);
     changed =
       (
@@ -208,7 +209,10 @@ export class KiroIntegrationManager {
     if (after.state !== "ready") {
       throw new Error(after.detail);
     }
-    return { changed };
+    return {
+      changed,
+      restartRecommended: runtimeChanged && before.mcp.state !== "absent",
+    };
   }
 
   getPythonExecutable(): Promise<string> {

@@ -48,6 +48,8 @@ test("setup view connects steering, direct MCP, and Hook without Agent or Power 
   assert.match(extension, /new SecuritySetupView\(/);
   assert.doesNotMatch(extension, /promptForPendingUpdate/);
   assert.match(setup, /await this\.integration\.install\(\)/);
+  assert.match(setup, /result\.restartRecommended/);
+  assert.match(integration, /runtimeChanged && before\.mcp\.state !== "absent"/);
   assert.doesNotMatch(setup, /showWarningMessage/);
   assert.doesNotMatch(integration, /before\.state === "mismatch"/);
   assert.match(setup, /context\.workspaceState\.get<RepositoryScope>/);
