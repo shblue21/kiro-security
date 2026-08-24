@@ -609,7 +609,6 @@ class ScanLifecycleService:
                         "invalid_canonical_result",
                         "Canonical findings must contain a findings array.",
                     )
-                self._verify_completion_target(scan)
                 sealed_manifest = has_sealed_manifest(Path(scan["scan_dir"]))
                 if sealed_manifest:
                     try:
@@ -621,6 +620,7 @@ class ScanLifecycleService:
                     except ArtifactContractError as exc:
                         raise WorkbenchError("finalization_failed", str(exc))
                 else:
+                    self._verify_completion_target(scan)
                     completed_at = utc_now()
                     deps.semantic_artifacts.materialize_finalizer_inputs(
                         scan,
@@ -635,8 +635,6 @@ class ScanLifecycleService:
                         )
                     except ArtifactContractError as exc:
                         raise WorkbenchError("finalization_failed", str(exc))
-                self._verify_completion_target(scan)
-
             with deps.database.connect() as connection:
                 with immediate_transaction(connection):
                     scan = deps.require_owned_scan(

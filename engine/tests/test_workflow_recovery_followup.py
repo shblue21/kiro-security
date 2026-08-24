@@ -19,6 +19,10 @@ class RecoveryFollowupWorkflowTests(WorkflowTestCase):
             recovery["version"],
             self.owner_b,
         )
+        retried = self.workbench.claim_scan_recovery(
+            recovery["id"], recovery["version"], self.owner_b
+        )
+        self.assertEqual(retried["recoveryToken"], claimed["recoveryToken"])
         _other_workspace, other_scan = self._start()
         with self.assertRaisesRegex(WorkbenchError, "another scan"):
             self.workbench.get_scan_context(
@@ -152,6 +156,10 @@ class RecoveryFollowupWorkflowTests(WorkflowTestCase):
                 "generate",
             )
         self.workbench.set_finding_triage(occurrence_id, "open")
+        (self.target / "post-scan.txt").write_text(
+            "created before remediation\n",
+            encoding="utf-8",
+        )
         requested = self.workbench.request_finding_remediation(
             occurrence_id,
             "generate",
@@ -161,6 +169,10 @@ class RecoveryFollowupWorkflowTests(WorkflowTestCase):
             requested["version"],
             self.owner_b,
         )
+        retried = self.workbench.claim_remediation_action(
+            requested["requestId"], requested["version"], self.owner_b
+        )
+        self.assertEqual(retried["actionToken"], claimed["actionToken"])
         context = self.workbench.get_remediation_context(
             requested["requestId"],
             claimed["actionToken"],
@@ -295,6 +307,10 @@ class RecoveryFollowupWorkflowTests(WorkflowTestCase):
             requested["version"],
             self.owner_b,
         )
+        retried = self.workbench.claim_tracking_request(
+            requested["requestId"], requested["version"], self.owner_b
+        )
+        self.assertEqual(retried["trackingToken"], claimed["trackingToken"])
         context = self.workbench.get_tracking_context(
             requested["requestId"],
             claimed["trackingToken"],

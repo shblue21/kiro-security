@@ -5,14 +5,14 @@ import re
 
 from .artifacts import (
     COMPLETENESS,
-    CONFIDENCES,
     DISPOSITIONS,
     INVENTORY_STRATEGIES,
     REPORTABLE_SEVERITIES,
+    REPOSITORY_PATH_PATTERN,
     SCHEMA_VERSION,
-    SEVERITY_ORDER,
     ArtifactContractError,
     canonical_json_bytes,
+    finding_authoring_schema,
     validate_finding_authoring,
 )
 from .errors import WorkbenchError
@@ -359,11 +359,13 @@ def _validate_coverage(scan, content):
             _validate_relative(path, "%s[%d]" % (context, index), allow_dot=True)
 
     surfaces = content.get("surfaces")
-    if not isinstance(surfaces, list):
-        _invalid("coverage.surfaces must be an array.")
+    if not isinstance(surfaces, list) or not surfaces:
+        _invalid("coverage.surfaces must contain at least one explicit surface.")
     surface_ids = set()
     receipt_slugs = set()
     needs_follow_up = False
+    reviewed_path_count = 0
+    all_not_applicable = True
     for index, surface in enumerate(surfaces):
         context = "coverage.surfaces[%d]" % index
         if not isinstance(surface, dict):
@@ -380,6 +382,7 @@ def _validate_coverage(scan, content):
         disposition = surface.get("disposition")
         if disposition not in DISPOSITIONS:
             _invalid("%s.disposition is unsupported." % context)
+        all_not_applicable = all_not_applicable and disposition == "not_applicable"
         needs_follow_up = needs_follow_up or disposition == "needs_follow_up"
         for key in ("riskArea", "notes"):
             if key in surface:
@@ -393,11 +396,27 @@ def _validate_coverage(scan, content):
             receipt.get("reviewedPaths"),
             "%s.receipt.reviewedPaths" % context,
         )
+        reviewed_path_count += len(reviewed)
+        if (
+            disposition in ("reported", "no_issue_found", "rejected")
+            and not reviewed
+        ):
+            _invalid("%s requires at least one reviewed path." % context)
+        if (
+            disposition in ("not_applicable", "needs_follow_up")
+            and "notes" not in surface
+        ):
+            _invalid("%s requires notes explaining the disposition." % context)
         for path_index, path in enumerate(reviewed):
             _validate_relative(
                 path,
                 "%s.receipt.reviewedPaths[%d]" % (context, path_index),
             )
+    if reviewed_path_count == 0 and not all_not_applicable:
+        _invalid(
+            "Coverage requires at least one reviewed path unless every surface "
+            "is explicitly not applicable."
+        )
 
     exclusions = content.get("explicitExclusions")
     if not isinstance(exclusions, list):
@@ -618,7 +637,7 @@ def _validate_attack_path_decisions(results):
             has_priority = "priority" in instance
             severity = instance.get("finalSeverity")
 
-            if has_severity and (
+            if not has_severity or (
                 not isinstance(severity, str)
                 or severity not in ATTACK_PATH_SEVERITIES_BY_DISPOSITION[disposition]
             ):
@@ -671,6 +690,18 @@ def worklist_ids(value):
             raise WorkbenchError(
                 "invalid_artifact",
                 "Deep brief worklist contains duplicate ids.",
+            )
+        _validate_relative(
+            item["path"],
+            "Deep brief worklist[%d].path" % index,
+        )
+        if len(item["path"]) > 4096 or not re.fullmatch(
+            REPOSITORY_PATH_PATTERN,
+            item["path"],
+        ):
+            _invalid(
+                "Deep brief worklist[%d].path must be a canonical repository-relative path."
+                % index
             )
         result.add(item["id"])
     return result
@@ -910,11 +941,13 @@ def _record_array_schema(key):
 
 def _phase_result_array_schema(allowed_dispositions, attack_path=False):
     text = {"type": "string", "minLength": 1}
+    instance_required = ["instanceId", "disposition"]
     instance_properties = {
         "instanceId": text,
         "disposition": {"enum": sorted(allowed_dispositions)},
     }
     if attack_path:
+        instance_required.append("finalSeverity")
         instance_properties.update(
             {
                 "finalSeverity": {
@@ -939,7 +972,7 @@ def _phase_result_array_schema(allowed_dispositions, attack_path=False):
                     "minItems": 1,
                     "items": {
                         "type": "object",
-                        "required": ["instanceId", "disposition"],
+                        "required": instance_required,
                         "properties": instance_properties,
                         "additionalProperties": True,
                     },
@@ -1009,6 +1042,38 @@ def _coverage_schema(scan):
             "receipt": receipt,
         },
         "additionalProperties": True,
+        "allOf": [
+            {
+                "if": {
+                    "properties": {
+                        "disposition": {
+                            "enum": ["reported", "no_issue_found", "rejected"]
+                        }
+                    },
+                    "required": ["disposition"],
+                },
+                "then": {
+                    "properties": {
+                        "receipt": {
+                            "properties": {
+                                "reviewedPaths": {"minItems": 1},
+                            }
+                        }
+                    }
+                },
+            },
+            {
+                "if": {
+                    "properties": {
+                        "disposition": {
+                            "enum": ["not_applicable", "needs_follow_up"]
+                        }
+                    },
+                    "required": ["disposition"],
+                },
+                "then": {"required": ["notes"]},
+            },
+        ],
     }
     deferred = {
         "type": "object",
@@ -1033,7 +1098,7 @@ def _coverage_schema(scan):
         "properties": {"question": text, "followUpPrompt": text},
         "additionalProperties": True,
     }
-    return _schema(
+    schema = _schema(
         (
             "scanId",
             "mode",
@@ -1055,134 +1120,63 @@ def _coverage_schema(scan):
                 "const": [scan["scope"]],
             },
             "excludePaths": _string_array_schema(),
-            "surfaces": {"type": "array", "items": surface},
+            "surfaces": {"type": "array", "minItems": 1, "items": surface},
             "explicitExclusions": {"type": "array", "items": exclusion},
             "deferred": {"type": "array", "items": deferred},
             "openQuestions": {"type": "array", "items": question},
         },
     )
+    schema["allOf"] = [
+        {
+            "if": {
+                "properties": {"completeness": {"const": "complete"}},
+                "required": ["completeness"],
+            },
+            "then": {"properties": {"surfaces": {"minItems": 1}}},
+        }
+    ]
+    schema["anyOf"] = [
+        {
+            "properties": {
+                "surfaces": {
+                    "contains": {
+                        "type": "object",
+                        "required": ["receipt"],
+                        "properties": {
+                            "receipt": {
+                                "type": "object",
+                                "required": ["reviewedPaths"],
+                                "properties": {
+                                    "reviewedPaths": {"minItems": 1},
+                                },
+                            }
+                        },
+                    }
+                }
+            }
+        },
+        {
+            "properties": {
+                "surfaces": {
+                    "items": {
+                        "type": "object",
+                        "required": ["disposition"],
+                        "properties": {
+                            "disposition": {"const": "not_applicable"},
+                        },
+                    }
+                }
+            }
+        },
+    ]
+    return schema
 
 
 def _canonical_schema():
-    text = {"type": "string", "minLength": 1}
-    location = {
-        "type": "object",
-        "required": ["path", "startLine"],
-        "properties": {
-            "path": text,
-            "startLine": {"type": "integer", "minimum": 1},
-            "endLine": {"type": "integer", "minimum": 1},
-            "role": text,
-        },
-        "additionalProperties": True,
-    }
-    finding = {
-        "type": "object",
-        "required": [
-            "ruleId",
-            "identity",
-            "title",
-            "summary",
-            "severity",
-            "confidence",
-            "taxonomy",
-            "locations",
-            "rootCause",
-            "validation",
-            "attackPath",
-            "remediation",
-            "provenance",
-            "extensions",
-        ],
-        "properties": {
-            "ruleId": text,
-            "identity": {
-                "type": "object",
-                "required": ["anchor"],
-                "properties": {"anchor": text, "instance": text},
-                "additionalProperties": True,
-            },
-            "title": text,
-            "summary": text,
-            "severity": {
-                "type": "object",
-                "required": ["level"],
-                "properties": {
-                    "level": {"enum": sorted(SEVERITY_ORDER)},
-                    "score": {"type": "number", "minimum": 0, "maximum": 10},
-                    "scoringSystem": text,
-                    "vector": text,
-                    "rationale": text,
-                    "changeConditions": text,
-                },
-                "additionalProperties": True,
-            },
-            "confidence": {
-                "type": "object",
-                "required": ["level", "rationale"],
-                "properties": {
-                    "level": {"enum": sorted(CONFIDENCES)},
-                    "rationale": text,
-                },
-                "additionalProperties": True,
-            },
-            "taxonomy": {
-                "type": "object",
-                "required": ["category", "cwe"],
-                "properties": {
-                    "category": text,
-                    "cwe": {
-                        "type": "array",
-                        "minItems": 1,
-                        "items": text,
-                    },
-                },
-                "additionalProperties": True,
-            },
-            "locations": {"type": "array", "minItems": 1, "items": location},
-            "rootCause": {
-                "anyOf": [
-                    text,
-                    {
-                        "type": "object",
-                        "required": ["summary"],
-                        "properties": {"summary": text},
-                        "additionalProperties": True,
-                    },
-                ]
-            },
-            "validation": {"type": "object"},
-            "attackPath": {"type": "object"},
-            "remediation": text,
-            "provenance": {
-                "type": "object",
-                "required": ["source"],
-                "properties": {"source": text},
-                "additionalProperties": True,
-            },
-            "writeup": {
-                "type": "object",
-                "required": ["reportPath"],
-                "properties": {
-                    "reportPath": {
-                        "type": "string",
-                        "pattern": r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$",
-                    }
-                },
-                "additionalProperties": True,
-            },
-            "extensions": {
-                "type": "object",
-                "required": ["candidateId", "candidateInstanceId"],
-                "properties": {
-                    "candidateId": text,
-                    "candidateInstanceId": text,
-                },
-                "additionalProperties": True,
-            },
-        },
-        "additionalProperties": True,
-    }
+    finding = finding_authoring_schema(
+        required_sections=("rootCause", "validation", "attackPath"),
+        required_extension_fields=("candidateId", "candidateInstanceId"),
+    )
     return _schema(
         ("scanId", "manifest", "findings"),
         {
@@ -1281,7 +1275,12 @@ def _brief_schema(scan):
                 "additionalProperties": True,
                 "properties": {
                     "id": {"type": "string", "minLength": 1},
-                    "path": {"type": "string", "minLength": 1},
+                    "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4096,
+                        "pattern": REPOSITORY_PATH_PATTERN,
+                    },
                 },
             },
         }

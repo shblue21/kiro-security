@@ -587,7 +587,7 @@ class Workbench:
             if state == "generated":
                 self.remediation_integrity.verify_checkout(
                     scan,
-                    scan["target_snapshot_digest"],
+                    attempt["base_content_digest"],
                 )
                 self.remediation_integrity.verify_patch(
                     scan,

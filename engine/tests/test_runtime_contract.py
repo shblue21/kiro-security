@@ -135,7 +135,7 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertIn("Wait for the user's answer", reporting)
         self.assertNotIn("Matrix row impact=unknown", reporting)
 
-    def test_attack_path_decisions_are_consistent_when_optional_fields_exist(self):
+    def test_attack_path_decisions_require_consistent_final_severity(self):
         scan = {
             "id": "scan-contract-test",
             "mode": "standard",
@@ -145,7 +145,10 @@ class RuntimeContractTests(unittest.TestCase):
         instance_schema = descriptor_schemas(scan)["attack-path"]["properties"][
             "results"
         ]["items"]["properties"]["instances"]["items"]
-        self.assertEqual(instance_schema["required"], ["instanceId", "disposition"])
+        self.assertEqual(
+            instance_schema["required"],
+            ["instanceId", "disposition", "finalSeverity"],
+        )
         self.assertEqual(
             set(instance_schema["properties"]["finalSeverity"]["enum"]),
             {"critical", "high", "medium", "low", "ignore", "unknown"},
@@ -156,12 +159,12 @@ class RuntimeContractTests(unittest.TestCase):
         )
 
         cases = (
-            (True, {"disposition": "reportable", "priority": "P1"}),
             (True, {"disposition": "reportable", "finalSeverity": "low"}),
             (True, {"disposition": "reportable", "finalSeverity": "low", "priority": "P3"}),
-            (True, {"disposition": "ignored"}),
             (True, {"disposition": "ignored", "finalSeverity": "ignore"}),
             (True, {"disposition": "deferred", "finalSeverity": "unknown"}),
+            (False, {"disposition": "reportable", "priority": "P1"}),
+            (False, {"disposition": "ignored"}),
             (False, {"disposition": "reportable", "finalSeverity": "ignore"}),
             (False, {"disposition": "ignored", "finalSeverity": "low"}),
             (False, {"disposition": "ignored", "priority": "P3"}),

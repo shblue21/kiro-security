@@ -609,9 +609,7 @@ function remediationPromptButtonHtml(
   }
   return `<button class="primary" data-command="copyRemediationPrompt" data-request-id="${escapeHtml(
     request.requestId,
-  )}" data-action="${escapeHtml(action)}" data-version="${
-    request.version
-  }">Copy ${remediationActionLabel(action).toLowerCase()} prompt again</button>`;
+  )}">Copy ${remediationActionLabel(action).toLowerCase()} prompt again</button>`;
 }
 
 function remediationButtonHtml(

@@ -53,7 +53,11 @@ test("setup view connects steering, direct MCP, and Hook without Agent or Power 
   assert.doesNotMatch(setup, /showWarningMessage/);
   assert.doesNotMatch(integration, /before\.state === "mismatch"/);
   assert.match(setup, /context\.workspaceState\.get<RepositoryScope>/);
-  assert.match(setup, /vscode\.workspace\.workspaceFolders/);
+  const scanAccess = readFileSync(
+    "packages/extension/src/view/scanAccess.ts",
+    "utf8",
+  );
+  assert.match(scanAccess, /vscode\.workspace\.workspaceFolders/);
   assert.match(setup, /dashboard: projectedDashboard/);
   assert.match(setup, /requireWorkspaceScanForOccurrence/);
   assert.match(setupHtml, /data-command="selectRepositoryScope"/);
@@ -515,11 +519,27 @@ test("workspace projection excludes unrelated repositories and linked requests",
 
 test("tracking action creates a durable backend request before copying a prompt", () => {
   const setup = readFileSync("packages/extension/src/view/setupView.ts", "utf8");
+  const prompts = readFileSync(
+    "packages/extension/src/view/chatPrompts.ts",
+    "utf8",
+  );
   assert.match(
     setup,
     /callWorkbench<[\s\S]*?>\("createTracking", \{\s*occurrenceId: exactOccurrence/,
   );
-  assert.match(setup, /Tracking request: \$\{tracking\.requestId\}/);
-  assert.match(setup, /Expected version: \$\{tracking\.version\}/);
-  assert.match(setup, /Claim and deliver the exact tracking request/);
+  assert.match(setup, /trackingPrompt\(tracking, exactOccurrence\)/);
+  assert.match(prompts, /Tracking request: \$\{tracking\.requestId\}/);
+  assert.match(prompts, /Expected version: \$\{tracking\.version\}/);
+  assert.match(prompts, /Claim and deliver the exact tracking request/);
+});
+
+test("remediation prompt refreshes the authoritative request before copying", () => {
+  const setup = readFileSync("packages/extension/src/view/setupView.ts", "utf8");
+  const html = readFileSync(
+    "packages/extension/src/view/setupViewHtml.ts",
+    "utf8",
+  );
+  assert.match(setup, /copyCurrentRemediationPrompt/);
+  assert.match(setup, /callWorkbench<DashboardProjection>\("dashboard"\)/);
+  assert.doesNotMatch(html, /data-version=/);
 });

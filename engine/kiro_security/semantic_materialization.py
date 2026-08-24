@@ -172,18 +172,10 @@ def materialize_derived_hardening(root, manifest, hardening):
 
 def validate_derived_writeups(findings, writeups):
     finding_values = findings.get("findings", [])
-    if any(
-        not isinstance(finding.get("writeup"), dict)
-        or not isinstance(finding["writeup"].get("reportPath"), str)
-        for finding in finding_values
-    ):
-        raise WorkbenchError(
-            "derived_writeup_missing",
-            "Every canonical finding requires a derived writeup reference.",
-        )
     writeup_paths = {
         finding["writeup"]["reportPath"]
         for finding in finding_values
+        if isinstance(finding.get("writeup"), dict)
     }
     supplied_writeups = {
         output["path"]: output["markdown"]

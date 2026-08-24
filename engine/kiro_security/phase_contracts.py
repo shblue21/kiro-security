@@ -468,6 +468,8 @@ REPORTING = {
         "remains, partial when known scope is explicitly deferred, and unknown when "
         "completeness cannot be established. Saturation or a Deep round cap does not "
         "by itself prove complete coverage.",
+        "When no applicable source paths exist, record one not_applicable surface with "
+        "an exact reason instead of an empty complete coverage object.",
         "Build canonical manifest and findings JSON only from persisted threat-model, "
         "discovery, validation, and attack-path evidence. Include reportable findings "
         "only while preserving closure references required for non-reportable rows.",
@@ -478,6 +480,8 @@ REPORTING = {
         "Bind every canonical finding to exactly one attack-path instance through "
         "extensions.candidateId and extensions.candidateInstanceId. Reportable "
         "canonical bindings must exactly equal the reportable attack-path bindings.",
+        "Copy each persisted reportable finalSeverity verbatim into canonical "
+        "severity.level. Reporting does not re-rate severity.",
         "The canonical schema permits informational findings for ignored or deferred "
         "instances. Preserve them when present and exclude them from "
         "reportableFindingsCount and hardening gates. They do not require writeups, "

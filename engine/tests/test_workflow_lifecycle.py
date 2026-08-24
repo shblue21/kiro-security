@@ -1,17 +1,131 @@
 """Scan lifecycle, phase transition, finalization, and export coverage."""
 
 import json
+import re
 import subprocess
 import threading
 import unittest
+from copy import deepcopy
 from pathlib import Path
 
 from workflow_test_support import WorkflowTestCase
+from kiro_security.artifacts import (
+    ArtifactContractError,
+    finding_authoring_schema,
+    validate_finding_authoring,
+)
 from kiro_security.errors import WorkbenchError
 from kiro_security.models import DiffTarget, WorkspaceSetup
+from kiro_security.semantic_materialization import validate_derived_writeups
 
 
 class WorkflowLifecycleTests(WorkflowTestCase):
+    def test_canonical_authoring_schema_matches_runtime_constraints(self):
+        schema = finding_authoring_schema(
+            required_sections=("rootCause", "validation", "attackPath"),
+            required_extension_fields=("candidateId", "candidateInstanceId"),
+        )
+        properties = schema["properties"]
+
+        self.assertIs(properties["findingId"], False)
+        self.assertIs(properties["occurrenceId"], False)
+        self.assertIs(properties["fingerprints"], False)
+        self.assertEqual(
+            properties["ruleId"]["pattern"],
+            r"^[a-z0-9][a-z0-9._/-]*$",
+        )
+        self.assertEqual(
+            properties["identity"]["properties"]["anchor"]["pattern"],
+            properties["ruleId"]["pattern"],
+        )
+        self.assertEqual(
+            properties["severity"]["dependentRequired"],
+            {"score": ["scoringSystem"]},
+        )
+        self.assertNotIn(
+            "minItems",
+            properties["taxonomy"]["properties"]["cwe"],
+        )
+        self.assertEqual(
+            set(properties["codeEvidence"]["items"]["required"]),
+            {"id", "label", "path", "startLine", "code", "explanation"},
+        )
+        self.assertTrue(
+            re.fullmatch(
+                properties["locations"]["items"]["properties"]["path"]["pattern"],
+                "src/app.py",
+            )
+        )
+        self.assertFalse(
+            re.fullmatch(
+                properties["locations"]["items"]["properties"]["path"]["pattern"],
+                "../app.py",
+            )
+        )
+        self.assertTrue(
+            {"rootCause", "validation", "attackPath", "extensions"}.issubset(
+                schema["required"]
+            )
+        )
+        self.assertEqual(
+            properties["extensions"]["required"],
+            ["candidateId", "candidateInstanceId"],
+        )
+
+    def test_canonical_authoring_runtime_accepts_advertised_shape(self):
+        finding = self._finding()
+        finding["identity"].pop("instance")
+        finding["taxonomy"]["cwe"] = []
+        finding["codeEvidence"] = [
+            {
+                "id": "untrusted-input",
+                "label": "Untrusted input",
+                "path": "app.py",
+                "startLine": 1,
+                "endLine": 2,
+                "code": "def execute(value):\n    return value",
+                "explanation": "The caller controls value.",
+            }
+        ]
+        finding["rootCause"]["evidenceRefs"] = ["untrusted-input"]
+        validate_finding_authoring(finding, "finding")
+
+        invalid = deepcopy(finding)
+        invalid["identity"]["instance"] = ""
+        with self.assertRaises(ArtifactContractError):
+            validate_finding_authoring(invalid, "finding")
+
+        invalid = deepcopy(finding)
+        invalid["identity"]["anchor"] = "Class#method"
+        with self.assertRaises(ArtifactContractError):
+            validate_finding_authoring(invalid, "finding")
+
+        invalid = deepcopy(finding)
+        invalid["locations"][0]["path"] = "../app.py"
+        with self.assertRaises(ArtifactContractError):
+            validate_finding_authoring(invalid, "finding")
+
+        invalid = deepcopy(finding)
+        invalid["severity"].pop("scoringSystem")
+        with self.assertRaises(ArtifactContractError):
+            validate_finding_authoring(invalid, "finding")
+
+        invalid = deepcopy(finding)
+        invalid["locations"][0]["startLine"] = 2
+        invalid["locations"][0]["endLine"] = 1
+        with self.assertRaises(ArtifactContractError):
+            validate_finding_authoring(invalid, "finding")
+
+        invalid = deepcopy(finding)
+        invalid["rootCause"]["evidenceRefs"] = ["missing-evidence"]
+        with self.assertRaises(ArtifactContractError):
+            validate_finding_authoring(invalid, "finding")
+
+        invalid = deepcopy(finding)
+        invalid["findingId"] = "csf_000000000000000000000000"
+        with self.assertRaises(ArtifactContractError):
+            validate_finding_authoring(invalid, "finding")
+
     def test_invalid_canonical_replacement_is_side_effect_free(self):
         def reject_invalid_replacement(scan_id):
             contract = self.workbench.get_scan_artifact_contract(
@@ -246,6 +360,10 @@ class WorkflowLifecycleTests(WorkflowTestCase):
                         """,
                         (scan_id,),
                     )
+                (self.target / ("after-seal-%s.txt" % action)).write_text(
+                    "changed after seal\n",
+                    encoding="utf-8",
+                )
 
                 with self.assertRaises(WorkbenchError) as raised:
                     if action == "fail":
@@ -329,6 +447,19 @@ class WorkflowLifecycleTests(WorkflowTestCase):
             )
         self.assertEqual(raised.exception.code, "artifact_closure_incomplete")
         self.assertIn("derived-writeup", str(raised.exception))
+
+    def test_derived_writeup_requires_only_declared_references(self):
+        report_path = "findings/reportable/reportable.md"
+        supplied = validate_derived_writeups(
+            {
+                "findings": [
+                    {"writeup": {"reportPath": report_path}},
+                    {"severity": {"level": "informational"}},
+                ]
+            },
+            {"outputs": [{"path": report_path, "markdown": "# Reportable\n"}]},
+        )
+        self.assertEqual(supplied, {report_path: "# Reportable\n"})
 
     def test_reportable_count_resets_after_discovery_and_can_decrease(self):
         _workspace_id, scan_id = self._start()
@@ -421,6 +552,30 @@ class WorkflowLifecycleTests(WorkflowTestCase):
                 }
             )
         self.assertEqual(raised.exception.code, "invalid_artifact")
+
+    def test_canonical_severity_must_match_attack_path_final_severity(self):
+        with self.assertRaises(WorkbenchError) as raised:
+            self._complete(
+                finding_severity="critical",
+                attack_path_instance={
+                    "instanceId": "instance-1",
+                    "disposition": "reportable",
+                    "finalSeverity": "low",
+                    "priority": "P3",
+                },
+            )
+        self.assertEqual(raised.exception.code, "canonical_attack_path_mismatch")
+
+        _scan_id, completed = self._complete(
+            finding_severity="low",
+            attack_path_instance={
+                "instanceId": "instance-1",
+                "disposition": "reportable",
+                "finalSeverity": "low",
+                "priority": "P3",
+            },
+        )
+        self.assertEqual(completed["scan"]["status"], "complete")
 
     def test_semantic_artifacts_reject_symlinked_output_parent(self):
         outside = self.root / "outside"
@@ -818,6 +973,63 @@ class WorkflowLifecycleTests(WorkflowTestCase):
             )
         self.assertEqual(raised.exception.code, "unsafe_artifact_path")
 
+    def test_complete_coverage_requires_explicit_surface_evidence(self):
+        scan_id = self._advance_empty_standard_to_reporting()
+        coverage = {
+            "documentType": "codex-security.coverage",
+            "schemaVersion": "1.0",
+            "mode": "repository",
+            "completeness": "complete",
+            "inventoryStrategy": "repository",
+            "includePaths": ["."],
+            "excludePaths": [],
+            "surfaces": [],
+            "explicitExclusions": [],
+            "deferred": [],
+        }
+
+        contract = self.workbench.get_scan_artifact_contract(scan_id, self.owner_a)
+        coverage_schema = contract["descriptorSchemas"]["coverage"]
+        self.assertEqual(
+            coverage_schema["allOf"][0]["then"]["properties"]["surfaces"],
+            {"minItems": 1},
+        )
+        with self.assertRaises(WorkbenchError) as raised:
+            self._write(scan_id, "coverage", coverage)
+        self.assertEqual(raised.exception.code, "invalid_artifact")
+
+        reviewed_surface = {
+            "id": "python-source",
+            "label": "Python source",
+            "disposition": "no_issue_found",
+            "receipt": {"closed": True, "reviewedPaths": []},
+        }
+        coverage["surfaces"] = [reviewed_surface]
+        with self.assertRaises(WorkbenchError) as raised:
+            self._write(scan_id, "coverage", coverage)
+        self.assertEqual(raised.exception.code, "invalid_artifact")
+
+        not_applicable = {
+            "id": "source-inventory",
+            "label": "Source inventory",
+            "disposition": "not_applicable",
+            "receipt": {"closed": True, "reviewedPaths": []},
+        }
+        coverage["surfaces"] = [not_applicable]
+        with self.assertRaises(WorkbenchError) as raised:
+            self._write(scan_id, "coverage", coverage)
+        self.assertEqual(raised.exception.code, "invalid_artifact")
+
+        not_applicable["notes"] = "No applicable source paths exist."
+        self._write(scan_id, "coverage", coverage)
+        self._write(
+            scan_id,
+            "canonical-result",
+            {"manifest": {"scan": {}}, "findings": {"findings": []}},
+        )
+        completed = self.workbench.complete_scan(scan_id, self.owner_a)
+        self.assertEqual(completed["scan"]["status"], "complete")
+
     def test_phase_skip_and_unclosed_coverage_are_rejected(self):
         _workspace_id, scan_id = self._start()
         self._write(
@@ -950,6 +1162,37 @@ class WorkflowLifecycleTests(WorkflowTestCase):
             owner_session_hash=self.owner_a,
         )
         self.assertEqual(context["scan"]["phase"], "threat_model")
+
+        _workspace_id, deep_scan = self._start("deep")
+        deep_schema = self.workbench.get_scan_artifact_contract(
+            deep_scan,
+            self.owner_a,
+        )["descriptorSchemas"]["brief"]
+        self.assertIn(
+            "pattern",
+            deep_schema["properties"]["worklist"]["items"]["properties"]["path"],
+        )
+        for unsafe_path in (
+            "../outside.py",
+            "/tmp/outside.py",
+            "C:/Windows/System32/config/SAM",
+            "dir//app.py",
+            "dir/./app.py",
+            "dir/",
+            "dir/\tapp.py",
+            "a" * 4097,
+        ):
+            with self.subTest(unsafe_deep_worklist_path=unsafe_path):
+                with self.assertRaises(WorkbenchError) as raised:
+                    self._write(
+                        deep_scan,
+                        "brief",
+                        self._ready_brief(
+                            "deep",
+                            worklist=[{"id": "unsafe", "path": unsafe_path}],
+                        ),
+                    )
+                self.assertEqual(raised.exception.code, "invalid_artifact")
 
     def test_artifact_contract_discloses_only_the_current_phase(self):
         _workspace_id, scan_id = self._start()

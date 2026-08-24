@@ -20,12 +20,8 @@ from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 from urllib.parse import urlsplit
 
 from .artifact_projections import (
-    CLOSE_REASONS,
     REPORTABLE_SEVERITIES,
-    SARIF_LEVELS,
-    SARIF_SCHEMA,
     SEVERITY_ORDER,
-    TRIAGE_STATUSES,
     build_findings_csv,
     build_report_markdown,
     build_sarif,
@@ -65,6 +61,10 @@ DISPOSITIONS = {
 }
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._/-]*$")
+REPOSITORY_PATH_PATTERN = (
+    r"^(?:\./)?(?!/)(?![A-Za-z]:)(?!.*\\)(?!.*(?:^|/)\.\.?(/|$))"
+    r"(?!.*//)(?!.*[\u0000-\u001f\u007f])(?!.*\/$).+$"
+)
 _ID_RE = re.compile(r"^(?:csf|occ)_[a-f0-9]{24}$")
 _SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 _SNAPSHOT_RE = re.compile(r"^codex-security-snapshot/v1:sha256:[a-f0-9]{64}$")
@@ -108,6 +108,245 @@ def canonical_json_bytes(payload: Any) -> bytes:
     return (encoded + "\n").encode("utf-8")
 
 
+def finding_authoring_schema(
+    required_sections=(), required_extension_fields=()
+):
+    """Return the locally authored finding schema used before finalization.
+
+    The field shapes intentionally follow Codex Security 0.1.21's scan-draft
+    authoring contract. Kiro-only phase lineage is supplied by the caller.
+    """
+
+    text = {"type": "string", "minLength": 1, "pattern": r"\S"}
+    text_list = {"type": "array", "items": dict(text)}
+    slug = {
+        "type": "string",
+        "pattern": _SLUG_RE.pattern,
+    }
+    repository_path = {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "pattern": REPOSITORY_PATH_PATTERN,
+        "description": "A safe POSIX path relative to the scan target.",
+    }
+    location = {
+        "type": "object",
+        "required": ["path", "startLine"],
+        "properties": {
+            "path": repository_path,
+            "startLine": {"type": "integer", "minimum": 1},
+            "endLine": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "When present, must be greater than or equal to startLine.",
+            },
+            "role": dict(text),
+        },
+        "additionalProperties": True,
+    }
+    evidence = {
+        "type": "object",
+        "required": [
+            "id",
+            "label",
+            "path",
+            "startLine",
+            "code",
+            "explanation",
+        ],
+        "properties": {
+            "id": dict(slug),
+            "label": dict(text),
+            "path": repository_path,
+            "startLine": {"type": "integer", "minimum": 1},
+            "endLine": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "When present, must be greater than or equal to startLine.",
+            },
+            "language": dict(text),
+            "role": dict(text),
+            "code": {
+                **text,
+                "description": "The genuine source snippet at this evidence location.",
+            },
+            "explanation": dict(text),
+        },
+        "additionalProperties": True,
+    }
+    evidence_section = {
+        "type": "object",
+        "properties": {
+            "evidenceRefs": {
+                **text_list,
+                "description": "Every value must name an id in codeEvidence.",
+            }
+        },
+        "additionalProperties": True,
+    }
+    extension_properties = {
+        key: dict(text) for key in required_extension_fields
+    }
+    required = [
+        "ruleId",
+        "identity",
+        "title",
+        "summary",
+        "severity",
+        "confidence",
+        "taxonomy",
+        "locations",
+        "remediation",
+        "provenance",
+    ]
+    required.extend(required_sections)
+    if required_extension_fields:
+        required.append("extensions")
+
+    return {
+        "type": "object",
+        "required": required,
+        "properties": {
+            "findingId": False,
+            "occurrenceId": False,
+            "fingerprints": False,
+            "ruleId": {
+                **slug,
+                "description": (
+                    "A stable lowercase vulnerability-family slug; CWE belongs "
+                    "in taxonomy, not in ruleId."
+                ),
+                "examples": ["java.mqtt.server-redirect"],
+            },
+            "identity": {
+                "type": "object",
+                "required": ["anchor"],
+                "properties": {
+                    "anchor": {
+                        **slug,
+                        "description": "A stable semantic root-control anchor.",
+                        "examples": ["mqtt-client-impl.pick-server"],
+                    },
+                    "instance": {
+                        **slug,
+                        "description": (
+                            "An independently attackable sibling instance. Omit "
+                            "this field when no instance is needed."
+                        ),
+                        "examples": ["connack-redirect"],
+                    },
+                },
+                "additionalProperties": True,
+            },
+            "title": dict(text),
+            "summary": dict(text),
+            "severity": {
+                "type": "object",
+                "required": ["level"],
+                "properties": {
+                    "level": {"enum": sorted(SEVERITY_ORDER)},
+                    "score": {"type": "number", "minimum": 0, "maximum": 10},
+                    "scoringSystem": dict(text),
+                    "vector": dict(text),
+                    "rationale": dict(text),
+                    "changeConditions": dict(text),
+                },
+                "dependentRequired": {"score": ["scoringSystem"]},
+                "additionalProperties": True,
+            },
+            "confidence": {
+                "type": "object",
+                "required": ["level", "rationale"],
+                "properties": {
+                    "level": {"enum": sorted(CONFIDENCES)},
+                    "rationale": dict(text),
+                },
+                "additionalProperties": True,
+            },
+            "taxonomy": {
+                "type": "object",
+                "required": ["category", "cwe"],
+                "properties": {
+                    "category": dict(text),
+                    "cwe": {
+                        **text_list,
+                        "description": (
+                            "Use an empty array when no CWE is established; do not "
+                            "invent one."
+                        ),
+                    },
+                },
+                "additionalProperties": True,
+            },
+            "locations": {"type": "array", "minItems": 1, "items": location},
+            "codeEvidence": {"type": "array", "items": evidence},
+            "rootCause": {
+                "anyOf": [
+                    dict(text),
+                    {
+                        **evidence_section,
+                        "required": ["summary"],
+                        "properties": {
+                            **evidence_section["properties"],
+                            "summary": dict(text),
+                            "code": dict(text),
+                            "language": dict(text),
+                        },
+                    },
+                ]
+            },
+            "validation": evidence_section,
+            "attackPath": evidence_section,
+            "remediation": dict(text),
+            "remediationTests": text_list,
+            "preventiveControls": text_list,
+            "provenance": {
+                "type": "object",
+                "required": ["source"],
+                "properties": {"source": dict(text)},
+                "additionalProperties": True,
+            },
+            "writeup": {
+                "type": "object",
+                "required": ["reportPath"],
+                "properties": {
+                    "reportPath": {
+                        "type": "string",
+                        "pattern": _WRITEUP_RE.pattern,
+                    }
+                },
+                "additionalProperties": True,
+            },
+            "extensions": {
+                "type": "object",
+                "required": list(required_extension_fields),
+                "properties": extension_properties,
+                "additionalProperties": True,
+            },
+        },
+        "additionalProperties": True,
+        "allOf": [
+            {
+                "if": {
+                    "type": "object",
+                    "required": ["severity"],
+                    "properties": {
+                        "severity": {
+                            "type": "object",
+                            "required": ["level"],
+                            "properties": {
+                                "level": {"enum": sorted(REPORTABLE_SEVERITIES)},
+                            },
+                        }
+                    },
+                },
+                "then": {"required": ["writeup"]},
+            }
+        ],
+    }
+
+
 def derive_finding_identity(
     target_id: str, scan_id: str, finding: Mapping[str, Any]
 ) -> FindingIdentity:
@@ -123,7 +362,9 @@ def derive_finding_identity(
         raise ArtifactContractError(
             "finding.identity.anchor: expected a lowercase semantic slug"
         )
-    if not isinstance(instance, str) or (instance and not _SLUG_RE.fullmatch(instance)):
+    if "instance" in identity and (
+        not isinstance(instance, str) or not _SLUG_RE.fullmatch(instance)
+    ):
         raise ArtifactContractError(
             "finding.identity.instance: expected a lowercase semantic slug"
         )

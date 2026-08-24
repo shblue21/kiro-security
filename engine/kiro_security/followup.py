@@ -67,6 +67,14 @@ class FollowupStore:
         with self.database.connect() as connection:
             with immediate_transaction(connection):
                 request = _require_recovery(connection, request_uuid)
+                if (
+                    request["status"] == "claimed"
+                    and request["version"] == version + 1
+                    and request["claimed_session_hash"] == owner_hash
+                    and request["claimed_at"] is not None
+                    and now - request["claimed_at"] < RECOVERY_CLAIM_SECONDS
+                ):
+                    return _recovery_state(request, include_token=True)
                 if request["version"] != version:
                     raise WorkbenchError(
                         "recovery_changed",
@@ -142,6 +150,15 @@ class FollowupStore:
                         "recovery_scan_mismatch",
                         "Recovery request belongs to another scan.",
                     )
+                if (
+                    request["status"] == "delivered"
+                    and request["version"] == version + 1
+                    and request["claimed_session_hash"] == owner_hash
+                    and request["claim_token"] == token
+                    and request["delivered_at"] is not None
+                    and now - request["delivered_at"] < RECOVERY_CLAIM_SECONDS
+                ):
+                    return _recovery_state(request)
                 _require_recovery_claim(request, token, version, owner_hash, now)
                 updated = connection.execute(
                     """
@@ -369,22 +386,30 @@ class FollowupStore:
         with self.database.connect() as connection:
             with immediate_transaction(connection):
                 attempt = _require_remediation(connection, request_uuid)
+                reference = (
+                    attempt["pending_action_delivered_at"]
+                    if attempt["pending_action_delivered_at"] is not None
+                    else attempt["pending_action_claimed_at"]
+                )
+                ttl = (
+                    REMEDIATION_WORKER_SECONDS
+                    if attempt["pending_action_delivered_at"] is not None
+                    else REMEDIATION_CLAIM_SECONDS
+                )
+                if (
+                    attempt["pending_action_claim_token"] is not None
+                    and attempt["version"] == version + 1
+                    and attempt["claimed_session_hash"] == owner_hash
+                    and reference is not None
+                    and now - reference < ttl
+                ):
+                    return _remediation_state(attempt, include_token=True)
                 if attempt["version"] != version or attempt["pending_action"] is None:
                     raise WorkbenchError(
                         "remediation_changed",
                         "Remediation action version or state does not match.",
                     )
                 if attempt["pending_action_claim_token"] is not None:
-                    reference = (
-                        attempt["pending_action_delivered_at"]
-                        if attempt["pending_action_delivered_at"] is not None
-                        else attempt["pending_action_claimed_at"]
-                    )
-                    ttl = (
-                        REMEDIATION_WORKER_SECONDS
-                        if attempt["pending_action_delivered_at"] is not None
-                        else REMEDIATION_CLAIM_SECONDS
-                    )
                     if (
                         attempt["claimed_session_hash"] == owner_hash
                         and reference is not None
@@ -618,6 +643,14 @@ class FollowupStore:
         with self.database.connect() as connection:
             with immediate_transaction(connection):
                 request = _require_tracking(connection, request_uuid)
+                if (
+                    request["status"] == "claimed"
+                    and request["version"] == version + 1
+                    and request["claimed_session_hash"] == owner_hash
+                    and request["claimed_at"] is not None
+                    and now - request["claimed_at"] < RECOVERY_CLAIM_SECONDS
+                ):
+                    return _tracking_state(request, include_token=True)
                 if request["version"] != version:
                     raise WorkbenchError(
                         "tracking_changed",
@@ -679,7 +712,7 @@ class FollowupStore:
                 request = _require_tracking(connection, request_uuid)
                 if request["status"] == "delivered":
                     if (
-                        request["version"] != version
+                        request["version"] not in (version, version + 1)
                         or request["claimed_session_hash"] != owner_hash
                         or request["claim_token"] != token
                     ):
@@ -885,8 +918,13 @@ def _require_remediation_claim(
         else attempt["pending_action_claimed_at"]
     )
     ttl = REMEDIATION_WORKER_SECONDS if delivered else REMEDIATION_CLAIM_SECONDS
+    version_matches = attempt["version"] == version or (
+        allow_delivered
+        and delivered
+        and attempt["version"] == version + 1
+    )
     if (
-        attempt["version"] != version
+        not version_matches
         or attempt["claimed_session_hash"] != owner_hash
         or attempt["pending_action_claim_token"] != token
         or reference is None

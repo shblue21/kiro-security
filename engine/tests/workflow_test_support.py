@@ -256,6 +256,9 @@ class WorkflowTestCase(unittest.TestCase):
                                 "disposition": (
                                     "reportable" if reportable else "ignored"
                                 ),
+                                "finalSeverity": (
+                                    finding_severity if reportable else "ignore"
+                                ),
                             }
                         ],
                     }
