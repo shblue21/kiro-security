@@ -1,22 +1,14 @@
-import {
-  lstat,
-  readFile,
-  rename,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { lstat, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import * as path from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { randomUUID } from "node:crypto";
 
 import { buildDirectMcpContract } from "./integrationConfig";
 import {
-  ensurePrivateDirectory,
   isMissing,
   readOptionalRegularFile,
   readRequiredRegularFile,
-  restrictFile,
+  writeDedicatedFile,
 } from "./localFileSafety";
 
 export const HOOK_FILE_NAME = "kiro-security-power.json";
@@ -184,25 +176,11 @@ export async function installHookRegistration(input: {
     throw new Error(inspection.detail);
   }
 
-  const hookDirectory = path.dirname(input.hookPath);
-  await ensurePrivateDirectory(hookDirectory, false);
-  const stagingPath = path.join(
-    hookDirectory,
-    `.${HOOK_FILE_NAME}.staging-${randomUUID()}`,
+  await writeDedicatedFile(
+    input.hookPath,
+    Buffer.from(`${JSON.stringify(input.document, null, 2)}\n`, "utf8"),
+    0o600,
   );
-  try {
-    await writeFile(
-      stagingPath,
-      `${JSON.stringify(input.document, null, 2)}\n`,
-      { encoding: "utf8", flag: "wx", mode: 0o600 },
-    );
-    await restrictFile(stagingPath, 0o600);
-    await rename(stagingPath, input.hookPath);
-  } catch (error) {
-    await rm(stagingPath, { force: true });
-    throw error;
-  }
-
   return { changed: true };
 }
 
@@ -260,23 +238,7 @@ export async function materializeHookBridge(input: {
     return false;
   }
 
-  const bridgeDirectory = path.dirname(input.bridgePath);
-  await ensurePrivateDirectory(bridgeDirectory, false);
-  const stagingPath = path.join(
-    bridgeDirectory,
-    `.${HOOK_BRIDGE_FILE_NAME}.staging-${randomUUID()}`,
-  );
-  try {
-    await writeFile(stagingPath, source.contents, {
-      flag: "wx",
-      mode: 0o700,
-    });
-    await restrictFile(stagingPath, 0o700);
-    await rename(stagingPath, input.bridgePath);
-  } catch (error) {
-    await rm(stagingPath, { force: true });
-    throw error;
-  }
+  await writeDedicatedFile(input.bridgePath, source.contents, 0o700);
   return true;
 }
 

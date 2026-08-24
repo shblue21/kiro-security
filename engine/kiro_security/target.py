@@ -6,10 +6,11 @@ import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Dict, Optional, Tuple
+from typing import Optional
 
 from .errors import WorkbenchError
 from .models import DIFF_TARGET_KINDS, MODES, DiffTarget, WorkspaceSetup
+from .workbench_contract import optional_text as _optional_text
 
 EMPTY_GIT_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 GIT_REPOSITORY_ENVIRONMENT = (
@@ -598,13 +599,3 @@ def _file_digest(path):
     return digest.digest(), size
 
 
-def _optional_text(value, maximum=None):
-    # type: (Optional[str], Optional[int]) -> Optional[str]
-    if value is None:
-        return None
-    normalized = value.strip()
-    if not normalized:
-        return None
-    if maximum is not None and len(normalized) > maximum:
-        raise WorkbenchError("text_too_long", "Text input exceeds the supported length.")
-    return normalized

@@ -28,10 +28,13 @@ import {
 import { findDuplicateJsonObjectKey } from "./jsonSafety";
 import {
   ensurePrivateDirectory as ensureDirectory,
+  inspectDedicatedFile,
   isMissing,
   readOptionalRegularFile,
   readRequiredRegularFile,
   restrictFile,
+  writeDedicatedFile,
+  type IntegrationFileInspection,
 } from "./localFileSafety";
 import { withSharedFileLock } from "./sharedFileLock";
 
@@ -51,16 +54,10 @@ export {
   type RuntimeInspection,
 } from "./directRuntimeFiles";
 
-export type IntegrationFileState =
-  | "absent"
-  | "installed"
-  | "mismatch"
-  | "conflict";
-
-export interface IntegrationFileInspection {
-  readonly state: IntegrationFileState;
-  readonly detail: string;
-}
+export type {
+  IntegrationFileState,
+  IntegrationFileInspection,
+} from "./localFileSafety";
 
 export interface IntegrationMutation {
   readonly changed: boolean;
@@ -284,32 +281,6 @@ async function installMcpRegistrationLocked(input: {
   return { changed: true, removedServerKeys: staleServerKeys };
 }
 
-async function inspectDedicatedFile(
-  filePath: string,
-  expected: Buffer,
-): Promise<IntegrationFileInspection> {
-  let current;
-  try {
-    current = await readOptionalRegularFile(filePath, "Dedicated integration file");
-  } catch (error) {
-    return { state: "conflict", detail: errorMessage(error) };
-  }
-  if (current === undefined) {
-    return { state: "absent", detail: "The dedicated file is not installed." };
-  }
-  const permissionsReady =
-    process.platform === "win32" || (current.mode & 0o077) === 0;
-  if (current.contents.equals(expected) && permissionsReady) {
-    return { state: "installed", detail: "The dedicated file is current." };
-  }
-  return {
-    state: "mismatch",
-    detail: permissionsReady
-      ? "The dedicated file differs from this Extension version."
-      : "The dedicated file permissions are too broad.",
-  };
-}
-
 type McpDocument =
   | { readonly kind: "absent" }
   | { readonly kind: "unsafe"; readonly detail: string }
@@ -495,27 +466,6 @@ async function writeSharedConfig(
     } else {
       throw new Error(snapshot.detail);
     }
-    await rename(stagingPath, filePath);
-  } catch (error) {
-    await rm(stagingPath, { force: true });
-    throw error;
-  }
-}
-
-async function writeDedicatedFile(
-  filePath: string,
-  contents: Buffer,
-  mode: number,
-): Promise<void> {
-  const directory = path.dirname(filePath);
-  await ensureDirectory(directory, false);
-  const stagingPath = path.join(
-    directory,
-    `.${path.basename(filePath)}.staging-${randomUUID()}`,
-  );
-  try {
-    await writeFile(stagingPath, contents, { flag: "wx", mode });
-    await restrictFile(stagingPath, mode);
     await rename(stagingPath, filePath);
   } catch (error) {
     await rm(stagingPath, { force: true });

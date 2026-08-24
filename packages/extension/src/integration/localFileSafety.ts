@@ -1,9 +1,14 @@
+import { randomUUID } from "node:crypto";
 import {
   chmod,
   lstat,
   mkdir,
   readFile,
+  rename,
+  rm,
+  writeFile,
 } from "node:fs/promises";
+import * as path from "node:path";
 
 export interface RegularFileSnapshot {
   readonly contents: Buffer;
@@ -82,4 +87,65 @@ export function isMissing(error: unknown): boolean {
     "code" in error &&
     (error as NodeJS.ErrnoException).code === "ENOENT"
   );
+}
+
+export type IntegrationFileState =
+  | "absent"
+  | "installed"
+  | "mismatch"
+  | "conflict";
+
+export interface IntegrationFileInspection {
+  readonly state: IntegrationFileState;
+  readonly detail: string;
+}
+
+export async function inspectDedicatedFile(
+  filePath: string,
+  expected: Buffer,
+): Promise<IntegrationFileInspection> {
+  let current;
+  try {
+    current = await readOptionalRegularFile(filePath, "Dedicated integration file");
+  } catch (error) {
+    return {
+      state: "conflict",
+      detail: error instanceof Error ? error.message : String(error),
+    };
+  }
+  if (current === undefined) {
+    return { state: "absent", detail: "The dedicated file is not installed." };
+  }
+  const permissionsReady =
+    process.platform === "win32" || (current.mode & 0o077) === 0;
+  if (current.contents.equals(expected) && permissionsReady) {
+    return { state: "installed", detail: "The dedicated file is current." };
+  }
+  return {
+    state: "mismatch",
+    detail: permissionsReady
+      ? "The dedicated file differs from this Extension version."
+      : "The dedicated file permissions are too broad.",
+  };
+}
+
+export async function writeDedicatedFile(
+  filePath: string,
+  contents: Buffer,
+  mode: number,
+): Promise<void> {
+  const directory = path.dirname(filePath);
+  await ensurePrivateDirectory(directory, false);
+  const stagingPath = path.join(
+    directory,
+    `.${path.basename(filePath)}.staging-${randomUUID()}`,
+  );
+  try {
+    await writeFile(stagingPath, contents, { flag: "wx", mode });
+    await restrictFile(stagingPath, mode);
+    await rename(stagingPath, filePath);
+  } catch (error) {
+    await rm(stagingPath, { force: true });
+    throw error;
+  }
 }
