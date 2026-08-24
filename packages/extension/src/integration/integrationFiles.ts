@@ -522,7 +522,3 @@ function base32(value: Buffer): string {
   }
   return output;
 }
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}

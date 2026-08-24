@@ -37,7 +37,7 @@ def bind_finalizer_inputs(
     scan_manifest.pop("artifacts", None)
     scan_manifest["coverageRef"] = "coverage.json"
     scan_manifest["findingsRef"] = "findings.json"
-    scan_manifest["producer"] = {"name": "Kiro Security", "version": "0.1.0"}
+    scan_manifest["producer"] = {"name": "Kiro Security", "version": "0.0.1"}
     target = {
         "targetId": target_id,
         "displayName": Path(scan["target_path"]).name,

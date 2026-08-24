@@ -28,7 +28,7 @@ test("direct runtime is materialized in global storage and launches the MCP serv
   try {
     const stateRoot = join(temporary, "global-state");
     const scanRoot = join(stateRoot, "scans");
-    const input = { extensionRoot: resolve("."), stateRoot, packageVersion: "0.1.0" };
+    const input = { extensionRoot: resolve("."), stateRoot, packageVersion: "0.0.1" };
     assert.equal((await materializeDirectRuntime(input)).changed, true);
     assert.equal((await materializeDirectRuntime(input)).changed, false);
     assert.equal((await inspectDirectRuntime(input)).ready, true);
@@ -87,7 +87,7 @@ test("direct runtime materialization is serialized across extension hosts", asyn
       materializeDirectRuntime({
         extensionRoot: process.env.EXTENSION_ROOT,
         stateRoot: process.env.STATE_ROOT,
-        packageVersion: "0.1.0",
+        packageVersion: "0.0.1",
       }).then(
         (result) => process.stdout.write(JSON.stringify(result)),
         (error) => { console.error(error); process.exitCode = 1; },
@@ -114,7 +114,7 @@ test("direct runtime materialization is serialized across extension hosts", asyn
       (await inspectDirectRuntime({
         extensionRoot: resolve("."),
         stateRoot,
-        packageVersion: "0.1.0",
+        packageVersion: "0.0.1",
       })).ready,
       true,
     );
@@ -136,7 +136,7 @@ test("the packaged runtime replaces any mismatched materialized runtime", async 
     const previous = {
       extensionRoot: resolve("."),
       stateRoot,
-      packageVersion: "0.1.0",
+      packageVersion: "0.0.1",
     };
     const current = {
       extensionRoot: resolve("."),
@@ -165,7 +165,7 @@ test("a corrupted runtime manifest self-heals on the next materialization", asyn
     const input = {
       extensionRoot: resolve("."),
       stateRoot,
-      packageVersion: "0.1.0-beta.1",
+      packageVersion: "0.0.1-beta.1",
     };
     assert.equal((await materializeDirectRuntime(input)).changed, true);
     assert.equal((await inspectDirectRuntime(input)).ready, true);

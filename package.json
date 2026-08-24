@@ -2,7 +2,7 @@
   "name": "kiro-security-power",
   "displayName": "Kiro Security Power",
   "description": "A Kiro-native security workbench rebuilt from the Codex Security 0.1.11 architecture.",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "publisher": "kiro-security-power",
   "private": true,
   "license": "Apache-2.0",

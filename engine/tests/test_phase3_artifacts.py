@@ -39,7 +39,7 @@ class ArtifactFinalizerTest(unittest.TestCase):
             "schemaVersion": "1.0",
             "scan": {
                 "id": self.scan_id,
-                "producer": {"name": "Kiro Security", "version": "0.1.0"},
+                "producer": {"name": "Kiro Security", "version": "0.0.1"},
                 "status": "completed",
                 "startedAt": "2026-07-30T09:00:00Z",
                 "completedAt": self.completed_at,

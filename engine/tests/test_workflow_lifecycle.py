@@ -1174,6 +1174,9 @@ class WorkflowLifecycleTests(WorkflowTestCase):
         )
         for unsafe_path in (
             "../outside.py",
+            "./..",
+            "./../outside.py",
+            "././app.py",
             "/tmp/outside.py",
             "C:/Windows/System32/config/SAM",
             "dir//app.py",

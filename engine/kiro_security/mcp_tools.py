@@ -8,7 +8,7 @@ from .models import DiffTarget, WorkspaceSetup
 from .workbench import Workbench
 
 SERVER_NAME = "kiro-security-power"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = "0.0.1"
 
 
 def _schema(properties, required=()):

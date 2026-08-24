@@ -127,7 +127,7 @@ test("integration manager coalesces concurrent Python resolution", async () => {
     const manager = new KiroIntegrationManager(
       {
         extensionUri: { fsPath: "/extension" },
-        extension: { packageJSON: { version: "0.1.0" } },
+        extension: { packageJSON: { version: "0.0.1" } },
       },
       {
         stateRoot: { fsPath: "/global/state" },

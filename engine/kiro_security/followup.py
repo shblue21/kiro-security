@@ -398,6 +398,7 @@ class FollowupStore:
                 )
                 if (
                     attempt["pending_action_claim_token"] is not None
+                    and attempt["pending_action"] is not None
                     and attempt["version"] == version + 1
                     and attempt["claimed_session_hash"] == owner_hash
                     and reference is not None

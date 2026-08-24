@@ -317,10 +317,10 @@ class SemanticArtifactStore(DeepScanRules):
         if round_number is None or _has_deep_artifact_after(present, round_number):
             return ()
         keys = [DEEP_WORKER_SCHEMA_KEY]
-        if not self._deep_workers_complete(scan, round_number, present):
-            keys.append(DEEP_CHECKPOINT_SCHEMA_KEY)
         if self._deep_workers_complete(scan, round_number, present):
             keys.append("discovery-round-<1..10>-merge")
+        else:
+            keys.append(DEEP_CHECKPOINT_SCHEMA_KEY)
         return tuple(keys)
 
     @staticmethod
@@ -527,7 +527,9 @@ class SemanticArtifactStore(DeepScanRules):
             ATTACK_PATH_INSTANCE_DISPOSITIONS,
         )
         expected_reportable = {
-            (result["candidateId"], instance["instanceId"]): instance["finalSeverity"]
+            (result["candidateId"], instance["instanceId"]): instance.get(
+                "finalSeverity"
+            )
             for result in attack_results
             for instance in result["instances"]
             if instance["disposition"] == "reportable"
