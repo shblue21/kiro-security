@@ -1,0 +1,298 @@
+import * as vscode from "vscode";
+
+import {
+  inspectApprovalPolicy,
+  installApprovalPolicy,
+  type ApprovalPolicyInspection,
+} from "./approvalPolicy";
+import {
+  ChatBindingManager,
+  type ChatBindingInspection,
+} from "./chatBinding";
+import type { FoundationPaths } from "../foundation";
+import {
+  buildDirectMcpContract,
+  buildDirectMcpServerConfiguration,
+  type DirectMcpContract,
+} from "./integrationConfig";
+import {
+  getDirectLauncherPath,
+  getDirectRuntimeRoot,
+  getPackagedSteeringPath,
+  getUserMcpConfigPath,
+  getUserSteeringPath,
+  initializeDirectRuntime,
+  inspectDirectRuntime,
+  inspectMcpRegistration,
+  inspectSteering,
+  installMcpRegistration,
+  installSteering,
+  materializeDirectRuntime,
+  type IntegrationFileInspection,
+  type RuntimeInspection,
+} from "./integrationFiles";
+import { resolvePythonExecutable } from "./pythonRuntime";
+
+export type KiroIntegrationState =
+  | "absent"
+  | "ready"
+  | "mismatch"
+  | "conflict"
+  | "unavailable";
+
+export interface KiroIntegrationInspection {
+  readonly state: KiroIntegrationState;
+  readonly detail: string;
+  readonly serverKey: string;
+  readonly hook: ChatBindingInspection;
+  readonly mcp: IntegrationFileInspection;
+  readonly steering: IntegrationFileInspection;
+  readonly runtime: RuntimeInspection;
+  readonly approval: ApprovalPolicyInspection;
+  readonly hookPath: string;
+  readonly mcpPath: string;
+  readonly steeringPath: string;
+  readonly runtimeRoot: string;
+  readonly pythonExecutable?: string;
+}
+
+export interface KiroIntegrationMutation {
+  readonly changed: boolean;
+  readonly restartRecommended: boolean;
+}
+
+export class KiroIntegrationManager {
+  readonly chatBinding: ChatBindingManager;
+  readonly contract: DirectMcpContract;
+  readonly serverKey: string;
+  readonly mcpPath = getUserMcpConfigPath();
+  readonly steeringPath = getUserSteeringPath();
+  readonly runtimeRoot: string;
+  readonly launcherPath: string;
+  private readonly extensionRoot: string;
+  private readonly packageVersion: string;
+  private readonly steeringSourcePath: string;
+  private pythonExecutablePromise: Promise<string> | undefined;
+
+  constructor(
+    context: vscode.ExtensionContext,
+    private readonly paths: FoundationPaths,
+    serverKey: string,
+  ) {
+    this.extensionRoot = context.extensionUri.fsPath;
+    const packageVersion = context.extension.packageJSON.version;
+    if (typeof packageVersion !== "string") {
+      throw new Error("The Extension package version is unavailable.");
+    }
+    this.packageVersion = packageVersion;
+    this.contract = buildDirectMcpContract(serverKey);
+    this.serverKey = this.contract.serverKey;
+    this.chatBinding = new ChatBindingManager(context, paths, this.contract);
+    this.runtimeRoot = getDirectRuntimeRoot(paths.stateRoot.fsPath);
+    this.launcherPath = getDirectLauncherPath(paths.stateRoot.fsPath);
+    this.steeringSourcePath = getPackagedSteeringPath(this.extensionRoot);
+  }
+
+  async inspect(): Promise<KiroIntegrationInspection> {
+    let pythonExecutable: string;
+    try {
+      pythonExecutable = await this.getPythonExecutable();
+    } catch (error) {
+      const [hook, approval] = await Promise.all([
+        this.chatBinding.inspectUnavailable(errorMessage(error)),
+        inspectApprovalPolicy({ serverKey: this.serverKey }),
+      ]);
+      return {
+        state: "unavailable",
+        detail: errorMessage(error),
+        serverKey: this.serverKey,
+        hook,
+        mcp: { state: "absent", detail: "Python is unavailable." },
+        steering: await inspectSteering({
+          sourcePath: this.steeringSourcePath,
+          steeringPath: this.steeringPath,
+        }),
+        runtime: { ready: false, detail: "Python is unavailable." },
+        approval,
+        hookPath: this.chatBinding.hookPath,
+        mcpPath: this.mcpPath,
+        steeringPath: this.steeringPath,
+        runtimeRoot: this.runtimeRoot,
+      };
+    }
+    const expected = this.expectedMcpConfiguration(pythonExecutable);
+    const [hook, mcp, steering, runtime, approval] = await Promise.all([
+      this.chatBinding.inspect(pythonExecutable),
+      inspectMcpRegistration({
+        mcpPath: this.mcpPath,
+        serverKey: this.serverKey,
+        expected,
+      }),
+      inspectSteering({
+        sourcePath: this.steeringSourcePath,
+        steeringPath: this.steeringPath,
+      }),
+      inspectDirectRuntime({
+        extensionRoot: this.extensionRoot,
+        stateRoot: this.paths.stateRoot.fsPath,
+        packageVersion: this.packageVersion,
+      }),
+      inspectApprovalPolicy({ serverKey: this.serverKey }),
+    ]);
+    const state = combinedState({ hook, mcp, steering, runtime, approval });
+    return {
+      state,
+      detail: [
+        hook.detail,
+        mcp.detail,
+        steering.detail,
+        runtime.detail,
+        approval.detail,
+      ].join(" "),
+      serverKey: this.serverKey,
+      hook,
+      mcp,
+      steering,
+      runtime,
+      approval,
+      hookPath: this.chatBinding.hookPath,
+      mcpPath: this.mcpPath,
+      steeringPath: this.steeringPath,
+      runtimeRoot: this.runtimeRoot,
+      pythonExecutable,
+    };
+  }
+
+  async install(): Promise<KiroIntegrationMutation> {
+    const before = await this.inspect();
+    if (before.state === "conflict" || before.state === "unavailable") {
+      throw new Error(before.detail);
+    }
+    if (before.state === "ready") {
+      return { changed: false, restartRecommended: false };
+    }
+    const pythonExecutable =
+      before.pythonExecutable ?? (await this.getPythonExecutable());
+    let changed = false;
+    const runtimeChanged = (
+      await materializeDirectRuntime({
+        extensionRoot: this.extensionRoot,
+        stateRoot: this.paths.stateRoot.fsPath,
+        packageVersion: this.packageVersion,
+      })
+    ).changed;
+    changed = runtimeChanged || changed;
+    await this.initializeRuntime(pythonExecutable);
+    changed =
+      (
+        await installSteering({
+          sourcePath: this.steeringSourcePath,
+          steeringPath: this.steeringPath,
+        })
+      ).changed || changed;
+    changed =
+      (await this.chatBinding.install(pythonExecutable)).changed || changed;
+    const mcpMutation = await installMcpRegistration({
+      mcpPath: this.mcpPath,
+      serverKey: this.serverKey,
+      expected: this.expectedMcpConfiguration(pythonExecutable),
+    });
+    changed = mcpMutation.changed || changed;
+    changed =
+      (
+        await installApprovalPolicy({
+          serverKey: this.serverKey,
+          staleServerKeys: mcpMutation.removedServerKeys,
+        })
+      ).changed || changed;
+    const after = await this.inspect();
+    if (after.state !== "ready") {
+      throw new Error(after.detail);
+    }
+    return {
+      changed,
+      restartRecommended: runtimeChanged && before.mcp.state !== "absent",
+    };
+  }
+
+  getPythonExecutable(): Promise<string> {
+    if (!this.pythonExecutablePromise) {
+      const resolution = resolvePythonExecutable();
+      this.pythonExecutablePromise = resolution;
+      void resolution.then(
+        () => {
+          if (this.pythonExecutablePromise === resolution) {
+            this.pythonExecutablePromise = undefined;
+          }
+        },
+        () => {
+          if (this.pythonExecutablePromise === resolution) {
+            this.pythonExecutablePromise = undefined;
+          }
+        },
+      );
+    }
+    return this.pythonExecutablePromise;
+  }
+
+  private expectedMcpConfiguration(pythonExecutable: string) {
+    return buildDirectMcpServerConfiguration({
+      serverKey: this.serverKey,
+      pythonExecutable,
+      launcherPath: this.launcherPath,
+      stateRoot: this.paths.stateRoot.fsPath,
+      scanRoot: this.paths.scanRoot.fsPath,
+    });
+  }
+
+  private initializeRuntime(pythonExecutable: string): Promise<void> {
+    return initializeDirectRuntime({
+      pythonExecutable,
+      launcherPath: this.launcherPath,
+      stateRoot: this.paths.stateRoot.fsPath,
+      scanRoot: this.paths.scanRoot.fsPath,
+    });
+  }
+}
+
+function combinedState(input: {
+  readonly hook: ChatBindingInspection;
+  readonly mcp: IntegrationFileInspection;
+  readonly steering: IntegrationFileInspection;
+  readonly runtime: RuntimeInspection;
+  readonly approval: ApprovalPolicyInspection;
+}): KiroIntegrationState {
+  if (
+    input.hook.state === "conflict" ||
+    input.mcp.state === "conflict" ||
+    input.steering.state === "conflict" ||
+    input.approval.state === "conflict"
+  ) {
+    return "conflict";
+  }
+  if (input.hook.state === "unavailable") {
+    return "unavailable";
+  }
+  if (
+    input.hook.state === "ready" &&
+    input.mcp.state === "installed" &&
+    input.steering.state === "installed" &&
+    input.runtime.ready &&
+    input.approval.state === "installed"
+  ) {
+    return "ready";
+  }
+  if (
+    input.hook.state === "absent" &&
+    input.mcp.state === "absent" &&
+    input.steering.state === "absent" &&
+    input.approval.state === "absent"
+  ) {
+    return "absent";
+  }
+  return "mismatch";
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}

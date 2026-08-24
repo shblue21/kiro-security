@@ -1,0 +1,83 @@
+{
+  "name": "kiro-security-power",
+  "displayName": "Kiro Security Power",
+  "description": "A Kiro-native security workbench rebuilt from the Codex Security 0.1.11 architecture.",
+  "version": "0.0.1",
+  "publisher": "kiro-security-power",
+  "private": true,
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "extensionKind": [
+    "workspace"
+  ],
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:kiroSecurity.setup",
+    "onCommand:kiroSecurity.openSetup"
+  ],
+  "main": "./out/packages/extension/src/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "kiroSecurity",
+          "title": "Kiro Security",
+          "icon": "media/security.svg"
+        }
+      ]
+    },
+    "views": {
+      "kiroSecurity": [
+        {
+          "id": "kiroSecurity.setup",
+          "name": "Kiro Security Power",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "kiroSecurity.openSetup",
+        "title": "Kiro Security: Open Setup"
+      }
+    ],
+    "configuration": {
+      "title": "Kiro Security",
+      "properties": {
+        "kiroSecurity.pythonPath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Absolute path to a Python 3.9+ executable used by the Kiro Security Power MCP server."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "clean": "node scripts/clean.mjs",
+    "compile": "tsc -p tsconfig.json",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "package:list": "vsce ls",
+    "package:vsix": "npm run clean && npm run compile && node scripts/prepare-dist.mjs && vsce package --allow-missing-repository --out dist/kiro-security-power.vsix",
+    "test:node": "node --test tests/approval.test.mjs tests/contracts.test.mjs tests/hook.test.mjs tests/integration-files.test.mjs tests/packaging.test.mjs tests/runtime.test.mjs tests/view.test.mjs",
+    "test:python": "python3 -m unittest discover -s engine/tests -v",
+    "test": "npm run clean && npm run compile && npm run lint && npm run test:node && npm run test:python && npm run package:list"
+  },
+  "dependencies": {
+    "jsonc-parser": "^3.3.1",
+    "proper-lockfile": "4.1.2",
+    "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/proper-lockfile": "4.1.4",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.9.2",
+    "typescript": "^5.7.0"
+  }
+}
