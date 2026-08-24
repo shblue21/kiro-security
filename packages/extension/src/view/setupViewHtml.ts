@@ -343,21 +343,11 @@ function renderRecoveryControls(
   request: RecoveryRequestProjection | undefined,
   sourceActionReady: boolean,
 ): string {
+  if (!request || request.status === "delivered" || request.status === "canceled") {
+    return "";
+  }
   if (!sourceActionReady) {
     return '<span class="request-state">Open this repository in the current workspace to resume in chat.</span>';
-  }
-  if (!request) {
-    return `<button class="primary" data-command="createRecovery" data-scan-id="${escapeHtml(
-      scanId,
-    )}">Resume in chat</button>`;
-  }
-  if (request.status === "delivered" || request.status === "canceled") {
-    return `<span class="request-state">Latest resume request ${escapeHtml(
-      requestStateLabel(request.status),
-    )} · v${request.version}</span>
-      <button class="primary" data-command="createRecovery" data-scan-id="${escapeHtml(
-        scanId,
-      )}">Resume in chat</button>`;
   }
   return `<span class="request-state">Resume request ${escapeHtml(
     requestStateLabel(request.status),
