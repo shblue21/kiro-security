@@ -14,7 +14,9 @@ Run repository security scans from [Kiro](https://kiro.dev) Chat and review vali
 - **Review validated findings** — Follow progress, filter and triage findings, and continue remediation or tracking work in Kiro Chat.
 - **Keep useful outputs** — Open reports and export finalized results as JSON, SARIF, or CSV.
 
-<!-- Add a sanitized Findings screenshot here: media/marketplace-findings.png -->
+![Kiro Security dashboard](media/marketplace-dashboard.png)
+
+![Validated security findings](media/marketplace-findings.png)
 
 ## Quick start
 

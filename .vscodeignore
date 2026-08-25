@@ -34,6 +34,7 @@ scripts/**
 package-lock.json
 tsconfig.json
 image*.png
+media/marketplace-*.png
 kiro-security-*.html
 kiro-security-*.html.artifact.json
 marketplace-readme-plan.md
