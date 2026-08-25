@@ -1,0 +1,76 @@
+name: Publish to Open VSX
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish (for example, v0.0.1)
+        required: true
+        default: v0.0.1
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openvsx-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify release version
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+          if [[ "${RELEASE_TAG}" != "v${PACKAGE_VERSION}" ]]; then
+            echo "Tag ${RELEASE_TAG} does not match package version ${PACKAGE_VERSION}" >&2
+            exit 1
+          fi
+
+      - name: Test
+        run: npm test
+
+      - name: Package VSIX
+        run: npm run package:vsix
+
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: kiro-security-${{ inputs.tag }}
+          path: dist/kiro-security.vsix
+          if-no-files-found: error
+
+      - name: Publish to Open VSX
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        shell: bash
+        run: |
+          if [[ -z "${OVSX_PAT}" ]]; then
+            echo "OVSX_PAT is not configured" >&2
+            exit 1
+          fi
+          npx --yes ovsx@1.1.1 publish dist/kiro-security.vsix

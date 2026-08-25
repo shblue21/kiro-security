@@ -1,4 +1,5 @@
 .git/**
+.github/**
 .gitignore
 .kiro/**
 .od-skills/**
@@ -35,3 +36,4 @@ tsconfig.json
 image*.png
 kiro-security-*.html
 kiro-security-*.html.artifact.json
+marketplace-readme-plan.md
