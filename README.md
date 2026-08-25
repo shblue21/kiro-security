@@ -6,7 +6,7 @@ Run repository security scans from [Kiro](https://kiro.dev) Chat and review vali
 
 > Start in chat. Track progress, inspect findings, and continue the work without leaving Kiro.
 
-<!-- Add a new Kiro Security screenshot here after the renamed extension is installed. -->
+![Kiro Security connected and ready to scan](media/marketplace-setup.png)
 
 ## What you can do
 
