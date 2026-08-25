@@ -27,7 +27,7 @@ export function documentStart(cspDirectives: readonly string[]): string {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="Content-Security-Policy" content="${cspDirectives.join("; ")}">
-  <title>Kiro Security Power</title>
+  <title>Kiro Security</title>
   <style>${setupStyles()}</style>
 </head>`;
 }
@@ -65,7 +65,7 @@ export function renderSetupHtml(input: {
 <body>
   <header class="topbar" data-od-id="setup-topbar">
     <div class="brand-lockup">
-      <h1>Kiro Security Power</h1>
+      <h1>Kiro Security</h1>
     </div>
     <button class="icon-button" data-command="refresh" title="Refresh status" aria-label="Refresh status"><span aria-hidden="true">↻</span></button>
   </header>
@@ -97,7 +97,7 @@ export function renderSetupHtml(input: {
         )}</span>
       </div>
 
-      <p class="connection-note">Available to this user in every Kiro Chat. No Agent or Power selection.</p>
+      <p class="connection-note">Available to this user in every Kiro Chat. No custom Agent required.</p>
 
       ${
         input.integration.state === "absent" || input.integration.state === "mismatch"

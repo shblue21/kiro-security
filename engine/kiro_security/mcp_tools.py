@@ -7,7 +7,7 @@ from .errors import WorkbenchError
 from .models import DiffTarget, WorkspaceSetup
 from .workbench import Workbench
 
-SERVER_NAME = "kiro-security-power"
+SERVER_NAME = "kiro-security"
 SERVER_VERSION = "0.0.1"
 
 

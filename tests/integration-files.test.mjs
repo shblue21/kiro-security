@@ -27,13 +27,13 @@ test("extension foundation uses one external global workbench boundary", () => {
   assert.doesNotMatch(foundation, /workspaceFolders|storageUri/);
 });
 
-test("auto-inclusion steering owns normal-chat orchestration without a Power entry point", () => {
-  const steering = readFileSync("steering/kiro-security-power.md", "utf8");
+test("auto-inclusion steering owns normal-chat orchestration without a custom Agent entry point", () => {
+  const steering = readFileSync("steering/kiro-security.md", "utf8");
   assert.match(steering, /inclusion: auto/);
   assert.match(steering, /Activate only when the current user asks to execute/);
   assert.match(steering, /ordinary Kiro\s+Agent chat/);
   assert.match(steering, /The VSIX and direct\s+`kiro_security_\*` MCP tools own workspace/);
-  assert.match(steering, /Never create or require `\.kiro\/security-power`/);
+  assert.match(steering, /Never create or require `\.kiro\/security`/);
   assert.match(steering, /Use direct `kiro_security_\*` MCP tools only for Kiro Security workspace/);
   assert.match(steering, /Use Kiro's native read, search, directory, terminal, and context-gathering\s+tools to inspect the target repository/);
   assert.doesNotMatch(steering, /Use only direct MCP tools whose names begin/);
@@ -93,8 +93,8 @@ test("auto-inclusion steering owns normal-chat orchestration without a Power ent
   );
   assert.doesNotMatch(steering, /^## (Threat-model|Validation|Attack-path) phase/m);
   assert.doesNotMatch(steering, /^## (Standard|Diff|Deep) discovery/m);
-  assert.equal(existsSync("powers/kiro-security-power/POWER.md"), false);
-  assert.equal(existsSync("powers/kiro-security-power/mcp.json"), false);
+  assert.equal(existsSync("powers/kiro-security/POWER.md"), false);
+  assert.equal(existsSync("powers/kiro-security/mcp.json"), false);
 });
 
 test("steering install refreshes its changed dedicated file", async () => {
@@ -104,7 +104,7 @@ test("steering install refreshes its changed dedicated file", async () => {
   const temporary = await mkdtemp(join(tmpdir(), "kiro-steering-files-test-"));
   try {
     const sourcePath = join(temporary, "packaged.md");
-    const steeringPath = join(temporary, ".kiro", "steering", "kiro-security-power.md");
+    const steeringPath = join(temporary, ".kiro", "steering", "kiro-security.md");
     await writeFile(sourcePath, "current steering\n", "utf8");
 
     assert.equal((await inspectSteering({ sourcePath, steeringPath })).state, "absent");
@@ -247,7 +247,7 @@ test("MCP registration converges same-installation stale keys only", async () =>
     [otherRootKey]: otherRoot,
     [markerOnlyKey]: {
       command: "custom",
-      env: { KIRO_SECURITY_MANAGED_BY: "kiro-security-power-vsix" },
+      env: { KIRO_SECURITY_MANAGED_BY: "kiro-security-vsix" },
     },
     user: { command: "user" },
   }, null, 2)}

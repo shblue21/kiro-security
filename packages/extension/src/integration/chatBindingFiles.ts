@@ -11,10 +11,10 @@ import {
   writeDedicatedFile,
 } from "./localFileSafety";
 
-export const HOOK_FILE_NAME = "kiro-security-power.json";
-export const HOOK_NAME = "Kiro Security Power chat identity bridge";
+export const HOOK_FILE_NAME = "kiro-security.json";
+export const HOOK_NAME = "Kiro Security chat identity bridge";
 export const HOOK_DESCRIPTION =
-  "Managed by the Kiro Security Power VSIX; matches only its direct MCP tools.";
+  "Managed by the Kiro Security VSIX; matches only its direct MCP tools.";
 export const HOOK_BRIDGE_FILE_NAME = "kiro_security_hook_bridge.py";
 export const MAX_HOOK_FILE_BYTES = 1024 * 1024;
 

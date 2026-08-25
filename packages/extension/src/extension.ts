@@ -9,7 +9,7 @@ import { renderUnsupportedHostHtml } from "./view/unsupportedHostView";
 export async function activate(
   context: vscode.ExtensionContext,
 ): Promise<void> {
-  const output = vscode.window.createOutputChannel("Kiro Security Power");
+  const output = vscode.window.createOutputChannel("Kiro Security");
   context.subscriptions.push(output);
   context.subscriptions.push(
     vscode.commands.registerCommand("kiroSecurity.openSetup", async () => {

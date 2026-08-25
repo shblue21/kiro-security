@@ -8,7 +8,7 @@ import {
   TEST_SERVER_KEY,
 } from "./support.mjs";
 
-test("setup view connects steering, direct MCP, and Hook without Agent or Power import", () => {
+test("setup view connects steering, direct MCP, and Hook without a custom Agent import", () => {
   const setup = readFileSync("packages/extension/src/view/setupView.ts", "utf8");
   const setupHtml = readFileSync(
     "packages/extension/src/view/setupViewHtml.ts",
@@ -288,7 +288,7 @@ test("Dashboard and Findings render exact recovery and follow-up controls", () =
     hook: {
       state: "ready",
       registrationState: "installed",
-      hookPath: "/home/.kiro/hooks/kiro-security-power.json",
+      hookPath: "/home/.kiro/hooks/kiro-security.json",
       bridgePath: "/global/hook.py",
       detail: "ready",
     },
@@ -300,9 +300,9 @@ test("Dashboard and Findings render exact recovery and follow-up controls", () =
       detail: "ready",
       path: "/home/.kiro/settings/permissions.yaml",
     },
-    hookPath: "/home/.kiro/hooks/kiro-security-power.json",
+    hookPath: "/home/.kiro/hooks/kiro-security.json",
     mcpPath: "/home/.kiro/settings/mcp.json",
-    steeringPath: "/home/.kiro/steering/kiro-security-power.md",
+    steeringPath: "/home/.kiro/steering/kiro-security.md",
     runtimeRoot: "/global/runtime",
   };
   const renderInput = {

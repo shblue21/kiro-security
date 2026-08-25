@@ -40,7 +40,7 @@ import { withSharedFileLock } from "./sharedFileLock";
 
 const MAX_CONFIG_BYTES = 1024 * 1024;
 
-export const STEERING_FILE_NAME = "kiro-security-power.md";
+export const STEERING_FILE_NAME = "kiro-security.md";
 export const INTEGRATION_IDENTITY_FILE_NAME = "integration-identity.json";
 
 export {

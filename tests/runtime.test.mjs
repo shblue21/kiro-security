@@ -59,7 +59,7 @@ test("direct runtime is materialized in global storage and launches the MCP serv
       ].join("\n"),
     });
     const responses = transcript.trim().split(/\r?\n/).map((line) => JSON.parse(line));
-    assert.equal(responses[0].result.serverInfo.name, "kiro-security-power");
+    assert.equal(responses[0].result.serverInfo.name, "kiro-security");
     assert.ok(responses[1].result.tools.some((tool) => tool.name === "kiro_security_start_scan"));
     const dashboard = await new WorkbenchAdminClient(
       python,

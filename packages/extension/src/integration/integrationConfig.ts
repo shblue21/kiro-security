@@ -1,4 +1,4 @@
-export const MCP_MANAGED_MARKER = "kiro-security-power-vsix";
+export const MCP_MANAGED_MARKER = "kiro-security-vsix";
 export const MCP_SERVER_KEY_PATTERN = /^ksp_[a-z2-7]{20}$/;
 
 export const MCP_TOOL_NAMES = [

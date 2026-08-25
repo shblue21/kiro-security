@@ -87,7 +87,7 @@ class McpServer:
                 "capabilities": {"tools": {"listChanged": False}},
                 "serverInfo": {
                     "name": SERVER_NAME,
-                    "title": "Kiro Security Power",
+                    "title": "Kiro Security",
                     "version": SERVER_VERSION,
                 },
                 "instructions": (

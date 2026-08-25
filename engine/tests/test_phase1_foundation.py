@@ -109,7 +109,7 @@ class PhaseOneFoundationTests(unittest.TestCase):
         database_path = self.workbench.database.path
         self.assertEqual(database_path, self.state_root / "workbench.sqlite3")
         self.assertEqual(stat.S_IMODE(database_path.stat().st_mode), 0o600)
-        self.assertFalse((self.root / ".kiro" / "security-power").exists())
+        self.assertFalse((self.root / ".kiro" / "security").exists())
 
         connection = sqlite3.connect(str(database_path))
         try:
@@ -350,7 +350,7 @@ class PhaseOneFoundationTests(unittest.TestCase):
             self.owner_session_hash,
         )
         self.assertTrue(Path(started["workspace"]["currentScan"]["scanDir"]).is_dir())
-        self.assertFalse((self.root / ".kiro" / "security-power").exists())
+        self.assertFalse((self.root / ".kiro" / "security").exists())
 
     def test_working_tree_diff_rejects_content_drift(self):
         (self.root / "src" / "app.py").write_text("print('first change')\n", encoding="utf-8")

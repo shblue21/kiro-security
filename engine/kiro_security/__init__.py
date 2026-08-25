@@ -1,4 +1,4 @@
-"""Deterministic foundation for Kiro Security Power."""
+"""Deterministic foundation for Kiro Security."""
 
 from .models import DiffTarget, WorkspaceSetup
 from .workbench import Workbench

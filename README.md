@@ -1,48 +1,38 @@
-# Kiro Security Power
+# Kiro Security
 
-A security workbench for [Kiro](https://kiro.dev). Run Standard, Diff, and Deep security scans of your repositories from an ordinary Kiro Agent chat, and manage the results — findings, triage, remediation, and exports — from a dedicated side panel.
+Run repository security scans from [Kiro](https://kiro.dev) Chat and review validated findings in a dedicated workbench.
 
-> **Alpha.** This is an early release. Contracts, schemas, and UI may change between versions, and scan state from one version may not carry over to the next.
+**Alpha** · Apache-2.0
 
-## What it does
+> Start in chat. Track progress, inspect findings, and continue the work without leaving Kiro.
 
-- **Three scan modes** — `standard` (full repository or scoped directory), `diff` (a specific Git-backed change), and `deep` (multi-round, multi-worker discovery for higher coverage).
-- **Agent-driven analysis, engine-owned state** — your Kiro Agent performs the semantic security analysis in chat, while a local Python engine owns workspaces, scan lifecycle, target snapshots, and sealed canonical results in a single SQLite workbench. Progress display never overrides the verified result.
-- **Durable scans** — scans survive process or chat loss. Resume, recover, or cancel them explicitly from a new Agent chat; the side panel tracks lifecycle and recovery requests.
-- **Findings workflow** — browse findings in the panel, then hand off exact triage, fix, and tracking requests back to the Agent.
-- **Exports** — completed scans export to SARIF 2.1.0 and CSV, derived from the sealed canonical JSON.
+<!-- Add a new Kiro Security screenshot here after the renamed extension is installed. -->
 
-## Requirements
+## What you can do
 
-- **Kiro** — the extension activates only in a Kiro host. In other VS Code-compatible editors it shows read-only guidance and stays inert.
-- **Python 3.9+** — auto-detected from `python3`/`python` on your PATH, or set `kiroSecurity.pythonPath` explicitly.
+- **Scan from chat** — Run Standard repository scans, Diff reviews for Git changes, or deeper multi-pass reviews.
+- **Review validated findings** — Follow progress, filter and triage findings, and continue remediation or tracking work in Kiro Chat.
+- **Keep useful outputs** — Open reports and export finalized results as JSON, SARIF, or CSV.
 
-## Getting started
+<!-- Add a sanitized Findings screenshot here: media/marketplace-findings.png -->
 
-1. Install the extension and open the **Kiro Security** icon in the activity bar (the setup view opens automatically on first run).
-2. Review and approve the one-time setup. This is explicit and user-approved — nothing is written until you confirm.
-3. Ask your Kiro Agent in a normal chat, e.g. *"Run a security scan of this repository"* or *"Review this change for security issues."*
-4. Follow progress, browse findings, and export results from the side panel.
+## Quick start
 
-## What setup changes on your machine
+1. Install the extension and open **Kiro Security** from the activity bar.
+2. Approve the one-time Kiro Chat connection.
+3. Ask Kiro Chat: `Scan this repository for security vulnerabilities.`
+4. Review the result in **Dashboard** and **Findings**.
 
-Setup prepares a self-contained runtime under the extension's own global storage and registers exactly these user-level files, preserving your existing entries and comments:
+## Requirements and control
 
-- `~/.kiro/settings/mcp.json` — one MCP server entry with a per-installation key
-- `~/.kiro/steering/kiro-security-power.md` — auto-inclusion steering that defines the scan workflows
-- `~/.kiro/hooks/kiro-security-power.json` — a hook matching only this extension's MCP tools, used to attest that calls come from your real chat session
-- Kiro trust permissions — scan **start** and **cancel** always ask for approval; routine reads and progress updates are allowed
+- [Kiro](https://kiro.dev)
+- Python 3.9 or newer
+- Optional setting: `kiroSecurity.pythonPath` for a specific Python executable; leave it empty to auto-detect.
 
-Unrelated user configuration is never overwritten or removed. All workspace and scan state lives locally in the extension's global storage; the extension itself sends nothing anywhere — analysis happens through your own Kiro Agent.
+Setup preserves your existing Kiro configuration. Scan state and artifacts stay in extension global storage, outside the target repository, and the extension does not send them to an external service. Starting or canceling a scan always requires your approval.
 
-## Configuration
+## Project status
 
-| Setting | Description |
-| --- | --- |
-| `kiroSecurity.pythonPath` | Absolute path to a Python 3.9+ executable used by the MCP engine. Leave empty to auto-detect. |
+This is an early Alpha release. Features and saved scan data may change between versions.
 
-## Provenance and license
-
-Kiro Security Power is an independent open-source reimplementation of the workspace/scan-lifecycle workbench architecture observed in Codex Security 0.1.11 — a pattern shared by many security tools. No source, runtime bundles, or assets from that proprietary reference implementation are included; see `LICENSE-NOTICE.md` in this package. This is not an official OpenAI, Codex, or Kiro product.
-
-Licensed under the Apache License 2.0 — see the packaged `LICENSE` file.
+Kiro Security is an independent open-source project, not an official OpenAI, Codex, or Kiro product. See [LICENSE-NOTICE.md](LICENSE-NOTICE.md) for provenance and [LICENSE](LICENSE) for the Apache License 2.0.

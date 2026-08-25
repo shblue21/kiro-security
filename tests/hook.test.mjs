@@ -47,7 +47,7 @@ test("Hook registration matches only the exact direct MCP tool IDs", () => {
     assert.match(toolId, /^mcp_ksp_aaaaaaaaaaaaaaaaaaaa_/);
     assert.equal(new RegExp(contract.toolMatcher).test(toolId), true);
   }
-  assert.equal(new RegExp(contract.toolMatcher).test("kiro_powers"), false);
+  assert.equal(new RegExp(contract.toolMatcher).test("other_mcp_tool"), false);
   assert.equal(new RegExp(contract.toolMatcher).test("fs_read"), false);
   assert.match(document.hooks[0].action.command, /\/runtime\/python3/);
   assert.match(document.hooks[0].action.command, /\/global\/storage\/runtime\/hook-bridge/);
