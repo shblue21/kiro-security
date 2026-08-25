@@ -31,6 +31,8 @@ Run repository security scans from [Kiro](https://kiro.dev) Chat and review vali
 
 Setup preserves your existing Kiro configuration. Scan state and artifacts stay in extension global storage, outside the target repository, and the extension does not send them to an external service. Starting or canceling a scan always requires your approval.
 
+Uninstalling the extension removes the Kiro Chat integration, and Kiro deletes its extension storage after restart.
+
 ## Project status
 
 This is an early Alpha release. Features and saved scan data may change between versions.

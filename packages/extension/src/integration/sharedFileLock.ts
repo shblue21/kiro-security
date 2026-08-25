@@ -7,6 +7,7 @@ export async function withSharedFileLock<T>(
   filePath: string,
   label: string,
   operation: () => Promise<T>,
+  options: { readonly retries?: number } = {},
 ): Promise<T> {
   const directory = path.dirname(filePath);
   await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -19,7 +20,7 @@ export async function withSharedFileLock<T>(
   try {
     release = await lock(lockTarget, {
       realpath: false,
-      retries: 3,
+      retries: options.retries ?? 3,
     });
   } catch (error) {
     if (

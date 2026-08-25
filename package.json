@@ -66,6 +66,7 @@
     "clean": "node scripts/clean.mjs",
     "compile": "tsc -p tsconfig.json",
     "lint": "tsc -p tsconfig.json --noEmit",
+    "vscode:uninstall": "node ./out/packages/extension/src/uninstall.js",
     "package:vsix": "npm run clean && npm run compile && node scripts/prepare-dist.mjs && vsce package --allow-missing-repository --out dist/kiro-security.vsix",
     "test:node": "node --test tests/approval.test.mjs tests/contracts.test.mjs tests/hook.test.mjs tests/integration-files.test.mjs tests/runtime.test.mjs tests/view.test.mjs",
     "test:python": "python3 -m unittest discover -s engine/tests -v",

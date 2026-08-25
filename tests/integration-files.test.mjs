@@ -169,6 +169,7 @@ test("MCP registration install preserves unrelated JSONC entries", async () => {
   const {
     inspectMcpRegistration,
     installMcpRegistration,
+    removeManagedMcpRegistrations,
   } = require("../out/packages/extension/src/integration/integrationFiles.js");
   const temporary = await mkdtemp(join(tmpdir(), "kiro-mcp-config-test-"));
   try {
@@ -190,6 +191,11 @@ test("MCP registration install preserves unrelated JSONC entries", async () => {
     assert.match(installed, /"other"/);
     assert.match(installed, new RegExp(`"${TEST_SERVER_KEY}"`));
     assert.equal((await inspectMcpRegistration({ mcpPath, serverKey: TEST_SERVER_KEY, expected })).state, "installed");
+    assert.equal((await removeManagedMcpRegistrations({ mcpPath })).changed, true);
+    const removed = readFileSync(mcpPath, "utf8");
+    assert.match(removed, /keep this server/);
+    assert.match(removed, /"other"/);
+    assert.doesNotMatch(removed, new RegExp(`"${TEST_SERVER_KEY}"`));
     if (process.platform !== "win32") {
       assert.equal((await stat(join(temporary, ".kiro", "settings"))).mode & 0o777, 0o755);
       assert.equal((await stat(mcpPath)).mode & 0o777, 0o600);

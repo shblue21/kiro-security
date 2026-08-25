@@ -281,6 +281,51 @@ async function installMcpRegistrationLocked(input: {
   return { changed: true, removedServerKeys: staleServerKeys };
 }
 
+export async function removeManagedMcpRegistrations(input: {
+  readonly mcpPath: string;
+}): Promise<IntegrationMutation> {
+  return withSharedFileLock(
+    input.mcpPath,
+    "The Kiro user MCP configuration",
+    async () => {
+      const snapshot = await readMcpDocument(input.mcpPath);
+      if (snapshot.kind === "absent") {
+        return { changed: false };
+      }
+      if (snapshot.kind === "unsafe") {
+        throw new Error(snapshot.detail);
+      }
+      const parsed = snapshot.parsed as { mcpServers?: unknown };
+      const servers = parsed.mcpServers as
+        | Readonly<Record<string, unknown>>
+        | undefined;
+      const removedServerKeys = Object.entries(servers ?? {})
+        .filter(
+          ([key, value]) =>
+            MCP_SERVER_KEY_PATTERN.test(key) &&
+            isManagedServerEntry(value),
+        )
+        .map(([key]) => key)
+        .sort();
+      if (removedServerKeys.length === 0) {
+        return { changed: false };
+      }
+      let updated = snapshot.contents;
+      for (const serverKey of removedServerKeys) {
+        updated = applyEdits(
+          updated,
+          modify(updated, ["mcpServers", serverKey], undefined, {
+            formattingOptions: { insertSpaces: true, tabSize: 2, eol: "\n" },
+          }),
+        );
+      }
+      await writeSharedConfig(input.mcpPath, snapshot, updated);
+      return { changed: true };
+    },
+    { retries: 0 },
+  );
+}
+
 type McpDocument =
   | { readonly kind: "absent" }
   | { readonly kind: "unsafe"; readonly detail: string }
